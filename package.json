@@ -1,0 +1,22 @@
+{
+  "name": "deo-gracias-wifi-system",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Plateforme Déo Gracias Wi-Fi Zone — monorepo (backend, frontend, connector, shared)",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@dg/connector",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dg/shared": "0.1.0"
+  }
+}
