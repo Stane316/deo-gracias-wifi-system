@@ -1,0 +1,21 @@
+# IMP-09 — Configuration Supabase CLI (aucun secret ici).
+# Le project_id réel est posé par `supabase link --project-ref <ref>` (GUIDE-07),
+# exécuté par le propriétaire sur sa machine ; il n'est JAMAIS commité.
+project_id = "PLACEHOLDER-LINK-LOCALE"
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.seed]
+enabled = false   # les seeds arrivent en IMP-10 (0007/0008) — jamais avant validation
+
+[studio]
+enabled = false   # pas de Studio local en Phase 1 (Docker optionnel)
+
+[analytics]
+enabled = false
+
+[functions]
+# Aucune Edge Function en Phase 1 : le backend Fastify (apps/backend) porte l'API.

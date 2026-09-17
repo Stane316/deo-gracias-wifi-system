@@ -34,3 +34,15 @@ docs/           → specs validées, guides terrain, evidence, ADR, décisions
 3. **CI verte obligatoire** avant toute merge/push fonctionnel : typecheck + tests + gitleaks.
 4. **Une implémentation = une unité finie** avec rapport fichier-par-fichier ; pas d'enchaînement sans feu vert explicite du propriétaire.
 5. Le routeur MikroTik existant est un composant produit : aucune écriture hors guides terrain validés (contrat Mikmon : `docs/infrastructure/mikhmon-contract.md`).
+
+## Base de données locale (IMP-09)
+
+Les migrations vivent dans `supabase/migrations/` (up) et `supabase/down/` (rollback).
+Deux façons de les appliquer :
+
+1. **Sans Docker** (CI et minimal) : un Postgres 16/17 quelconque +
+   `DATABASE_URL=postgres://… tools/db-migrate.sh up|down|reset|smoke`.
+2. **Supabase CLI** (optionnel, Docker requis) : `supabase start` puis `supabase db reset`.
+
+Aucun secret de projet cloud dans le repo : le lien vers le projet Supabase réel se fait
+sur la machine du propriétaire via `supabase link` (voir `docs/field-guides/GUIDE-07-SUPABASE-PROJET.md`).

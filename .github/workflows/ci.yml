@@ -22,6 +22,42 @@ jobs:
       - name: Tests
         run: npm test
 
+  db-migrations:
+    # IMP-09 : migrations SQL testées sur Postgres éphémère (service container),
+    # sans Docker ni CLI Supabase, sans aucun secret projet.
+    name: Migrations Postgres (up/smoke/down/up)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["16", "17"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: postgres   # credentielle jetable du container éphémère CI
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Migrations up
+        run: bash tools/db-migrate.sh up
+      - name: Smoke (contrat de schéma)
+        run: bash tools/db-migrate.sh smoke
+      - name: Down (réversibilité)
+        run: bash tools/db-migrate.sh down
+      - name: Up à nouveau (idempotence du cycle)
+        run: |
+          bash tools/db-migrate.sh up
+          bash tools/db-migrate.sh smoke
+
   secrets-scan:
     name: Gitleaks (secrets)
     runs-on: ubuntu-latest

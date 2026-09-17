@@ -77,3 +77,6 @@ env/
 
 # Supabase local development
 .supabase/
+# Supabase CLI local (IMP-09)
+supabase/.temp/
+supabase/.branches/
