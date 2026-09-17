@@ -33,7 +33,7 @@
 | Élément | Méthode A — Dashboard SQL Editor | Méthode B — CLI Supabase | Vérification |
 |---|---|---|---|
 | Prérequis | navigateur uniquement | Node 20+, CLI installée, mot de passe base | — |
-| Application 0001→0006 | copier-coller + Run, 6 fois dans l'ordre | `supabase db push` (1 commande) | 14 tables + requêtes §3.4 / `migration list` |
+| Application 0001→0008 | copier-coller + Run, 8 fois dans l'ordre | `supabase db push` (1 commande) | 14 tables + 6 plans + requêtes §3.4 / `migration list` |
 | Historique `supabase_migrations.schema_migrations` | **NON renseigné** → §5 si CLI adoptée plus tard | renseigné automatiquement (versions `0001`…`0006`) | `supabase migration list --linked` |
 | Risque principal | oubli d'un fichier ou de l'ordre | erreur de link (mauvais projet) → vérifier le ref avant push | comparaison ref affiché vs dashboard |
 | Testée par l'agent | non (accès dashboard = vous seul) | **oui** en sandbox : `migration up --db-url` + `migration list --db-url` + idempotence + smoke OK (CLI 2.117.0) | voir §6 |
@@ -46,8 +46,9 @@ comptez réutiliser le CLI plus tard (historique propre) ; la méthode A convien
 
 1. Dashboard → votre projet → menu gauche **SQL Editor** (icône `>_` ; sur certaines versions :
    **Database** → **SQL Editor**).
-2. **Ordre obligatoire 0001 → 0006** (dépendances : les clés étrangères de 0003/0004 pointent
-   vers les tables de 0002). Pour chaque fichier, dans l'ordre :
+2. **Ordre obligatoire = tri des noms de fichiers (actuellement 0001 → 0008)**
+   (dépendances : les clés étrangères de 0003/0004 pointent vers les tables de 0002 ;
+   0007 pose la RLS, 0008 le seed Grille A). Pour chaque fichier, dans l'ordre :
    a. ouvrir le fichier dans le repo (`supabase/migrations/000X_….sql`) ;
    b. copier **l'intégralité** du contenu ;
    c. SQL Editor → **New query** → coller → bouton **Run** (ou Ctrl/Cmd+Entrée) ;
@@ -66,7 +67,10 @@ WHERE table_schema = 'public' AND table_type = 'BASE TABLE';   -- attendu : 14
 SELECT table_name FROM information_schema.tables
 WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY 1;
 
--- 4.3 : garde insert-only (doit produire une ERREUR « insert-only »)
+-- 4.3 : seed Grille A présent (IMP-10)
+SELECT count(*) AS plans_v1 FROM public.plans WHERE version = 1;   -- attendu : 6
+
+-- 4.4 : garde insert-only (doit produire une ERREUR « insert-only »)
 INSERT INTO public.audit_logs(actor, action, entity) VALUES ('system','guide07','test');
 UPDATE public.audit_logs SET actor = 'x';   -- ← ERREUR attendue = preuve que la garde vit
 DELETE FROM public.audit_logs;              -- ← ERREUR attendue aussi
@@ -122,18 +126,20 @@ lancé, le CLI croira les 6 migrations « pending » et échouera (objets déjà
 Solution (une seule fois, dans le repo) :
 
 ```bash
-for v in 0001 0002 0003 0004 0005 0006; do
+for v in 0001 0002 0003 0004 0005 0006 0007 0008; do
   supabase migration repair "$v" --status applied --linked   # ou --db-url "<URL>"
 done
 supabase migration list --linked    # 0001…0006 doivent apparaître appliquées
 ```
 
 (Sous PowerShell : répéter la commande `supabase migration repair 000X --status applied --linked`
-six fois.) Aucune autre action nécessaire si vous restez en méthode A.
+huit fois.) Aucune autre action nécessaire si vous restez en méthode A.
 
 ## 6. Ce qui NE doit PAS être fait maintenant
 
-- Ne pas créer les seeds ni la RLS à la main (migrations 0007/0008 = IMP-10).
+- 0007 (RLS) et 0008 (seed Grille A) sont livrées par IMP-10 : les appliquer comme les
+  autres (méthode A ou B). RLS/seed manuels hors migrations : interdits.
+- Ne pas importer le stock 660 (0009 = IMP-16).
 - Ne pas importer le stock 660 (0009 = IMP-16).
 - Ne pas créer d'Edge Functions (l'API = backend Fastify, blueprint §2).
 - Ne pas exposer la `service_role key` ailleurs que chez l'hébergeur backend futur.

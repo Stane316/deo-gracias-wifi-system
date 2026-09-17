@@ -56,8 +56,12 @@ case "$cmd" in
     psql_run -f "$ROOT/tools/db-smoke.sql"
     echo "OK: smoke"
     ;;
+  rls)
+    psql_run -f "$ROOT/tools/db-rls-tests.sql"
+    echo "OK: rls"
+    ;;
   *)
-    echo "usage: $0 {up|down|reset|smoke}" >&2
+    echo "usage: $0 {up|down|reset|smoke|rls}" >&2
     exit 2
     ;;
 esac

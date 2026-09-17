@@ -57,6 +57,8 @@ jobs:
         run: |
           bash tools/db-migrate.sh up
           bash tools/db-migrate.sh smoke
+      - name: Tests RLS (matrice anon/authenticated/service_role)
+        run: bash tools/db-migrate.sh rls
 
   secrets-scan:
     name: Gitleaks (secrets)

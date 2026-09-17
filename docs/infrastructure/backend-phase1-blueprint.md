@@ -94,6 +94,9 @@ interdit sur `audit_logs`/`payment_events` (immutabilité, doc 06 §41).
 > (IMP-10) ; `0009_seed_stock_mikmon` (IMP-16). Raison : les politiques RLS doivent protéger
 > le schéma AVANT qu'un seed n'existe ; les seeds sont donc décalés de +1/+2 par rapport à
 > la numérotation initiale de ce §3.2. Amendement visible, non silencieux.
+> **LIVRAISON IMP-10 (17/09/2026)** : `0007_rls_policies` + `0008_seed_plans_grille_a` livrés et
+> testés (matrice RLS par rôles via `tools/db-migrate.sh rls` en CI ; test normatif seed-sync
+> dans `packages/shared`). Prochaine migration : `0009_seed_stock_mikmon` (IMP-16).
 
 ### 3.3 RLS (Row Level Security)
 
