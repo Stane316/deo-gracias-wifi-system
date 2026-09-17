@@ -284,15 +284,18 @@ L'expérience doit permettre au client de :
 
 Les offres commerciales officielles sont :
 
-|       Prix | Durée     |
-| ---------: | --------- |
-|   100 FCFA | 5 heures  |
-|   200 FCFA | 12 heures |
-|   300 FCFA | 24 heures |
-|   500 FCFA | 48 heures |
-| 1 000 FCFA | 5 jours   |
-| 4 000 FCFA | 10 jours  |
-| 5 000 FCFA | 40 jours  |
+> **CORRECTION IMP-08 (17/09/2026)** : la grille ci-dessous (dite « Grille B ») était erronée.
+> Remplacée par la **Grille A officielle** (décision propriétaire, docs 03/05 ; confirmée par
+> l'audit routeur du 16/09/2026 et par les vouchers physiques). Aucune offre 5 000 FCFA n'existe.
+
+|       Prix | Accès (durée cumulative) | Validité (fenêtre d'expiration) |
+| ---------: | ------------------------ | ------------------------------- |
+|   100 FCFA | 5 heures                 | 24 heures                       |
+|   200 FCFA | 12 heures                | 24 heures                       |
+|   300 FCFA | 24 heures                | 48 heures                       |
+|   500 FCFA | 72 heures                | 5 jours                         |
+| 1 000 FCFA | 1 semaine                | 10 jours                        |
+| 4 000 FCFA | 1 mois                   | 40 jours                        |
 
 Ces valeurs constituent les offres commerciales de référence.
 
@@ -325,10 +328,13 @@ price = 500
 ou :
 
 ```text
-duration = 48h
+duration = 12h
 ```
 
 comme règle métier autonome.
+
+> **CORRECTION IMP-08 (17/09/2026)** : l'exemple « duration = 48h » provenait de la Grille B
+> erronée ; 48 h n'est désormais plus une durée d'accès mais la **validité** de l'offre 300 FCFA.
 
 ---
 
@@ -2811,11 +2817,25 @@ compréhensible :
 5 heures
 12 heures
 24 heures
-48 heures
-5 jours
-10 jours
-40 jours
+72 heures
+1 semaine
+1 mois
 ```
+
+et, séparément, les validités (fenêtres d'expiration) :
+
+```text
+valable 24 h
+valable 48 h
+valable 5 jours
+valable 10 jours
+valable 40 jours
+```
+
+> **CORRECTION IMP-08 (17/09/2026)** : liste d'affichage rectifiée sur la Grille A
+> (accès) ; les anciennes durées « 48 heures / 5 jours / 10 jours / 40 jours » étaient
+> des erreurs de la Grille B en tant que durées d'accès — elles redeviennent exactes
+> uniquement comme **validités** des offres 300 F / 500 F / 1 000 F / 4 000 F.
 
 Éviter d'exposer :
 
@@ -3443,13 +3463,15 @@ une décision séparée.
 Les éléments encore non résolus de la Phase 6 restent explicitement
 ouverts :
 
+> **MISE À JOUR IMP-08 (17/09/2026, audit IMP-01)** :
+
 ```text
-RADIUS details
-4000 FCFA MikroTik mapping
-5000 FCFA MikroTik mapping
-exact profile configuration
-HotSpot portal files
-Connector write permissions
+RADIUS details                 → RÉSOLU : aucun RADIUS (auth locale)
+4000 FCFA MikroTik mapping     → RÉSOLU : profil 1-MOIS
+5000 FCFA MikroTik mapping     → SANS OBJET : offre inexistante (Grille A)
+exact profile configuration    → RÉSOLU : voir EVIDENCE-IMP01-* + mikhmon-contract.md
+HotSpot portal files           → RÉSOLU : dossier « hotspot DEOGRACIAS », archivé au repo
+Connector write permissions    → OUVERT : test réel en IMP-21/23 (Connector read-only avant)
 ```
 
 La Web Application ne doit pas inventer leur réponse.
@@ -4042,3 +4064,22 @@ La conséquence importante est que **l'agent qui développera le frontend ne dev
 ### Phase 7 est donc maintenant spécifiée.
 
 **Prochaine phase logique : Phase 8 — Admin Dashboard**, mais avant de l'attaquer, la prochaine action de travail devrait être de **valider ce document `08_WEB_APPLICATION.md`**, puis seulement passer à sa mise en œuvre/au document suivant.
+
+---
+
+# Addendum IMP-08 (17/09/2026) — Contexte réseau découvert par l'audit
+
+> Sources : `EVIDENCE-IMP01-*`, `EVIDENCE-IMP05-01`, `docs/decisions/DECISIONS-2026-09-17.md`.
+
+1. **WAN dynamique (DHCP)** : pas d'IP publique fixe garantie ; la Web Application hébergée
+   ne peut JAMAIS joindre le routeur en direct — le Connector (sortant, tunnel) reste le seul
+   pont, conformément au chapitre sécurité de ce document.
+2. **`dns-name = deogracias.bj` (local)** : le portail captif n'est atteignable que depuis le
+   Wi-Fi du site. Les futures pages pré-login doivent rester servies en HTTP walled-garden
+   (les navigateurs modernes en HTTPS-first cassent les portails captifs — constat IMP-03/04,
+   contrainte pour IMP-28/38).
+3. **Portail actif** : dossier `hotspot DEOGRACIAS` (thème Mikhmon), archivé au repo
+   (`docs/infrastructure/portal-legacy/`) ; le dossier `/hotspot` par défaut est inutilisé.
+4. **Grille A confirmée** : la Web Application affichera les couples accès/validité du
+   §10 corrigé ; les vouchers physiques IMP-06 utilisent déjà les mêmes valeurs
+   (cohérence stock physique ↔ digital ↔ routeur).

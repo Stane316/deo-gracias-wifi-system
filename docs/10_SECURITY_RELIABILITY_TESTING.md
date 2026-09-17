@@ -677,14 +677,17 @@ payment initialized
 Le client ne doit pas pouvoir imposer :
 
 ```text
-price = 1000
+price = 500
 ```
 
 pour acheter un plan de :
 
 ```text
-5000 FCFA
+4 000 FCFA
 ```
+
+> **CORRECTION IMP-08 (17/09/2026)** : l'exemple citait une offre « 5000 FCFA » qui n'existe
+> pas dans la Grille A officielle (aucune offre 5 000 FCFA ; voir docs 03/05 et audit 16/09/2026).
 
 ---
 
@@ -2966,3 +2969,19 @@ Enfin, cette phase reste cohérente avec le principe de qualité globale des ré
 
 **Document proposé : `10_SECURITY_RELIABILITY_TESTING.md`**
 **Statut : prêt pour validation de la Phase 9.**
+
+---
+
+# Addendum IMP-08 (17/09/2026) — Invariants vérifiés par l'audit (base de tests)
+
+> L'audit read-only IMP-01/02 (16/09/2026) transforme plusieurs hypothèses de ce document
+> en invariants vérifiés, réutilisables comme assertions de tests (IMP-21, IMP-24, W2) :
+
+| Invariant vérifié | Valeur | Test associé |
+|---|---|---|
+| Mécanisme d'expiration | limit-uptime cumulatif + commentaire-date + 7 moniteurs (~2,5 min) | réconciliation tickets ↔ routeur (IMP-24) |
+| `shared-users` | 1 sur tous les profils | test de non-régression profils |
+| RADIUS | aucun (auth locale) | test d'absence de dérive `/radius` |
+| API RouterOS | restreinte au LAN (IMP-03) | sonde d'exposition WAN (IMP-38) |
+| Stock digital 17/09 | 660 tickets ; total routeur attendu ≈ 4 815 | garde-fou réconciliation (manifeste IMP-06) |
+| Offre 5 000 FCFA | inexistante (Grille A) | test normatif `packages/shared/src/offers.test.ts` (déjà vert) |

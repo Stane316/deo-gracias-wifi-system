@@ -567,14 +567,16 @@ Avant ouverture publique, vérifier :
 
 ### Plans
 
+> **CORRECTION IMP-08 (17/09/2026)** : checklist rectifiée sur la **Grille A officielle**
+> (accès / validité ; aucune offre 5 000 FCFA).
+
 ```text
-100 FCFA → 5 HOURS
-200 FCFA → 12 HOURS
-300 FCFA → 24 HOURS
-500 FCFA → 48 HOURS
-1,000 FCFA → 5 DAYS
-4,000 FCFA → 10 DAYS
-5,000 FCFA → 40 DAYS
+100 FCFA  → ACCESS 5 HOURS   / VALIDITY 24 HOURS
+200 FCFA  → ACCESS 12 HOURS  / VALIDITY 24 HOURS
+300 FCFA  → ACCESS 24 HOURS  / VALIDITY 48 HOURS
+500 FCFA  → ACCESS 72 HOURS  / VALIDITY 5 DAYS
+1,000 FCFA → ACCESS 1 WEEK   / VALIDITY 10 DAYS
+4,000 FCFA → ACCESS 1 MONTH  / VALIDITY 40 DAYS
 ```
 
 Ces valeurs représentent la source commerciale définie pour le système.
@@ -3064,3 +3066,29 @@ Autre point important : les principes Digital Experience restent présents **uni
 ```
 
 **La Phase 10 est maintenant spécifiée.** La prochaine étape logique est sa **validation formelle**, exactement comme nous venons de le faire pour la Phase 9.
+
+---
+
+# Addendum IMP-08 (17/09/2026) — Relevé physique du site (IMP-05) et préparation lot W2
+
+> Sources : `EVIDENCE-IMP05-01`, photos `PHYS-2026-09-17-01…07`, décision D5.
+
+## Relevé physique (17/09/2026, réalisé par le propriétaire avec guide pas-à-pas)
+
+```text
+ONT fibre (SC/APC) → box opérateur « HomeBoard » (192.168.100.1) → RB951 ether1
+RB951 ports 2 et 3 → injecteurs PoE Mercury → 2 relais Wi-Fi
+RB951 ports 4 et 5 → LIBRES (réserve d'extension)
+Onduleur Mercury Maverick 650VA → ONT + box + RB951 + PC + 2 injecteurs PoE
+WAN : DHCP client dynamique sur ether1
+```
+
+Conséquences opérations :
+
+1. **Aucun hôte on-site permanent** (le PC unique du propriétaire l'accompagne) → toutes les
+   opérations physiques restantes sont regroupées dans le **lot W2**.
+2. **Zone onduleur validée** : capacité 650VA dimensionnée pour le parc actuel ; toute
+   extension (ports 4/5) doit être re-vérifiée contre cette capacité.
+3. **WAN dynamique** : le plan de secours connexion (failover/reconnexion) ne peut pas
+   s'appuyer sur une IP publique fixe ; monitoring = sondes sortantes (IMP-38).
+4. **OD-1 clos sans hôte** (décision D5) : la supervision distante couvre le besoin.

@@ -501,16 +501,20 @@ Ils ne bloquent cependant pas la Phase 7.
 
 Les profils commerciaux actuellement observés comprennent :
 
-| Prix observé | Profil MikroTik observé |
-| -----------: | ----------------------- |
-|      50 FCFA | `1-HEURES`              |
-|     100 FCFA | `5-HEURES`              |
-|     200 FCFA | `12-HEURES`             |
-|     300 FCFA | `24-HEURES`             |
-|     500 FCFA | `72-HEURES`             |
-|    1000 FCFA | `1-SEMAINE`             |
-|    4000 FCFA | nom exact non confirmé  |
-|    5000 FCFA | profil non confirmé     |
+> **CORRECTION IMP-08 (17/09/2026)** : table rectifiée d'après l'audit read-only du 16/09/2026
+> (`docs/infrastructure/evidence/EVIDENCE-IMP01-*`). Anciennes valeurs erronées : `1-HEURES`
+> (lire `1-HEURE`), « 4000 non confirmé » (lire `1-MOIS`), ligne 5000 FCFA (offre inexistante,
+> supprimée). Historique Git conservé.
+
+| Prix observé | Profil MikroTik observé (audit 16/09/2026) |
+| -----------: | ------------------------------------------ |
+|      50 FCFA | `1-HEURE` (legacy, 0 utilisateur, hors Grille A) |
+|     100 FCFA | `5-HEURES`                                 |
+|     200 FCFA | `12-HEURES`                                |
+|     300 FCFA | `24-HEURES`                                |
+|     500 FCFA | `72-HEURES`                                |
+|    1000 FCFA | `1-SEMAINE`                                |
+|    4000 FCFA | `1-MOIS` (confirmé par l'audit, P2 clos)   |
 
 Profils non commerciaux observés :
 
@@ -528,29 +532,38 @@ source de vérité des offres commerciales.
 
 Les offres commerciales officielles sont :
 
-|       Prix | Durée commerciale |
-| ---------: | ----------------- |
-|   100 FCFA | 5 heures          |
-|   200 FCFA | 12 heures         |
-|   300 FCFA | 24 heures         |
-|   500 FCFA | 48 heures         |
-| 1 000 FCFA | 5 jours           |
-| 4 000 FCFA | 10 jours          |
-| 5 000 FCFA | 40 jours          |
+> **CORRECTION IMP-08 (17/09/2026)** : grille erronée remplacée par la **Grille A officielle**
+> (accès / validité). L'audit du 16/09/2026 a démontré que les profils MikroTik appliquent
+> EXACTEMENT la Grille A (limit-uptime = accès ; moniteurs = validité) : il n'existe plus de
+> divergence commercial ↔ routeur sur les 6 offres.
+
+|       Prix | Accès (cumulatif) | Validité |
+| ---------: | ----------------- | -------- |
+|   100 FCFA | 5 heures          | 24 heures |
+|   200 FCFA | 12 heures         | 24 heures |
+|   300 FCFA | 24 heures         | 48 heures |
+|   500 FCFA | 72 heures         | 5 jours   |
+| 1 000 FCFA | 1 semaine         | 10 jours  |
+| 4 000 FCFA | 1 mois            | 40 jours  |
 
 Des divergences existent actuellement entre les profils MikroTik
 et les offres commerciales.
 
 Exemples :
 
+> **CORRECTION IMP-08** : exemples historiques conservés pour mémoire mais **résolus** :
+> l'audit a établi que le profil `72-HEURES` porte bien un accès 72 h (limit-uptime 3d)
+> avec validité 5 j, et `1-SEMAINE` un accès 7 j avec validité 10 j. Les valeurs « 48 h »
+> et « 5 jours » ci-dessous étaient des erreurs de la Grille B, non des divergences routeur.
+
 ```text
 500 FCFA
-Commercial : 48h
-MikroTik   : 72h
+Commercial (Grille B erronée) : 48h
+MikroTik (réel, audité)       : 72h  ← valeur officielle Grille A
 
 1000 FCFA
-Commercial : 5 jours
-MikroTik   : 1 semaine
+Commercial (Grille B erronée) : 5 jours
+MikroTik (réel, audité)       : 1 semaine  ← valeur officielle Grille A
 ```
 
 Il existe également un profil :
@@ -589,10 +602,15 @@ Exemple :
 ```text
 PLAN_500
 price = 500
-duration = 48h
-mikrotik_profile = <à confirmer>
-ticket_limit_uptime = 48h
+duration = 72h            (accès cumulatif = limit-uptime 3d00:00:00)
+validity = 5d             (fenêtre d'expiration appliquée par les moniteurs)
+mikrotik_profile = 72-HEURES
+ticket_limit_uptime = 3d00:00:00
 ```
+
+> **CORRECTION IMP-08 (17/09/2026)** : exemple rectifié sur la Grille A (anciennes valeurs
+> erronées 48h/48h). Le format de `ticket_limit_uptime` est celui observé sur le routeur
+> (contrat Mikmon, `docs/infrastructure/mikhmon-contract.md` §5).
 
 Cette distinction est obligatoire afin d'éviter que les divergences
 historiques de configuration réseau ne deviennent des divergences
@@ -2054,32 +2072,40 @@ la Phase 7.
 
 Cependant, certains éléments restent volontairement ouverts.
 
-## P1 — RADIUS
+> **MISE À JOUR IMP-08 (17/09/2026)** : statuts issus de l'audit read-only IMP-01
+> (evidence `docs/infrastructure/evidence/EVIDENCE-IMP01-*`).
 
-Configuration exacte à caractériser avant automatisation avancée.
+## P1 — RADIUS — ✅ CLOS (16/09/2026)
 
-## P2 — Mapping 4 000 FCFA
+Aucun serveur RADIUS configuré (`/radius` vide, `/user aaa use-radius: no`, pas de paquet
+user-manager). Authentification 100 % locale. Le `use-radius=yes` du profil `hsprof1` est un
+résidu sans effet, documenté et non modifié (principe de préservation).
 
-Nom exact du profil MikroTik à confirmer.
+## P2 — Mapping 4 000 FCFA — ✅ CLOS (16/09/2026)
 
-## P3 — Mapping 5 000 FCFA
+Profil exact : **`1-MOIS`** (On-Login `remc,4000,40d`, limit-uptime 40d00:00:00).
 
-Existence/configuration exacte du profil MikroTik à confirmer.
+## P3 — Mapping 5 000 FCFA — ✅ CLOS (sans objet)
 
-## P4 — Profiles
+Aucune offre 5 000 FCFA dans la Grille A officielle ; aucun profil correspondant.
 
-Vérification complète de `shared-users` et des paramètres de tous
-les profils avant automatisation d'écriture.
+## P4 — Profiles — ✅ CLOS (16-17/09/2026)
 
-## P5 — Portal files
+`shared-users=1` sur tous les profils ; aucun `session-timeout` ni `rate-limit` de profil ;
+mécanisme d'expiration établi en 3 couches (limit-uptime cumulatif posé à la génération +
+commentaire-date + 7 schedulers moniteurs supprimant les expirés ~2,5 min). Voir contrat
+Mikmon : `docs/infrastructure/mikhmon-contract.md`.
 
-La localisation exacte des fichiers HTML personnalisés du HotSpot
-n'a pas été établie.
+## P5 — Portal files — ✅ CLOS (16/09/2026)
 
-## P6 — Connector permissions
+Portail actif = dossier **`hotspot DEOGRACIAS`** (thème Mikhmon, 16 fichiers archivés dans
+`docs/infrastructure/portal-legacy/`) ; le dossier `/hotspot` par défaut existe mais est
+inutilisé. `dns-name="deogracias.bj"` (local uniquement).
 
-Les permissions exactes nécessaires au compte technique doivent être
-testées avant activation des écritures.
+## P6 — Connector permissions — 🟡 DONNÉES COLLECTÉES (test réel = IMP-21/23)
+
+Groupes read/write/full capturés ; groupe `read` trop large (reboot, sensitive) → groupe
+custom `dg-connector` à créer avec le code du Connector. API restreinte au LAN depuis IMP-03.
 
 Ces éléments ne bloquent pas la conception de l'application Web.
 
@@ -2379,3 +2405,28 @@ C'est cette séparation qui empêchera notamment **un vieux profil MikroTik `72-
 
 **Phase 6 → clôturée.**
 **Prochaine phase officielle → Phase 7 — Web Application.**
+
+---
+
+# 71. Constats post-audit intégrés (IMP-01/02/04/05 — 16/09/2026)
+
+> Ajout IMP-08 (17/09/2026). Sources : evidence `docs/infrastructure/evidence/EVIDENCE-IMP01-*`,
+> `EVIDENCE-IMP04-01`, `EVIDENCE-IMP05-01`, photos `PHYS-2026-09-16-A/B`, `PHYS-2026-09-17-01…07`.
+
+1. **WAN dynamique** : `ether1` en DHCP client (IP/29 opérateur). Toute connexion distante
+   passe par le tunnel (WireGuard/VPN) ou un accès physique au LAN.
+2. **dns-name local** : le HotSpot répond sur `deogracias.bj`, résolu uniquement en local
+   (aucun DNS public ne le résout). Le certificat/HTTPS du portail futur devra en tenir compte.
+3. **Mécanisme d'expiration en 3 couches** (contrat Mikmon) : limit-uptime cumulatif posé
+   à la génération (jamais à l'activation) + date dans le commentaire + 7 schedulers moniteurs
+   supprimant les tickets expirés (~2,5 min).
+4. **Chaîne physique validée** : ONT fibre → box opérateur (192.168.100.1) → RB951 ether1 ;
+   ports 2/3 → injecteurs PoE Mercury → 2 relais ; **ports 4/5 LIBRES** ; onduleur
+   Mercury Maverick 650VA couvrant ONT + box + RB951 + PC + les 2 injecteurs.
+5. **Aucun profil RADIUS, aucun paquet user-manager** : authentification HotSpot 100 % locale.
+6. **Profils legacy hors Grille A** : `1-HEURE` (50 FCFA, 0 utilisateur) et `Admin-free`
+   (gratuit illimité, 0 utilisateur ; inventaire à figer en IMP-35) — conservés, jamais
+   réutilisés par le futur système (norme Mikmon §5).
+7. **Stock digital au 17/09/2026** : 660 tickets, répartition par lot dans
+   `docs/infrastructure/stock-manifest-2026-09-17.md` ; total routeur attendu pour la
+   réconciliation ≈ **4 815** (INC-04 assumé : les PDFs vouchers ont transité par le chat).

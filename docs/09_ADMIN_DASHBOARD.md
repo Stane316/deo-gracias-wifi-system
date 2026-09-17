@@ -1,9 +1,3 @@
-Oui. Puisque **`08_WEB_APPLICATION.md` est déjà validé**, la Phase 8 doit maintenant prendre ce document comme contrat amont et définir précisément le **back-office d’exploitation de Déo Gracias** : ce que la mère peut voir, gérer, contrôler et faire en cas d’incident, sans mélanger cette phase avec l’intégration MikroTik ou la logique publique déjà spécifiée.
-
-Voici le document officiel.
-
----
-
 # `09_ADMIN_DASHBOARD.md`
 
 # Phase 8 — Admin Dashboard
@@ -868,15 +862,18 @@ Le Dashboard peut permettre la consultation des plans commerciaux.
 
 Source de vérité actuelle :
 
-|       Prix | Durée commerciale |
-| ---------: | ----------------: |
-|   100 FCFA |          5 heures |
-|   200 FCFA |         12 heures |
-|   300 FCFA |         24 heures |
-|   500 FCFA |         48 heures |
-| 1 000 FCFA |           5 jours |
-| 4 000 FCFA |          10 jours |
-| 5 000 FCFA |          40 jours |
+> **CORRECTION IMP-08 (17/09/2026)** : grille erronée (« Grille B ») remplacée par la
+> **Grille A officielle** (décision propriétaire docs 03/05, confirmée audit 16/09/2026).
+> Aucune offre 5 000 FCFA.
+
+|       Prix | Accès (cumulatif) | Validité |
+| ---------: | ----------------: | -------: |
+|   100 FCFA |          5 heures |    24 h |
+|   200 FCFA |         12 heures |    24 h |
+|   300 FCFA |         24 heures |    48 h |
+|   500 FCFA |         72 heures |     5 j |
+| 1 000 FCFA |         1 semaine |    10 j |
+| 4 000 FCFA |            1 mois |    40 j |
 
 Ces valeurs sont les références commerciales.
 
@@ -884,11 +881,17 @@ Ces valeurs sont les références commerciales.
 
 # 36. Attention aux profils MikroTik
 
-La configuration MikroTik actuellement observée présente des divergences :
+La configuration MikroTik actuellement observée présentait des divergences apparentes :
 
 * 500 FCFA → profil observé `72-HEURES`, alors que le tarif commercial est 48 heures ;
 * 1 000 FCFA → profil observé `1-SEMAINE`, alors que le tarif commercial est 5 jours ;
 * certains profils techniques/commerciaux observés ne correspondent pas exactement au catalogue actuel.
+
+> **CORRECTION IMP-08 (17/09/2026, audit du 16/09)** : ces « divergences » étaient des erreurs
+> de la Grille B documentaire. Le routeur applique la Grille A exacte (accès = limit-uptime :
+> 500 F → 72 h, 1 000 F → 7 j ; validité = moniteurs : 5 j, 10 j). Profils legacy hors Grille A
+> documentés : `1-HEURE` (50 F, 0 user) et `Admin-free` (gratuit illimité, inventaire à figer
+> en IMP-35). La règle ci-dessous reste valable par principe.
 
 Le Dashboard ne doit donc jamais déduire la durée commerciale à partir du nom d'un profil MikroTik.
 
@@ -913,17 +916,19 @@ Exemple :
 
 ```text
 500 FCFA
-48 h
-```
-
-ne doit pas être modifié accidentellement en :
-
-```text
-500 FCFA
 72 h
 ```
 
-sans confirmation.
+(valeur officielle Grille A) ne doit pas être modifié accidentellement en :
+
+```text
+500 FCFA
+48 h
+```
+
+(ancienne valeur erronée de la Grille B) sans confirmation.
+
+> **CORRECTION IMP-08 (17/09/2026)** : exemple inversé pour refléter la Grille A officielle.
 
 ---
 
