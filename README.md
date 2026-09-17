@@ -1,10 +1,4 @@
-Oui. Le README doit être conçu comme **le contrat d'entrée du repository** : un humain doit pouvoir comprendre le projet rapidement, mais surtout une IA de développement doit pouvoir savoir **quoi lire, dans quel ordre, quelles décisions sont déjà figées, ce qu'elle peut décider elle-même et ce qu'elle ne doit pas inventer**.
 
-Je te propose donc un README plus proche d'un **document de handoff engineering** que d'un README marketing classique.
-
-Voici la version complète à placer à la racine du repository sous `README.md`.
-
----
 
 ````markdown
 # Déo Gracias — Wi-Fi Access & Payment System
