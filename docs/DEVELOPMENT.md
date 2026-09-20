@@ -46,3 +46,17 @@ Deux façons de les appliquer :
 
 Aucun secret de projet cloud dans le repo : le lien vers le projet Supabase réel se fait
 sur la machine du propriétaire via `supabase link` (voir `docs/field-guides/GUIDE-07-SUPABASE-PROJET.md`).
+
+## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
+
+Dès que des fichiers modifiant `package.json` / `package-lock.json` sont récupérés depuis le
+workspace de l'agent (ou après un `git pull` qui les touche) :
+
+1. exécuter `npm ci` **à la racine du monorepo** avant toute évaluation dans l'IDE ;
+2. dans VSCode : « TypeScript: Restart TS Server » (palette) si des erreurs `ts(2591)`
+   (« nom 'node:fs' introuvable ») ou `ts(2339)` (`import.meta.url`) apparaissent —
+   elles signifient uniquement que `node_modules` est désynchronisé du lockfile ;
+3. vérifier : `npm run typecheck` doit passer avant de juger le code.
+
+Cas vécu (IMP-10) : 4 erreurs VSCode locales alors que la CI GitHub était verte — cause :
+`@types/node` ajouté au lock mais `npm ci` non relancé localement.
