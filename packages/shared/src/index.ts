@@ -71,15 +71,28 @@ export const offerSchema = z.object({
 });
 
 /**
- * États du cycle de vie d'un ticket (contrat Mikmon §2).
+ * États du cycle de vie d'un ticket CÔTÉ ROUTEUR (contrat Mikmon §2).
  * EXPIRED_REMOVED : le routeur SUPPRIME le ticket à expiration (moniteurs ~2,5 min).
  * ADMIN_FREE_LEGACY : accès gratuits hérités de l'admin externe, hors mécanisme.
+ * IMP-11 : renommé TICKET_ROUTER_STATES pour lever l'ambiguïté avec les états
+ * plateforme (TICKET_DB_STATES, states.ts) — docs 06 §13.
  */
-export const TICKET_STATES = [
+export const TICKET_ROUTER_STATES = [
   'UNUSED',
   'ACTIVE',
   'EXPIRED_REMOVED',
   'ADMIN_FREE_LEGACY',
 ] as const;
 
-export type TicketState = (typeof TICKET_STATES)[number];
+export type TicketRouterState = (typeof TICKET_ROUTER_STATES)[number];
+
+/**
+ * @deprecated IMP-11 : alias rétrocompatible de TICKET_ROUTER_STATES.
+ * Ne pas utiliser dans le nouveau code ; sera retiré à l'IMP qui consommera
+ * définitivement les états plateforme (backend IMP-12+).
+ */
+export const TICKET_STATES = TICKET_ROUTER_STATES;
+/** @deprecated IMP-11 : alias de TicketRouterState. */
+export type TicketState = TicketRouterState;
+
+export * from './states.js';

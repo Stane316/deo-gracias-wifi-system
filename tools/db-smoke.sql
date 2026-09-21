@@ -9,31 +9,31 @@ BEGIN
   FROM information_schema.tables
   WHERE table_schema = 'public' AND table_type = 'BASE TABLE';
 
-  IF n_tables <> 14 THEN
-    RAISE EXCEPTION 'smoke: attendu 14 tables public, trouvé %', n_tables;
+  IF n_tables <> 15 THEN
+    RAISE EXCEPTION 'smoke: attendu 15 tables public, trouvé %', n_tables;
   END IF;
 
-  -- Les 14 tables du contrat (blueprint §3.1)
+  -- Les 15 tables du contrat (blueprint §3.1 + state_transitions IMP-11)
   PERFORM 1 FROM information_schema.tables
   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     AND table_name IN (
       'customers','plans','orders','payments','payment_events',
       'ticket_batches','tickets','mikrotik_sync','access_sessions',
-      'reconciliation_runs','audit_logs','incidents','alerts','settings');
+      'reconciliation_runs','audit_logs','incidents','alerts','settings','state_transitions');
   IF NOT FOUND THEN
     RAISE EXCEPTION 'smoke: table(s) du contrat manquante(s)';
   END IF;
 
-  -- Vérification explicite : chaque table du contrat existe (count = 14)
+  -- Vérification explicite : chaque table du contrat existe (count = 15)
   SELECT count(*) INTO n_tables
   FROM information_schema.tables
   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     AND table_name IN (
       'customers','plans','orders','payments','payment_events',
       'ticket_batches','tickets','mikrotik_sync','access_sessions',
-      'reconciliation_runs','audit_logs','incidents','alerts','settings');
-  IF n_tables <> 14 THEN
-    RAISE EXCEPTION 'smoke: contrat de tables incomplet (%/14)', n_tables;
+      'reconciliation_runs','audit_logs','incidents','alerts','settings','state_transitions');
+  IF n_tables <> 15 THEN
+    RAISE EXCEPTION 'smoke: contrat de tables incomplet (%/15)', n_tables;
   END IF;
 
   -- Triggers updated_at : exactement 11 tables mutables en portent une.
@@ -73,6 +73,6 @@ BEGIN
     RAISE EXCEPTION 'smoke: contrainte tickets_sold_requires_order absente';
   END IF;
 
-  RAISE NOTICE 'smoke OK : 14 tables, % triggers updated_at, gardes présentes', n_triggers;
+  RAISE NOTICE 'smoke OK : 15 tables, % triggers updated_at, gardes présentes', n_triggers;
 END;
 $$;
