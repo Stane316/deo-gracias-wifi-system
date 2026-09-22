@@ -7,68 +7,8 @@ import { OFFERS } from '@dg/shared';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from './app.js';
-import type { ActivePlan, BackendRepo, CreateOrderInputDb, OrderRecord } from './repo.js';
+import { FakeRepo } from './fake-repo.js';
 import { buildPlanSnapshot } from './repo.js';
-
-class FakeRepo implements BackendRepo {
-  pingFails = false;
-  plans: ActivePlan[] = OFFERS.map((o, i) => ({
-    planId: `plan-${i}`,
-    offerId: o.id,
-    priceFcfa: o.priceFcfa,
-    accessHours: o.accessHours,
-    validityHours: o.validityHours,
-    mikrotikProfile: o.mikrotikProfile,
-    limitUptime: o.limitUptime,
-    version: 1,
-  }));
-  customers = new Map<string, string>();
-  orders = new Map<string, OrderRecord>();
-  ordersByIdempotencyKey = new Map<string, string>();
-
-  async ping(): Promise<void> {
-    if (this.pingFails) throw new Error('db down');
-  }
-  async listActivePlans(): Promise<ActivePlan[]> {
-    return this.plans;
-  }
-  async getActivePlanByOffer(offerId: string): Promise<ActivePlan | null> {
-    return this.plans.find((p) => p.offerId === offerId) ?? null;
-  }
-  async findOrCreateCustomer(phone: string): Promise<string> {
-    let id = this.customers.get(phone);
-    if (!id) {
-      id = randomUUID();
-      this.customers.set(phone, id);
-    }
-    return id;
-  }
-  async createOrder(
-    input: CreateOrderInputDb,
-  ): Promise<{ order: OrderRecord; created: boolean }> {
-    const existingId = this.ordersByIdempotencyKey.get(input.idempotencyKey);
-    if (existingId) {
-      const existing = this.orders.get(existingId);
-      if (existing) return { order: existing, created: false };
-    }
-    const now = new Date();
-    const order: OrderRecord = {
-      id: randomUUID(),
-      state: 'CREATED',
-      currency: 'XOF',
-      planSnapshot: input.planSnapshot,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.orders.set(order.id, order);
-    this.ordersByIdempotencyKey.set(input.idempotencyKey, order.id);
-    return { order, created: true };
-  }
-  async getOrderById(id: string): Promise<OrderRecord | null> {
-    return this.orders.get(id) ?? null;
-  }
-  async close(): Promise<void> {}
-}
 
 const repo = new FakeRepo();
 const app = await buildApp({ repo });

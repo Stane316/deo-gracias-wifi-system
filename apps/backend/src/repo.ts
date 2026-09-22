@@ -46,6 +46,15 @@ export interface BackendRepo {
    */
   createOrder(input: CreateOrderInputDb): Promise<{ order: OrderRecord; created: boolean }>;
   getOrderById(id: string): Promise<OrderRecord | null>;
+  /** Journalisation des connexions admin (doc 09 §8) — audit_logs insert-only. */
+  logAudit(entry: {
+    actor: string;
+    action: string;
+    entity: string;
+    entityId?: string | null;
+  }): Promise<void>;
+  /** Lie un compte Supabase Auth au client (RLS « own rows » via auth_user_id, 0007). */
+  linkCustomerAuth(customerId: string, authUserId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -171,6 +180,29 @@ export class PgRepo implements BackendRepo {
     );
     const row = res.rows[0];
     return row ? mapOrder(row) : null;
+  }
+
+  async logAudit(entry: {
+    actor: string;
+    action: string;
+    entity: string;
+    entityId?: string | null;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO public.audit_logs (actor, action, entity, entity_id)
+       VALUES ($1, $2, $3, $4)`,
+      [entry.actor, entry.action, entry.entity, entry.entityId ?? null],
+    );
+  }
+
+  async linkCustomerAuth(customerId: string, authUserId: string): Promise<void> {
+    // Idempotent : ne fait rien si déjà lié au même compte ; jamais d'écrasement.
+    await this.pool.query(
+      `UPDATE public.customers
+       SET auth_user_id = $2
+       WHERE id = $1 AND (auth_user_id IS NULL OR auth_user_id = $2)`,
+      [customerId, authUserId],
+    );
   }
 
   async close(): Promise<void> {

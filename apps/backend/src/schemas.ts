@@ -15,11 +15,23 @@ const OFFER_IDS = OFFERS.map((o) => o.id) as [OfferId, ...OfferId[]];
  * par 01 (plan de numérotation national), préfixe international +229 toléré et
  * normalisé. Décision IMP-12 signalée au propriétaire (doc 06 ne fixe pas de format).
  */
+/** Normalisation : +22901XXXXXXXX => 01XXXXXXXX (format national, doc 06 §06). */
+export function normalizePhone(value: string): string {
+  return value.startsWith('+229') ? value.slice(4) : value;
+}
+
 export const phoneSchema = z
   .string()
   .trim()
   .regex(/^(?:\+229)?01[0-9]{8}$/, 'numéro Bénin attendu : 01XXXXXXXX (ou +22901XXXXXXXX)')
-  .transform((v) => (v.startsWith('+229') ? v.slice(4) : v));
+  .transform(normalizePhone);
+
+/** IMP-13 — OTP client (phone). Code à 6 chiffres, body strict. */
+export const authPhoneRequestSchema = z.object({ phone: phoneSchema }).strict();
+
+export const authPhoneVerifySchema = z
+  .object({ phone: phoneSchema, code: z.string().regex(/^[0-9]{6}$/, 'code à 6 chiffres attendu') })
+  .strict();
 
 export const createOrderBodySchema = z
   .object({

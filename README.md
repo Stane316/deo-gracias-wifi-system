@@ -1,6 +1,4 @@
 
-
-````markdown
 # Déo Gracias — Wi-Fi Access & Payment System
 
 > Digital system for managing Wi-Fi access, online payments, ticket inventory and MikroTik-based network operations for Déo Gracias.

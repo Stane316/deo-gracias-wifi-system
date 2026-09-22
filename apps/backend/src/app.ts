@@ -8,9 +8,21 @@
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import {
+  ADMIN_ROLES,
+  bearerToken,
+  OtpStore,
+  SessionStore,
+  type AuthVerifier,
+  type OtpConfig,
+} from './auth.js';
+import {
+  authPhoneRequestSchema,
+  authPhoneVerifySchema,
   createOrderBodySchema,
   idempotencyKeySchema,
+  normalizePhone,
   orderIdParamsSchema,
+  phoneSchema,
   problem,
   type OrderView,
 } from './schemas.js';
@@ -21,6 +33,17 @@ export interface BuildAppOptions {
   logger?: boolean;
   /** Rate-limit par IP (règle transverse blueprint §5). Défaut : 100 req/min. */
   rateLimit?: { max: number; timeWindow?: string };
+  /** IMP-13 — auth clients (phone OTP) + admin (Supabase Auth + rôle). */
+  auth?: {
+    /** Vérificateur de JWT Supabase ; absent => routes admin 503 (non configuré). */
+    verifier?: AuthVerifier;
+    /** true = AUTH_DEV_MODE : le code OTP est retourné dans la réponse (local/CI). */
+    devMode?: boolean;
+    otp?: Partial<OtpConfig>;
+    sessions?: { ttlMs?: number; now?: () => number };
+    /** Limites durcies par route (défaut : request 5/30min, verify 10/min). */
+    rateLimits?: { requestMax?: number; verifyMax?: number };
+  };
 }
 
 function toOrderView(o: OrderRecord, offerId: string): OrderView {
@@ -152,6 +175,126 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     }
     const offerId = String(order.planSnapshot['offer_id'] ?? '');
     return toOrderView(order, offerId);
+  });
+
+  // ---------------------------------------------------------------------------
+  // IMP-13 — Auth clients (phone OTP) + admin (Supabase Auth + rôle)
+  // ---------------------------------------------------------------------------
+  const authCfg = opts.auth;
+  const devMode = authCfg?.devMode ?? false;
+  const verifier = authCfg?.verifier;
+  const otp = new OtpStore(authCfg?.otp);
+  const sessions = new SessionStore(authCfg?.sessions);
+  const GENERIC_401 = 'Jeton ou code invalide/expiré.';
+
+  app.post(
+    '/auth/phone/request',
+    { config: { rateLimit: { max: authCfg?.rateLimits?.requestMax ?? 5, timeWindow: 30 * 60 * 1000 } } },
+    async (req, reply) => {
+      if (!devMode) {
+        // Aucun canal SMS en Phase 1 (budget nul) : réponse honnête, jamais de faux « envoyé ».
+        return reply
+          .status(503)
+          .type('application/problem+json')
+          .send(problem(503, 'Canal SMS non configuré', 'AUTH_DEV_MODE absent et aucun fournisseur SMS décidé (décision propriétaire attendue).'));
+      }
+      const parsed = authPhoneRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.status(400).type('application/problem+json')
+          .send(problem(400, 'Payload invalide', parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(' | ')));
+      }
+      const { outcome, code } = otp.request(parsed.data.phone);
+      if (outcome === 'rate_limited') {
+        return reply.status(429).type('application/problem+json')
+          .send(problem(429, 'Trop de demandes', 'Maximum 3 codes par 30 minutes pour ce numéro.'));
+      }
+      return reply.status(202).send({ status: 'requested', dev_code: code });
+    },
+  );
+
+  app.post(
+    '/auth/phone/verify',
+    { config: { rateLimit: { max: authCfg?.rateLimits?.verifyMax ?? 10, timeWindow: 60 * 1000 } } },
+    async (req, reply) => {
+      if (!devMode) {
+        return reply.status(503).type('application/problem+json')
+          .send(problem(503, 'Canal SMS non configuré', 'AUTH_DEV_MODE absent et aucun fournisseur SMS décidé (décision propriétaire attendue).'));
+      }
+      const parsed = authPhoneVerifySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.status(400).type('application/problem+json')
+          .send(problem(400, 'Payload invalide', parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(' | ')));
+      }
+      const { phone, code } = parsed.data;
+      if (otp.verify(phone, code) !== 'ok') {
+        // Message générique unique (doc 09 §7) : pas de distinction code faux/expiré/épuisé.
+        return reply.status(401).type('application/problem+json')
+          .send(problem(401, 'Authentification échouée', GENERIC_401));
+      }
+      const customerId = await repo.findOrCreateCustomer(phone);
+      const session = sessions.create(customerId, phone);
+      return reply.status(200).send({
+        token: session.token,
+        customer_id: customerId,
+        phone,
+        expires_at: new Date(session.expiresAt).toISOString(),
+      });
+    },
+  );
+
+  app.post('/auth/logout', async (req, reply) => {
+    const token = bearerToken(req);
+    if (token) sessions.revoke(token);
+    return reply.status(204).send();
+  });
+
+  app.get('/auth/me', async (req, reply) => {
+    const token = bearerToken(req);
+    if (!token) {
+      return reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification requise', GENERIC_401));
+    }
+    const session = sessions.get(token);
+    if (session) {
+      return { auth: 'phone-session', customer_id: session.customerId, phone: session.phone };
+    }
+    if (verifier) {
+      const identity = await verifier.verify(token);
+      if (identity) {
+        const phoneParsed = identity.phone ? phoneSchema.safeParse(identity.phone) : null;
+        const phone = phoneParsed?.success ? phoneParsed.data : null;
+        if (phone) {
+          const customerId = await repo.findOrCreateCustomer(phone);
+          await repo.linkCustomerAuth(customerId, identity.sub);
+          return { auth: 'supabase', auth_user_id: identity.sub, customer_id: customerId, phone };
+        }
+        return { auth: 'supabase', auth_user_id: identity.sub, email: identity.email };
+      }
+    }
+    return reply.status(401).type('application/problem+json')
+      .send(problem(401, 'Authentification échouée', GENERIC_401));
+  });
+
+  app.get('/admin/me', async (req, reply) => {
+    if (!verifier) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    if (!identity) {
+      await repo.logAudit({ actor: 'anonymous', action: 'admin_auth_denied', entity: 'auth' });
+      return reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', GENERIC_401));
+    }
+    const actor = `admin:${identity.sub}`;
+    if (!identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({ actor, action: 'admin_auth_denied', entity: 'auth', entityId: identity.sub });
+      return reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Accès refusé', 'Rôle administrateur requis.'));
+    }
+    await repo.logAudit({ actor, action: 'admin_auth_ok', entity: 'auth', entityId: identity.sub });
+    return { sub: identity.sub, role: identity.role, email: identity.email };
   });
 
   return app;

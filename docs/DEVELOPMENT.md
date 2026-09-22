@@ -47,6 +47,49 @@ Deux façons de les appliquer :
 Aucun secret de projet cloud dans le repo : le lien vers le projet Supabase réel se fait
 sur la machine du propriétaire via `supabase link` (voir `docs/field-guides/GUIDE-07-SUPABASE-PROJET.md`).
 
+## API backend locale (IMP-12)
+
+L'API catalogue/commandes vit dans `apps/backend` (Fastify 5, zod strict, `pg` natif — ADR 0001).
+
+```bash
+npm ci                                  # le lockfile a change (fastify, pg, zod, tsx, @fastify/rate-limit)
+export DATABASE_URL="postgres://…"      # base migree : tools/db-migrate.sh up
+npm run dev -w @dg/backend              # serveur local en watch (tsx) — ou npm run start
+curl http://127.0.0.1:3000/healthz
+curl http://127.0.0.1:3000/offers
+curl -X POST http://127.0.0.1:3000/orders -H 'content-type: application/json' \
+  -H 'Idempotency-Key: demo-00000001' -d '{"offer_id":"24-HEURES","customer_phone":"01XXXXXXXX"}'
+```
+
+Routes livrees : `GET /healthz`, `GET /readyz`, `GET /offers`, `POST /orders`
+(Idempotency-Key obligatoire, doc 06 §21), `GET /orders/:id` (IMP-12) ;
+`POST /auth/phone/request`, `POST /auth/phone/verify`, `POST /auth/logout`,
+`GET /auth/me`, `GET /admin/me` (IMP-13). Erreurs RFC 7807
+(`application/problem+json`) ; rate-limit 100 req/min/IP (durci sur /auth :
+5 req/30 min et 10/min) ; prix toujours calcule cote serveur (doc 10 §10.3 —
+le body est strict, toute cle inconnue est rejetee).
+
+## Authentification (IMP-13)
+
+- **Clients (phone)** : OTP 6 chiffres, TTL 5 min, 5 essais, 3 demandes/30 min,
+  code a usage unique, stocke haché **en mémoire** (Phase 1 mono-processus, cout
+  nul, aucune migration). `AUTH_DEV_MODE=1` renvoie le code dans la reponse
+  (`dev_code`) pour le local/CI — **jamais en production**. Sans devMode :
+  503 « Canal SMS non configuré » (aucun fournisseur SMS décidé, budget nul).
+- **Admin** : JWT Supabase Auth verifié via `GET {SUPABASE_URL}/auth/v1/user`
+  (necessite `SUPABASE_URL` + `SUPABASE_ANON_KEY` — publiques par conception) ;
+  role lu dans `app_metadata.role` (`ADMIN` | `SUPER_ADMIN`, doc 09 §6.2) ;
+  echec = message generique ; chaque tentative (ok/denied) est journalisee dans
+  `audit_logs` (doc 09 §8). Role a poser sur votre compte : Dashboard Supabase →
+  Authentication → Users → votre user → **App metadata** → `{ "role": "SUPER_ADMIN" }`.
+- Un JWT Supabase avec `phone` reconnu sur `GET /auth/me` lie automatiquement
+  `customers.auth_user_id` (active les politiques RLS « own rows » de 0007).
+
+Tests : unitaires (fake repo, sans base) + **integration reelle** `repo.pg.test.ts`
+executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
+`postgres:17` + migrations dans le job `Typecheck + tests`). Attendu : 81/81 avec
+base, 72 + 9 skips sans.
+
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 
 Dès que des fichiers modifiant `package.json` / `package-lock.json` sont récupérés depuis le

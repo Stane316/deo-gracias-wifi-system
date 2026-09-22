@@ -5,6 +5,7 @@
  */
 import { Pool } from 'pg';
 import { buildApp } from './app.js';
+import { SupabaseAuthVerifier } from './auth.js';
 import { PgRepo } from './repo.js';
 
 const databaseUrl = process.env['DATABASE_URL'];
@@ -14,7 +15,20 @@ if (!databaseUrl) {
 }
 
 const repo = new PgRepo(new Pool({ connectionString: databaseUrl }));
-const app = await buildApp({ repo, logger: true });
+
+// IMP-13 — auth : Supabase Auth si configuré (clés non secrètes, blueprint §7) ;
+// AUTH_DEV_MODE=1 active le renvoi du code OTP en local (jamais en production).
+const supabaseUrl = process.env['SUPABASE_URL'];
+const supabaseAnonKey = process.env['SUPABASE_ANON_KEY'];
+const verifier =
+  supabaseUrl && supabaseAnonKey ? new SupabaseAuthVerifier(supabaseUrl, supabaseAnonKey) : undefined;
+const devMode = ['1', 'true'].includes((process.env['AUTH_DEV_MODE'] ?? '').toLowerCase());
+
+const app = await buildApp({
+  repo,
+  logger: true,
+  auth: { devMode, ...(verifier ? { verifier } : {}) },
+});
 const host = process.env['HOST'] ?? '0.0.0.0';
 const port = Number(process.env['PORT'] ?? 3000);
 

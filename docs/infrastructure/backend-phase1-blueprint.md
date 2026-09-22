@@ -94,6 +94,9 @@ interdit sur `audit_logs`/`payment_events` (immutabilité, doc 06 §41).
 > (IMP-10) ; `0009_seed_stock_mikmon` (IMP-16). Raison : les politiques RLS doivent protéger
 > le schéma AVANT qu'un seed n'existe ; les seeds sont donc décalés de +1/+2 par rapport à
 > la numérotation initiale de ce §3.2. Amendement visible, non silencieux.
+**AMENDEMENT n°2 (IMP-11, 17/09/2026)** : `0009_state_guards` livré par IMP-11 (gardes de
+> transitions + audit automatique) ; le seed stock Mikmon est renuméroté `0010` (IMP-16).
+> Raison : l'ordre des IMP place les gardes d'états avant l'import du stock.
 > **LIVRAISON IMP-10 (17/09/2026)** : `0007_rls_policies` + `0008_seed_plans_grille_a` livrés et
 > testés (matrice RLS par rôles via `tools/db-migrate.sh rls` en CI ; test normatif seed-sync
 > dans `packages/shared`). Prochaine migration : `0009_seed_stock_mikmon` (IMP-16).
@@ -156,6 +159,24 @@ nul ; `DELIVERED` exige un ticket `SOLD`). Toute transition écrit dans `audit_l
 Règles transverses : zod sur tous les payloads (schémas dans `packages/shared` ou
 `apps/backend/src/schemas`), erreurs RFC 7807, rate-limit par IP, logs structurés pino,
 aucun secret dans les logs (gitleaks déjà en CI).
+> **LIVRAISON IMP-12 (21/09/2026)** : `GET /healthz`, `GET /readyz`, `GET /offers`,
+> `POST /orders` (Idempotency-Key, doc 06 §21 ; body zod strict — prix jamais fourni
+> par le client, doc 10 §10.3 ; snapshot plan §09) et `GET /orders/:id` livrés dans
+> `apps/backend` (Fastify 5, `pg` natif ADR 0001, erreurs RFC 7807, rate-limit/IP,
+> logs pino via Fastify). Tests unitaires (fake repo) + intégration réelle sur
+> Postgres éphémère CI (job build-test doté d’un service postgres:17 + migrations).
+> Décision signalée : téléphone Bénin `^01[0-9]{8}$` (+229 toléré/normalisé) — doc 06 §06
+> ne fixe pas de format. Restantes : auth (IMP-13), paiements (IMP-14), tickets (IMP-15),
+> admin (IMP-17), connector (IMP-21).
+> **LIVRAISON IMP-13 (21/09/2026)** : auth clients (phone OTP : `POST /auth/phone/request`,
+> `POST /auth/phone/verify`, `POST /auth/logout`, `GET /auth/me`) + admin
+> (`GET /admin/me`, JWT Supabase Auth vérifié côté serveur, rôle `app_metadata.role`
+> ADMIN/SUPER_ADMIN, audit `audit_logs` ok/denied, messages d’échec génériques — doc 09 §7-8).
+> OTP en mémoire (TTL 5 min, 5 essais, 3 demandes/30 min, hash sha256, usage unique) : aucune
+> migration (0010 reste le seed stock). `AUTH_DEV_MODE=1` = code retourné pour local/CI ;
+> hors devMode : 503 honnête « Canal SMS non configuré » — **décision propriétaire attendue** :
+> fournisseur SMS (payant) ou OTP Supabase (nécessite aussi un provider SMS). Un JWT Supabase
+> avec phone lie `customers.auth_user_id` (RLS own-rows 0007).
 
 ## 6. Workers / jobs
 

@@ -14,7 +14,20 @@ export {
   type OrderRecord,
 } from './repo.js';
 export {
+  ADMIN_ROLES,
+  OtpStore,
+  SessionStore,
+  SupabaseAuthVerifier,
+  bearerToken,
+  type AuthIdentity,
+  type AuthVerifier,
+  type OtpConfig,
+} from './auth.js';
+export {
+  authPhoneRequestSchema,
+  authPhoneVerifySchema,
   createOrderBodySchema,
+  normalizePhone,
   idempotencyKeySchema,
   orderIdParamsSchema,
   phoneSchema,

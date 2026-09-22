@@ -33,7 +33,7 @@
 | Élément | Méthode A — Dashboard SQL Editor | Méthode B — CLI Supabase | Vérification |
 |---|---|---|---|
 | Prérequis | navigateur uniquement | Node 20+, CLI installée, mot de passe base | — |
-| Application 0001→0008 | copier-coller + Run, 8 fois dans l'ordre | `supabase db push` (1 commande) | 14 tables + 6 plans + requêtes §3.4 / `migration list` |
+| Application 0001→0009 | copier-coller + Run, 9 fois dans l'ordre | `supabase db push` (1 commande) | 14 tables + 6 plans + requêtes §3.4 / `migration list` |
 | Historique `supabase_migrations.schema_migrations` | **NON renseigné** → §5 si CLI adoptée plus tard | renseigné automatiquement (versions `0001`…`0006`) | `supabase migration list --linked` |
 | Risque principal | oubli d'un fichier ou de l'ordre | erreur de link (mauvais projet) → vérifier le ref avant push | comparaison ref affiché vs dashboard |
 | Testée par l'agent | non (accès dashboard = vous seul) | **oui** en sandbox : `migration up --db-url` + `migration list --db-url` + idempotence + smoke OK (CLI 2.117.0) | voir §6 |
@@ -46,7 +46,7 @@ comptez réutiliser le CLI plus tard (historique propre) ; la méthode A convien
 
 1. Dashboard → votre projet → menu gauche **SQL Editor** (icône `>_` ; sur certaines versions :
    **Database** → **SQL Editor**).
-2. **Ordre obligatoire = tri des noms de fichiers (actuellement 0001 → 0008)**
+2. **Ordre obligatoire = tri des noms de fichiers (actuellement 0001 → 0009)**
    (dépendances : les clés étrangères de 0003/0004 pointent vers les tables de 0002 ;
    0007 pose la RLS, 0008 le seed Grille A). Pour chaque fichier, dans l'ordre :
    a. ouvrir le fichier dans le repo (`supabase/migrations/000X_….sql`) ;
@@ -126,14 +126,14 @@ lancé, le CLI croira les 6 migrations « pending » et échouera (objets déjà
 Solution (une seule fois, dans le repo) :
 
 ```bash
-for v in 0001 0002 0003 0004 0005 0006 0007 0008; do
+for v in 0001 0002 0003 0004 0005 0006 0007 0008 0009; do
   supabase migration repair "$v" --status applied --linked   # ou --db-url "<URL>"
 done
 supabase migration list --linked    # 0001…0006 doivent apparaître appliquées
 ```
 
 (Sous PowerShell : répéter la commande `supabase migration repair 000X --status applied --linked`
-huit fois.) Aucune autre action nécessaire si vous restez en méthode A.
+neuf fois.) Aucune autre action nécessaire si vous restez en méthode A.
 
 ## 6. Ce qui NE doit PAS être fait maintenant
 
