@@ -18,6 +18,7 @@ export interface ActivePlan {
 
 export interface OrderRecord {
   id: string;
+  customerId: string;
   state: string;
   currency: string;
   planSnapshot: Record<string, unknown>;
@@ -46,6 +47,28 @@ export interface BackendRepo {
    */
   createOrder(input: CreateOrderInputDb): Promise<{ order: OrderRecord; created: boolean }>;
   getOrderById(id: string): Promise<OrderRecord | null>;
+  // --- IMP-14 : paiements + webhooks (doc 06 §14-24) ---
+  getCustomerById(customerId: string): Promise<{ id: string; phone: string } | null>;
+  createPayment(orderId: string, amountFcfa: number): Promise<PaymentRecord>;
+  /** CREATED→INITIATED→PENDING + order CREATED→PAYMENT_PENDING (une transaction). */
+  markPaymentAwaitingResult(paymentId: string, providerRef: string): Promise<'initiated' | 'illegal'>;
+  getPaymentById(id: string): Promise<PaymentRecord | null>;
+  getOpenPaymentForOrder(orderId: string): Promise<PaymentRecord | null>;
+  getPaymentByProviderRef(providerRef: string): Promise<PaymentRecord | null>;
+  /** Insert-only ; false = déjà présent (idempotence doc 06 §20-21). */
+  insertPaymentEvent(entry: {
+    paymentId: string | null;
+    providerEventId: string;
+    payload: unknown;
+    signatureOk: boolean;
+  }): Promise<boolean>;
+  /** PENDING→CONFIRMED + order PAYMENT_PENDING→PAID (une transaction, doc 06 §24). */
+  confirmPayment(paymentId: string): Promise<'confirmed' | 'illegal'>;
+  /** PENDING→FAILED|CANCELLED + order aligné (une transaction). */
+  failPayment(
+    paymentId: string,
+    to: { payment: 'FAILED' | 'CANCELLED'; order: 'FAILED' | 'CANCELLED' },
+  ): Promise<'failed' | 'illegal'>;
   /** Journalisation des connexions admin (doc 09 §8) — audit_logs insert-only. */
   logAudit(entry: {
     actor: string;
@@ -69,8 +92,33 @@ interface PlanRow {
   version: number;
 }
 
+interface PaymentRow {
+  id: string;
+  order_id: string;
+  provider: string;
+  provider_ref: string | null;
+  amount_fcfa: number;
+  state: string;
+  confirmed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface PaymentRecord {
+  id: string;
+  orderId: string;
+  provider: string;
+  providerRef: string | null;
+  amountFcfa: number;
+  state: string;
+  confirmedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 interface OrderRow {
   id: string;
+  customer_id: string;
   state: string;
   currency: string;
   plan_snapshot: Record<string, unknown>;
@@ -91,15 +139,36 @@ function mapPlan(row: PlanRow): ActivePlan {
   };
 }
 
+function mapPayment(row: PaymentRow): PaymentRecord {
+  return {
+    id: row.id,
+    orderId: row.order_id,
+    provider: row.provider,
+    providerRef: row.provider_ref,
+    amountFcfa: row.amount_fcfa,
+    state: row.state,
+    confirmedAt: row.confirmed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function mapOrder(row: OrderRow): OrderRecord {
   return {
     id: row.id,
+    customerId: row.customer_id,
     state: row.state,
     currency: row.currency,
     planSnapshot: row.plan_snapshot,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+class TxAbort extends Error {
+  constructor(readonly result: 'illegal') {
+    super('transaction annulée (garde métier)');
+  }
 }
 
 const SELECT_ACTIVE_PLAN = `
@@ -156,14 +225,14 @@ export class PgRepo implements BackendRepo {
       `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
        VALUES ($1, $2, $3::jsonb, $4)
        ON CONFLICT (idempotency_key) DO NOTHING
-       RETURNING id, state, currency, plan_snapshot, created_at, updated_at`,
+       RETURNING id, customer_id, state, currency, plan_snapshot, created_at, updated_at`,
       [input.customerId, input.planId, JSON.stringify(input.planSnapshot), input.idempotencyKey],
     );
     const fresh = inserted.rows[0];
     if (fresh) return { order: mapOrder(fresh), created: true };
     // Replay : la clé existe déjà => on retourne la commande initiale (idempotence §21).
     const existing = await this.pool.query<OrderRow>(
-      `SELECT id, state, currency, plan_snapshot, created_at, updated_at
+      `SELECT id, customer_id, state, currency, plan_snapshot, created_at, updated_at
        FROM public.orders WHERE idempotency_key = $1`,
       [input.idempotencyKey],
     );
@@ -174,12 +243,180 @@ export class PgRepo implements BackendRepo {
 
   async getOrderById(id: string): Promise<OrderRecord | null> {
     const res = await this.pool.query<OrderRow>(
-      `SELECT id, state, currency, plan_snapshot, created_at, updated_at
+      `SELECT id, customer_id, state, currency, plan_snapshot, created_at, updated_at
        FROM public.orders WHERE id = $1`,
       [id],
     );
     const row = res.rows[0];
     return row ? mapOrder(row) : null;
+  }
+
+  /**
+   * Sentinel d'annulation : levé dans withTx pour FORCER le ROLLBACK et retourner
+   * un résultat métier (ex. commande introuvable après payment déjà transitionné :
+   * on annule TOUT, jamais d'état incohérent — doc 06 §24 atomicité).
+   */
+  private async withTx<T>(fn: (q: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(async (sql, params) => {
+        const res = await client.query(sql, params);
+        return { rows: res.rows as Record<string, unknown>[], rowCount: res.rowCount };
+      });
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getCustomerById(customerId: string): Promise<{ id: string; phone: string } | null> {
+    const res = await this.pool.query<{ id: string; phone: string }>(
+      `SELECT id, phone FROM public.customers WHERE id = $1`,
+      [customerId],
+    );
+    return res.rows[0] ?? null;
+  }
+
+  async createPayment(orderId: string, amountFcfa: number): Promise<PaymentRecord> {
+    const res = await this.pool.query<PaymentRow>(
+      `INSERT INTO public.payments (order_id, amount_fcfa)
+       VALUES ($1, $2)
+       RETURNING id, order_id, provider, provider_ref, amount_fcfa, state,
+                 confirmed_at, created_at, updated_at`,
+      [orderId, amountFcfa],
+    );
+    const row = res.rows[0];
+    if (!row) throw new Error('createPayment: aucune ligne retournée');
+    return mapPayment(row);
+  }
+
+  async markPaymentAwaitingResult(
+    paymentId: string,
+    providerRef: string,
+  ): Promise<'initiated' | 'illegal'> {
+    return this.withTx(async (q) => {
+      const p = await q(
+        `UPDATE public.payments SET state = 'INITIATED', provider_ref = $2
+         WHERE id = $1 AND state = 'CREATED' RETURNING order_id`,
+        [paymentId, providerRef],
+      );
+      const orderRow = p.rows[0];
+      if (!orderRow) return 'illegal';
+      await q(`UPDATE public.payments SET state = 'PENDING' WHERE id = $1 AND state = 'INITIATED'`, [
+        paymentId,
+      ]);
+      // Ordre déjà PAYMENT_PENDING = replay : la garde WHERE rend l'étape no-op.
+      await q(
+        `UPDATE public.orders SET state = 'PAYMENT_PENDING' WHERE id = $1 AND state = 'CREATED'`,
+        [String(orderRow['order_id'])],
+      );
+      return 'initiated';
+    });
+  }
+
+  async getPaymentById(id: string): Promise<PaymentRecord | null> {
+    const res = await this.pool.query<PaymentRow>(
+      `SELECT id, order_id, provider, provider_ref, amount_fcfa, state,
+              confirmed_at, created_at, updated_at
+       FROM public.payments WHERE id = $1`,
+      [id],
+    );
+    const row = res.rows[0];
+    return row ? mapPayment(row) : null;
+  }
+
+  async getOpenPaymentForOrder(orderId: string): Promise<PaymentRecord | null> {
+    const res = await this.pool.query<PaymentRow>(
+      `SELECT id, order_id, provider, provider_ref, amount_fcfa, state,
+              confirmed_at, created_at, updated_at
+       FROM public.payments
+       WHERE order_id = $1 AND state IN ('CREATED', 'INITIATED', 'PENDING')
+       ORDER BY created_at DESC LIMIT 1`,
+      [orderId],
+    );
+    const row = res.rows[0];
+    return row ? mapPayment(row) : null;
+  }
+
+  async getPaymentByProviderRef(providerRef: string): Promise<PaymentRecord | null> {
+    const res = await this.pool.query<PaymentRow>(
+      `SELECT id, order_id, provider, provider_ref, amount_fcfa, state,
+              confirmed_at, created_at, updated_at
+       FROM public.payments WHERE provider_ref = $1`,
+      [providerRef],
+    );
+    const row = res.rows[0];
+    return row ? mapPayment(row) : null;
+  }
+
+  async insertPaymentEvent(entry: {
+    paymentId: string | null;
+    providerEventId: string;
+    payload: unknown;
+    signatureOk: boolean;
+  }): Promise<boolean> {
+    // La table (migration 0003) n'a pas de colonne provider : le préfixe
+    // « fedapay: » de provider_event_id porte cette information (doc 06 §21).
+    const res = await this.pool.query(
+      `INSERT INTO public.payment_events (payment_id, provider_event_id, payload, signature_ok)
+       VALUES ($1, $2, $3::jsonb, $4)
+       ON CONFLICT (provider_event_id) DO NOTHING
+       RETURNING id`,
+      [entry.paymentId, entry.providerEventId, JSON.stringify(entry.payload), entry.signatureOk],
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  async confirmPayment(paymentId: string): Promise<'confirmed' | 'illegal'> {
+    return this.withTx(async (q) => {
+      const p = await q(
+        `UPDATE public.payments SET state = 'CONFIRMED', confirmed_at = now()
+         WHERE id = $1 AND state = 'PENDING' RETURNING order_id`,
+        [paymentId],
+      );
+      const orderRow = p.rows[0];
+      if (!orderRow) return 'illegal';
+      const o = await q(
+        `UPDATE public.orders SET state = 'PAID'
+         WHERE id = $1 AND state = 'PAYMENT_PENDING' RETURNING id`,
+        [String(orderRow['order_id'])],
+      );
+      if (!o.rows[0]) throw new TxAbort('illegal'); // ROLLBACK : jamais payment CONFIRMED sans order PAID
+      return 'confirmed';
+    }).catch((err: unknown) => {
+      if (err instanceof TxAbort) return 'illegal' as const;
+      throw err;
+    });
+  }
+
+  async failPayment(
+    paymentId: string,
+    to: { payment: 'FAILED' | 'CANCELLED'; order: 'FAILED' | 'CANCELLED' },
+  ): Promise<'failed' | 'illegal'> {
+    return this.withTx(async (q) => {
+      const p = await q(
+        `UPDATE public.payments SET state = $2
+         WHERE id = $1 AND state = 'PENDING' RETURNING order_id`,
+        [paymentId, to.payment],
+      );
+      const orderRow = p.rows[0];
+      if (!orderRow) return 'illegal';
+      const o = await q(
+        `UPDATE public.orders SET state = $2
+         WHERE id = $1 AND state = 'PAYMENT_PENDING' RETURNING id`,
+        [String(orderRow['order_id']), to.order],
+      );
+      if (!o.rows[0]) throw new TxAbort('illegal'); // ROLLBACK complet
+      return 'failed';
+    }).catch((err: unknown) => {
+      if (err instanceof TxAbort) return 'illegal' as const;
+      throw err;
+    });
   }
 
   async logAudit(entry: {

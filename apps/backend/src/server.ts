@@ -6,6 +6,7 @@
 import { Pool } from 'pg';
 import { buildApp } from './app.js';
 import { SupabaseAuthVerifier } from './auth.js';
+import { FedaPayClient } from './fedapay.js';
 import { PgRepo } from './repo.js';
 
 const databaseUrl = process.env['DATABASE_URL'];
@@ -24,10 +25,22 @@ const verifier =
   supabaseUrl && supabaseAnonKey ? new SupabaseAuthVerifier(supabaseUrl, supabaseAnonKey) : undefined;
 const devMode = ['1', 'true'].includes((process.env['AUTH_DEV_MODE'] ?? '').toLowerCase());
 
+// IMP-14 — FedaPay : clés depuis l'environnement uniquement (jamais au repo).
+const fedapaySecretKey = process.env['FEDAPAY_SECRET_KEY'];
+const fedapayWebhookSecret = process.env['FEDAPAY_WEBHOOK_SECRET'];
+const fedapayEnvironment = process.env['FEDAPAY_ENVIRONMENT'] === 'live' ? 'live' : 'sandbox';
+const provider = fedapaySecretKey
+  ? new FedaPayClient({ secretKey: fedapaySecretKey, environment: fedapayEnvironment })
+  : undefined;
+
 const app = await buildApp({
   repo,
   logger: true,
   auth: { devMode, ...(verifier ? { verifier } : {}) },
+  payment: {
+    ...(provider ? { provider } : {}),
+    ...(fedapayWebhookSecret ? { webhookSecret: fedapayWebhookSecret } : {}),
+  },
 });
 const host = process.env['HOST'] ?? '0.0.0.0';
 const port = Number(process.env['PORT'] ?? 3000);

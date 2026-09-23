@@ -177,6 +177,14 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > hors devMode : 503 honnête « Canal SMS non configuré » — **décision propriétaire attendue** :
 > fournisseur SMS (payant) ou OTP Supabase (nécessite aussi un provider SMS). Un JWT Supabase
 > avec phone lie `customers.auth_user_id` (RLS own-rows 0007).
+> **LIVRAISON IMP-14 (23/09/2026)** : intégration FedaPay sandbox — `POST /orders/:id/pay`
+> (transaction + token lien de paiement, `custom_metadata.payment_id` pour corrélation webhook)
+> et `POST /webhooks/fedapay` idempotent : signature `X-FEDAPAY-SIGNATURE` `t=…,s=…` (HMAC-SHA256
+> hex, tolérance 300 s) vérifiée contre l’algorithme du SDK officiel fedapay-node 1.2.5 ;
+> corps brut journalisé même rejeté (`payment_events.signature_ok`) ; dédoublonnage
+> `UNIQUE(provider_event_id)` (doc 06 §20-21) ; vérification montant/devise (doc 06 §23) ;
+> transitions atomiques payment+order (doc 06 §24). Le frontend n’est jamais une preuve de
+> paiement (doc 06 §17). Sans clés : 503 honnêtes. Aucune dépendance npm ajoutée.
 
 ## 6. Workers / jobs
 

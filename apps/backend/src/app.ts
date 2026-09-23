@@ -7,6 +7,13 @@
  */
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
+import { canOrderTransition, type OrderState } from '@dg/shared';
+import {
+  FEDAPAY_SIGNATURE_HEADER,
+  parseWebhookEvent,
+  verifyWebhookSignature,
+  type PaymentProvider,
+} from './fedapay.js';
 import {
   ADMIN_ROLES,
   bearerToken,
@@ -43,6 +50,15 @@ export interface BuildAppOptions {
     sessions?: { ttlMs?: number; now?: () => number };
     /** Limites durcies par route (défaut : request 5/30min, verify 10/min). */
     rateLimits?: { requestMax?: number; verifyMax?: number };
+  };
+  /** IMP-14 — paiement FedaPay : provider (init) + secret webhook (signature). */
+  payment?: {
+    provider?: PaymentProvider;
+    webhookSecret?: string;
+    /** Tolérance anti-replay en secondes (défaut 300, SDK officiel). */
+    toleranceS?: number;
+    /** Horloge injectable (tests). */
+    nowS?: () => number;
   };
 }
 
@@ -175,6 +191,191 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     }
     const offerId = String(order.planSnapshot['offer_id'] ?? '');
     return toOrderView(order, offerId);
+  });
+
+  // ---------------------------------------------------------------------------
+  // IMP-14 — Paiements : POST /orders/:id/pay (init FedaPay) + webhook signé
+  // Doc 06 §17 : seule la confirmation serveur (webhook) vaut preuve de paiement.
+  // ---------------------------------------------------------------------------
+  const payCfg = opts.payment;
+  const provider = payCfg?.provider;
+
+  app.post('/orders/:id/pay', async (req, reply) => {
+    const parsed = orderIdParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Paramètre invalide', 'id doit être un UUID.'));
+    }
+    const order = await repo.getOrderById(parsed.data.id);
+    if (!order) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Commande introuvable', `Aucune commande avec l'id ${parsed.data.id}.`));
+    }
+    if (!provider) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Paiement non configuré', 'FEDAPAY_SECRET_KEY absente (blueprint §7).'));
+    }
+    const state = order.state as OrderState;
+    const amount = order.planSnapshot['price_snapshot'];
+    if (typeof amount !== 'number' || !Number.isInteger(amount)) {
+      return reply.status(500).type('application/problem+json')
+        .send(problem(500, 'Snapshot invalide', 'price_snapshot manquant dans la commande.'));
+    }
+    if (state === 'PAID' || state === 'TICKET_ALLOCATED' || state === 'DELIVERED') {
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'Commande déjà payée', `État courant : ${state}.`));
+    }
+    const open = await repo.getOpenPaymentForOrder(order.id);
+    if (state === 'PAYMENT_PENDING' && open) {
+      // Rejeu : on ne rappelle JAMAIS le prestataire pour rien (idempotence).
+      return reply.status(200).send({
+        payment_id: open.id,
+        provider_ref: open.providerRef,
+        payment_state: open.state,
+        order_state: order.state,
+        replay: true,
+      });
+    }
+    if (!canOrderTransition(state, 'PAYMENT_PENDING')) {
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'Commande non payable', `État courant : ${state}.`));
+    }
+    const customer = await repo.getCustomerById(order.customerId);
+    if (!customer) {
+      return reply.status(500).type('application/problem+json')
+        .send(problem(500, 'Client introuvable', 'La commande référence un client inexistant.'));
+    }
+    const payment = open && open.state === 'CREATED' ? open : await repo.createPayment(order.id, amount);
+    const offerId = String(order.planSnapshot['offer_id'] ?? 'Wi-Fi');
+    let checkout;
+    try {
+      checkout = await provider.createCheckout({
+        orderId: order.id,
+        paymentId: payment.id,
+        amountFcfa: amount,
+        phone: customer.phone,
+        description: `Deo Gracias Wi-Fi — ${offerId} — commande ${order.id}`,
+      });
+    } catch (err) {
+      app.log.error({ err }, 'FedaPay createCheckout échoué');
+      return reply.status(502).type('application/problem+json')
+        .send(problem(502, 'Prestataire injoignable', 'FedaPay n’a pas accepté la transaction ; réessayez.'));
+    }
+    const marked = await repo.markPaymentAwaitingResult(payment.id, checkout.providerRef);
+    if (marked === 'illegal') {
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'Transition refusée', 'Le paiement ou la commande a changé d’état entre-temps.'));
+    }
+    return reply.status(202).send({
+      payment_id: payment.id,
+      provider_ref: checkout.providerRef,
+      redirect_url: checkout.redirectUrl,
+      payment_state: 'PENDING',
+      order_state: 'PAYMENT_PENDING',
+    });
+  });
+
+  // Webhook : scope encapsulé pour parser le corps en STRING BRUT (exigence de la
+  // vérification de signature — SDK officiel FedaPay : raw body + X-FEDAPAY-SIGNATURE).
+  await app.register(async (scope) => {
+    scope.addContentTypeParser(
+      'application/json',
+      { parseAs: 'string' },
+      (_req, body, done) => {
+        done(null, body);
+      },
+    );
+    scope.post(
+      '/webhooks/fedapay',
+      { config: { rateLimit: { max: 600, timeWindow: 60 * 1000 } } },
+      async (req, reply) => {
+        const secret = payCfg?.webhookSecret;
+        if (!secret) {
+          return reply.status(503).type('application/problem+json')
+            .send(problem(503, 'Webhook non configuré', 'FEDAPAY_WEBHOOK_SECRET absente (blueprint §7).'));
+        }
+        const raw = typeof req.body === 'string' ? req.body : JSON.stringify(req.body ?? '');
+        const check = verifyWebhookSignature(raw, req.headers[FEDAPAY_SIGNATURE_HEADER], secret, {
+          ...(payCfg?.toleranceS !== undefined ? { toleranceS: payCfg.toleranceS } : {}),
+          ...(payCfg?.nowS ? { nowS: payCfg.nowS() } : {}),
+        });
+        const safeJson = (text: string): unknown => {
+          try { return JSON.parse(text) as unknown; } catch { return null; }
+        };
+        if (!check.valid) {
+          // Journal brut AVANT rejet (doc 06 §22 : raw event stored), sans confiance.
+          const lenient = parseWebhookEvent(safeJson(raw));
+          if (lenient) {
+            try {
+              await repo.insertPaymentEvent({
+                paymentId: null,
+                providerEventId: `fedapay:${lenient.eventId}:unsigned`,
+                payload: safeJson(raw),
+                signatureOk: false,
+              });
+            } catch { /* le rejet 400 prime sur l'échec de journalisation */ }
+          }
+          return reply.status(400).type('application/problem+json')
+            .send(problem(400, 'Signature invalide', check.reason));
+        }
+        const json = safeJson(raw);
+        const event = parseWebhookEvent(json);
+        if (!event) {
+          return reply.status(400).type('application/problem+json')
+            .send(problem(400, 'Payload invalide', 'Événement FedaPay illisible (id/name manquants).'));
+        }
+        // Localisation du paiement : custom_metadata.payment_id d'abord, reference ensuite.
+        let payment = event.metadataPaymentId ? await repo.getPaymentById(event.metadataPaymentId) : null;
+        if (!payment && event.reference) payment = await repo.getPaymentByProviderRef(event.reference);
+
+        const inserted = await repo.insertPaymentEvent({
+          paymentId: payment?.id ?? null,
+          providerEventId: `fedapay:${event.eventId}`,
+          payload: json,
+          signatureOk: true,
+        });
+        if (!inserted) return reply.status(200).send({ duplicate: true, event_id: event.eventId });
+
+        switch (event.eventName) {
+          case 'transaction.approved': {
+            if (!payment) return reply.status(200).send({ ignored: 'payment_introuvable', event_id: event.eventId });
+            const currencyOk = event.currencyIso === null || event.currencyIso === 'XOF';
+            if (!currencyOk || event.amount === null || event.amount !== payment.amountFcfa) {
+              // Doc 06 §23 : montant/divise divergents => on ne confirme JAMAIS.
+              await repo.logAudit({
+                actor: 'system',
+                action: 'payment_amount_mismatch',
+                entity: 'payments',
+                entityId: payment.id,
+              });
+              return reply.status(200).send({ ignored: 'montant_divergent', event_id: event.eventId });
+            }
+            const res = await repo.confirmPayment(payment.id);
+            return reply.status(200).send(
+              res === 'confirmed'
+                ? { processed: 'confirmed', event_id: event.eventId, payment_id: payment.id, order_state: 'PAID' }
+                : { ignored: 'transition_illegale', event_id: event.eventId },
+            );
+          }
+          case 'transaction.declined':
+          case 'transaction.canceled': {
+            if (!payment) return reply.status(200).send({ ignored: 'payment_introuvable', event_id: event.eventId });
+            const to =
+              event.eventName === 'transaction.declined'
+                ? { payment: 'FAILED' as const, order: 'FAILED' as const }
+                : { payment: 'CANCELLED' as const, order: 'CANCELLED' as const };
+            const res = await repo.failPayment(payment.id, to);
+            return reply.status(200).send(
+              res === 'failed'
+                ? { processed: event.eventName === 'transaction.declined' ? 'failed' : 'canceled', event_id: event.eventId }
+                : { ignored: 'transition_illegale', event_id: event.eventId },
+            );
+          }
+          default:
+            return reply.status(200).send({ ignored: 'evenement_non_gere', event_id: event.eventId, name: event.eventName });
+        }
+      },
+    );
   });
 
   // ---------------------------------------------------------------------------

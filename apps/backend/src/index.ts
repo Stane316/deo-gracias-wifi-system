@@ -12,7 +12,22 @@ export {
   type BackendRepo,
   type CreateOrderInputDb,
   type OrderRecord,
+  type PaymentRecord,
 } from './repo.js';
+export {
+  FEDAPAY_SIGNATURE_HEADER,
+  FedaPayClient,
+  computeWebhookSignature,
+  generateTestHeaderString,
+  parseWebhookEvent,
+  verifyWebhookSignature,
+  type CheckoutInput,
+  type CheckoutResult,
+  type FedaPayClientOptions,
+  type FedaPayWebhookEvent,
+  type PaymentProvider,
+  type WebhookVerifyResult,
+} from './fedapay.js';
 export {
   ADMIN_ROLES,
   OtpStore,

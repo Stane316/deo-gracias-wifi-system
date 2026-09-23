@@ -10,6 +10,7 @@ import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from './app.js';
 import type { AuthIdentity, AuthVerifier } from './auth.js';
+import { generateTestHeaderString, type CheckoutInput, type CheckoutResult, type PaymentProvider } from './fedapay.js';
 import { PgRepo } from './repo.js';
 
 class FakeVerifier implements AuthVerifier {
@@ -222,5 +223,176 @@ describeDb('PgRepo + API sur Postgres réel (DATABASE_URL)', () => {
     const res = await app.inject({ method: 'GET', url: `/orders/${id}` });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ id, state: 'CREATED', offer_id: '24-HEURES' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMP-14 — Paiements FedaPay sur Postgres réel : init + webhook signé idempotent.
+// Fixtures : clés itest-imp14-pg-%, téléphones 019714%, event ids itest-imp14-pg:<uuid>.
+// payment_events est nettoyable ici (pas de trigger deny, contrairement à audit_logs).
+// ---------------------------------------------------------------------------
+class FakeProviderPg implements PaymentProvider {
+  async createCheckout(_input: CheckoutInput): Promise<CheckoutResult> {
+    return { providerRef: `REF-PG-${randomUUID().slice(0, 8)}`, redirectUrl: 'https://pay.fedapay.com/x' };
+  }
+}
+
+describeDb('IMP-14 — paiements + webhooks sur Postgres réel', () => {
+  const pool2 = new Pool({ connectionString: DATABASE_URL });
+  const repo2 = new PgRepo(pool2);
+  const WH_SECRET = 'wh_sandbox_pg_integration';
+  let payApp: Awaited<ReturnType<typeof buildApp>>;
+
+  const cleanup14 = async (): Promise<void> => {
+    // Portée large : clés itest-imp14-pg-% ET téléphones 019714% (un test interrompu
+    // ou un script de debug ne doit jamais bloquer les runs suivants — leçon IMP-09).
+    await pool2.query(
+      `DELETE FROM public.payment_events
+       WHERE provider_event_id LIKE 'fedapay:itest-imp14-pg:%'
+          OR payment_id IN (
+            SELECT p.id FROM public.payments p
+            JOIN public.orders o ON o.id = p.order_id
+            JOIN public.customers c ON c.id = o.customer_id
+            WHERE c.phone LIKE '019714%')`,
+    );
+    await pool2.query(
+      `DELETE FROM public.payments WHERE order_id IN (
+         SELECT o.id FROM public.orders o
+         JOIN public.customers c ON c.id = o.customer_id
+         WHERE c.phone LIKE '019714%' OR o.idempotency_key LIKE 'itest-imp14-pg-%')`,
+    );
+    await pool2.query(
+      `DELETE FROM public.orders
+       WHERE idempotency_key LIKE 'itest-imp14-pg-%'
+          OR customer_id IN (SELECT id FROM public.customers WHERE phone LIKE '019714%')`,
+    );
+    await pool2.query(`DELETE FROM public.customers WHERE phone LIKE '019714%'`);
+  };
+
+  beforeAll(async () => {
+    await cleanup14();
+    payApp = await buildApp({ repo: repo2, payment: { provider: new FakeProviderPg(), webhookSecret: WH_SECRET } });
+  });
+  afterAll(async () => {
+    await cleanup14();
+    await payApp.close();
+    await pool2.end();
+  });
+
+  const createOrder14 = async (key: string, phone: string) => {
+    const res = await payApp.inject({
+      method: 'POST',
+      url: '/orders',
+      headers: { 'idempotency-key': key },
+      payload: { offer_id: '24-HEURES', customer_phone: phone },
+    });
+    expect(res.statusCode).toBe(201);
+    const { id } = res.json() as { id: string };
+    const order = await repo2.getOrderById(id);
+    return { id, amount_fcfa: order?.planSnapshot['price_snapshot'] as number };
+  };
+
+  const pay = async (orderId: string) => {
+    const res = await payApp.inject({ method: 'POST', url: `/orders/${orderId}/pay` });
+    expect(res.statusCode).toBe(202);
+    return res.json() as Record<string, unknown>;
+  };
+
+  const sendEvent = (eventId: string, name: string, ref: string, amount: number, paymentId?: string) => {
+    const body = JSON.stringify({
+      id: eventId,
+      name,
+      entity: {
+        reference: ref,
+        amount,
+        status: name === 'transaction.approved' ? 'approved' : 'declined',
+        currency: { iso: 'XOF' },
+        ...(paymentId ? { custom_metadata: { payment_id: paymentId } } : {}),
+      },
+    });
+    const header = generateTestHeaderString({ payload: body, secret: WH_SECRET });
+    return payApp.inject({
+      method: 'POST',
+      url: '/webhooks/fedapay',
+      headers: { 'content-type': 'application/json', 'x-fedapay-signature': header },
+      payload: body,
+    });
+  };
+
+  it('flux complet : init 202 → webhook approved signé → payment CONFIRMED + order PAID en base', async () => {
+    const order = await createOrder14('itest-imp14-pg-0001', '0197140001');
+    const p = await pay(order.id);
+    const paymentId = p['payment_id'] as string;
+    const providerRef = p['provider_ref'] as string;
+
+    // Etat persisté après init (doc 06 §15 : INITIATED puis PENDING).
+    const dbPay = await pool2.query(`SELECT state, provider_ref, amount_fcfa FROM public.payments WHERE id = $1`, [paymentId]);
+    expect(dbPay.rows[0]).toMatchObject({ state: 'PENDING', provider_ref: providerRef, amount_fcfa: order.amount_fcfa });
+    const dbOrd = await pool2.query(`SELECT state FROM public.orders WHERE id = $1`, [order.id]);
+    expect(dbOrd.rows[0]).toMatchObject({ state: 'PAYMENT_PENDING' });
+
+    const eventId = `itest-imp14-pg:${randomUUID()}`;
+    const first = await sendEvent(eventId, 'transaction.approved', providerRef, order.amount_fcfa, paymentId);
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ processed: 'confirmed', order_state: 'PAID' });
+
+    const dbPay2 = await pool2.query(`SELECT state, confirmed_at FROM public.payments WHERE id = $1`, [paymentId]);
+    expect(dbPay2.rows[0]).toMatchObject({ state: 'CONFIRMED' });
+    expect(dbPay2.rows[0]?.['confirmed_at']).not.toBeNull();
+    expect((await pool2.query(`SELECT state FROM public.orders WHERE id = $1`, [order.id])).rows[0]).toMatchObject({ state: 'PAID' });
+
+    // Replay x2 du même événement : idempotence stricte (doc 06 §20).
+    const r2 = await sendEvent(eventId, 'transaction.approved', providerRef, order.amount_fcfa, paymentId);
+    const r3 = await sendEvent(eventId, 'transaction.approved', providerRef, order.amount_fcfa, paymentId);
+    expect(r2.json()).toMatchObject({ duplicate: true });
+    expect(r3.json()).toMatchObject({ duplicate: true });
+    const evCount = await pool2.query(`SELECT count(*)::int AS n FROM public.payment_events WHERE provider_event_id = $1`, [`fedapay:${eventId}`]);
+    expect(evCount.rows[0]?.['n']).toBe(1);
+  });
+
+  it('signature invalide : 400, paiement jamais confirmé, événement journalisé signature_ok=false', async () => {
+    const order = await createOrder14('itest-imp14-pg-0002', '0197140002');
+    const p = await pay(order.id);
+    const paymentId = p['payment_id'] as string;
+    const eventId = `itest-imp14-pg:${randomUUID()}`;
+    const body = JSON.stringify({
+      id: eventId, name: 'transaction.approved',
+      entity: { reference: p['provider_ref'], amount: order.amount_fcfa, status: 'approved', custom_metadata: { payment_id: paymentId } },
+    });
+    const header = generateTestHeaderString({ payload: body, secret: 'wh_secret_fraude' });
+    const res = await payApp.inject({
+      method: 'POST',
+      url: '/webhooks/fedapay',
+      headers: { 'content-type': 'application/json', 'x-fedapay-signature': header },
+      payload: body,
+    });
+    expect(res.statusCode).toBe(400);
+    const dbPay = await pool2.query(`SELECT state FROM public.payments WHERE id = $1`, [paymentId]);
+    expect(dbPay.rows[0]).toMatchObject({ state: 'PENDING' }); // jamais confirmé sans signature
+    const dbEv = await pool2.query(`SELECT signature_ok FROM public.payment_events WHERE provider_event_id = $1`, [`fedapay:${eventId}:unsigned`]);
+    expect(dbEv.rows[0]).toMatchObject({ signature_ok: false });
+  });
+
+  it('montant divergent : ignoré (jamais confirmé) + audit payment_amount_mismatch', async () => {
+    const order = await createOrder14('itest-imp14-pg-0003', '0197140003');
+    const p = await pay(order.id);
+    const paymentId = p['payment_id'] as string;
+    const res = await sendEvent(`itest-imp14-pg:${randomUUID()}`, 'transaction.approved', p['provider_ref'] as string, order.amount_fcfa + 1, paymentId);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ignored: 'montant_divergent' });
+    expect((await pool2.query(`SELECT state FROM public.payments WHERE id = $1`, [paymentId])).rows[0]).toMatchObject({ state: 'PENDING' });
+    const audit = await pool2.query(`SELECT action FROM public.audit_logs WHERE entity = 'payments' AND entity_id = $1`, [paymentId]);
+    expect(audit.rows.map((r) => r['action'])).toContain('payment_amount_mismatch');
+  });
+
+  it('declined : payment FAILED + order FAILED en base', async () => {
+    const order = await createOrder14('itest-imp14-pg-0004', '0197140004');
+    const p = await pay(order.id);
+    const paymentId = p['payment_id'] as string;
+    const res = await sendEvent(`itest-imp14-pg:${randomUUID()}`, 'transaction.declined', p['provider_ref'] as string, order.amount_fcfa, paymentId);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ processed: 'failed' });
+    expect((await pool2.query(`SELECT state FROM public.payments WHERE id = $1`, [paymentId])).rows[0]).toMatchObject({ state: 'FAILED' });
+    expect((await pool2.query(`SELECT state FROM public.orders WHERE id = $1`, [order.id])).rows[0]).toMatchObject({ state: 'FAILED' });
   });
 });

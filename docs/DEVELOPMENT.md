@@ -64,7 +64,8 @@ curl -X POST http://127.0.0.1:3000/orders -H 'content-type: application/json' \
 Routes livrees : `GET /healthz`, `GET /readyz`, `GET /offers`, `POST /orders`
 (Idempotency-Key obligatoire, doc 06 §21), `GET /orders/:id` (IMP-12) ;
 `POST /auth/phone/request`, `POST /auth/phone/verify`, `POST /auth/logout`,
-`GET /auth/me`, `GET /admin/me` (IMP-13). Erreurs RFC 7807
+`GET /auth/me`, `GET /admin/me` (IMP-13) ; `POST /orders/:id/pay`,
+`POST /webhooks/fedapay` (IMP-14). Erreurs RFC 7807
 (`application/problem+json`) ; rate-limit 100 req/min/IP (durci sur /auth :
 5 req/30 min et 10/min) ; prix toujours calcule cote serveur (doc 10 §10.3 —
 le body est strict, toute cle inconnue est rejetee).
@@ -85,10 +86,28 @@ le body est strict, toute cle inconnue est rejetee).
 - Un JWT Supabase avec `phone` reconnu sur `GET /auth/me` lie automatiquement
   `customers.auth_user_id` (active les politiques RLS « own rows » de 0007).
 
+## Paiements FedaPay (IMP-14)
+
+- `POST /orders/:id/pay` : cree la transaction FedaPay (sandbox par defaut),
+  stocke `payments` (CREATED→INITIATED→PENDING), passe la commande
+  PAYMENT_PENDING et retourne `provider_ref` + `redirect_url`. Rejeu = 200
+  `replay:true` sans rappeler le prestataire. Sans `FEDAPAY_SECRET_KEY` :
+  503 honnete. Prix envoye = snapshot serveur (doc 10 §10.3).
+- `POST /webhooks/fedapay` : **seule preuve de paiement** (doc 06 §17 — le
+  frontend n'en est jamais une). Signature `X-FEDAPAY-SIGNATURE` = `t=…,s=…`
+  (HMAC-SHA256 hex de `${t}.${corps brut}`, tolerance 300 s) — algorithme
+  verifie sur le SDK officiel fedapay-node 1.2.5 (`WebhookSignature`). Pipeline
+  doc 06 §22 : corps brut stocke meme en cas de rejet (`signature_ok=false`),
+  dedoublonnage par `UNIQUE(provider_event_id)`, verification montant/devise,
+  transition atomique payment+order (doc 06 §24), evenement marque traite.
+  `transaction.approved`→CONFIRMED/PAID ; `declined`→FAILED ; `canceled`→CANCELLED.
+- Aucune dependance npm ajoutee (fetch natif + node:crypto) ; aucun appel
+  reseau dans les tests (fetch stubbe + signatures generees localement).
+
 Tests : unitaires (fake repo, sans base) + **integration reelle** `repo.pg.test.ts`
 executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
-`postgres:17` + migrations dans le job `Typecheck + tests`). Attendu : 81/81 avec
-base, 72 + 9 skips sans.
+`postgres:17` + migrations dans le job `Typecheck + tests`). Attendu : 106/106
+avec base (backend 71 dont 13 d'integration), 93 + 13 skips sans.
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 
