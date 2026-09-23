@@ -1,5 +1,5 @@
 /**
- * IMP-12 — Tests d'intégration RÉELS (PgRepo sur Postgres migré 0001→0009).
+ * IMP-12 — Tests d'intégration RÉELS (PgRepo sur Postgres migré 0001→0010).
  * Exécutés seulement si DATABASE_URL est définie (CI : service postgres:17 ;
  * local : tools/db-migrate.sh up). Hygiène : fixtures nettoyées avant/après
  * (leçon IMP-09 : des fixtures orphelines font échouer les runs suivants).
@@ -12,6 +12,7 @@ import { buildApp } from './app.js';
 import type { AuthIdentity, AuthVerifier } from './auth.js';
 import { generateTestHeaderString, type CheckoutInput, type CheckoutResult, type PaymentProvider } from './fedapay.js';
 import { PgRepo } from './repo.js';
+import { computeSyncState, startOfBusinessDay } from './admin.js';
 import { allocateAndDeliver } from './tickets.js';
 
 class FakeVerifier implements AuthVerifier {
@@ -755,5 +756,122 @@ describeDb('IMP-16 — stock Mikmon seedé (0010) sur Postgres réel', () => {
        WHERE b.notes = 'mikmon-2026-09-17-B3' AND t.db_state = 'AVAILABLE'`,
     );
     expect(after.rows[0]?.['n']).toBe(Number(before.rows[0]?.['n'])); // stock intact
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// IMP-17 — Statistiques admin (dashboard, tickets/stats, ack alertes) sur
+// Postgres réel. Fixtures : règles d'alerte/types d'incident préfixés
+// 'itest-imp17-', verrous sync 'itest-imp17-'. Lecture seule sur le stock
+// seedé (aucune consommation — pas de parking nécessaire).
+// ---------------------------------------------------------------------------
+describeDb('IMP-17 — statistiques admin sur Postgres réel', () => {
+  const pool17 = new Pool({ connectionString: DATABASE_URL });
+  const repo17 = new PgRepo(pool17);
+
+  const cleanup17 = async (): Promise<void> => {
+    await pool17.query(`DELETE FROM public.alerts WHERE rule LIKE 'itest-imp17-%'`);
+    await pool17.query(`DELETE FROM public.incidents WHERE type LIKE 'itest-imp17-%'`);
+    await pool17.query(`DELETE FROM public.mikrotik_sync WHERE locked_by LIKE 'itest-imp17-%'`);
+  };
+
+  beforeAll(async () => { await cleanup17(); });
+  afterAll(async () => { await cleanup17(); await pool17.end(); });
+
+  it("dashboard réel : le stock seedé 0010 apparaît dans l\u0027inventaire (doc 09 §12.1)", async () => {
+    const stats = await repo17.getAdminDashboardStats(startOfBusinessDay(new Date()));
+    // Les 660 tickets du manifeste sont disponibles (IMP-14/15 restaurent, IMP-16 restaure).
+    const totals = Object.entries(stats.ticketsByState);
+    const available = totals
+      .filter(([st]) => st === 'AVAILABLE' || st === 'RELEASED')
+      .reduce((acc, [, n]) => acc + n, 0);
+    expect(available).toBeGreaterThanOrEqual(660);
+    // Chaque offre de la Grille A a son stock seedé minimum du manifeste.
+    const minParOffre: Record<string, number> = {
+      '5-HEURES': 300, '12-HEURES': 60, '24-HEURES': 100,
+      '72-HEURES': 120, '1-SEMAINE': 40, '1-MOIS': 40,
+    };
+    for (const [offre, min] of Object.entries(minParOffre)) {
+      expect(stats.availableByOffer[offre] ?? 0, `stock ${offre}`).toBeGreaterThanOrEqual(min);
+    }
+    expect(stats.incidentsOpen).toBeGreaterThanOrEqual(0);
+    expect(Number.isInteger(stats.ordersCountToday)).toBe(true);
+    expect(Number.isInteger(stats.revenueTodayFcfa)).toBe(true);
+  });
+
+  it('tickets/stats réel : 6 offres Grille A avec prix officiels et distribution du manifeste', async () => {
+    const rows = await repo17.getTicketsStatsByOffer();
+    expect(rows).toHaveLength(6);
+    const parOffre = new Map(rows.map((r) => [r.offerId, r]));
+    const prixAttendus: Record<string, number> = {
+      '5-HEURES': 100, '12-HEURES': 200, '24-HEURES': 300,
+      '72-HEURES': 500, '1-SEMAINE': 1000, '1-MOIS': 4000,
+    };
+    const dispoAttendu: Record<string, number> = {
+      '5-HEURES': 300, '12-HEURES': 60, '24-HEURES': 100,
+      '72-HEURES': 120, '1-SEMAINE': 40, '1-MOIS': 40,
+    };
+    for (const [offre, prix] of Object.entries(prixAttendus)) {
+      const row = parOffre.get(offre);
+      expect(row, offre).toBeDefined();
+      expect(row?.priceFcfa).toBe(prix);
+      expect((row?.states['AVAILABLE'] ?? 0) >= (dispoAttendu[offre] ?? 0), `${offre} dispo`).toBe(true);
+    }
+  });
+
+  it("ack d\u0027alerte réel : premier ack horodaté, rejeu idempotent, inconnu = null, audit persisté", async () => {
+    const inserted = await pool17.query(
+      `INSERT INTO public.alerts (rule, payload, severity)
+       VALUES ('itest-imp17-stock-faible', '{"offre":"1-MOIS"}'::jsonb, 'WARNING') RETURNING id`,
+    );
+    const alertId = String(inserted.rows[0]?.['id']);
+
+    const first = await repo17.acknowledgeAlert(alertId);
+    expect(first).toMatchObject({ id: alertId, rule: 'itest-imp17-stock-faible', severity: 'WARNING', alreadyAcknowledged: false });
+    expect(first?.acknowledgedAt).toBeInstanceOf(Date);
+
+    const row = await pool17.query(`SELECT acknowledged_at FROM public.alerts WHERE id = $1`, [alertId]);
+    expect(row.rows[0]?.['acknowledged_at']).not.toBeNull();
+
+    const second = await repo17.acknowledgeAlert(alertId);
+    expect(second).toMatchObject({ id: alertId, alreadyAcknowledged: true });
+    expect(second?.acknowledgedAt.toISOString()).toBe(first?.acknowledgedAt.toISOString());
+
+    expect(await repo17.acknowledgeAlert(randomUUID())).toBeNull();
+
+    // Audit réel persisté (doc 09 §F).
+    await repo17.logAudit({ actor: 'admin:test', action: 'admin_alert_ack', entity: 'alerts', entityId: alertId });
+    const audit = await pool17.query(
+      `SELECT count(*)::int AS n FROM public.audit_logs WHERE action = 'admin_alert_ack' AND entity_id = $1`,
+      [alertId],
+    );
+    expect(Number(audit.rows[0]?.['n'])).toBeGreaterThanOrEqual(1);
+  });
+
+  it('sync_state réel : FAILED => ERROR, PENDING => WARNING, SUCCESS seul => HEALTHY', async () => {
+    const since = startOfBusinessDay(new Date());
+    // Échec de synchro => ERROR (doc 09 §4.E « synchronisation échouée »).
+    await pool17.query(
+      `INSERT INTO public.mikrotik_sync (operation, payload, state, locked_by)
+       VALUES ('read_status', '{}'::jsonb, 'FAILED', 'itest-imp17-worker')`,
+    );
+    let stats = await repo17.getAdminDashboardStats(since);
+    expect(computeSyncState({ pending: stats.syncPending, failed: stats.syncFailed, success: stats.syncSuccess })).toBe('ERROR');
+
+    // Plus d'échec mais file en attente => WARNING.
+    await pool17.query(`DELETE FROM public.mikrotik_sync WHERE locked_by = 'itest-imp17-worker'`);
+    await pool17.query(
+      `INSERT INTO public.mikrotik_sync (operation, payload, state, locked_by)
+       VALUES ('create_ticket', '{}'::jsonb, 'PENDING', 'itest-imp17-worker')`,
+    );
+    stats = await repo17.getAdminDashboardStats(since);
+    expect(computeSyncState({ pending: stats.syncPending, failed: stats.syncFailed, success: stats.syncSuccess })).toBe('WARNING');
+
+    // Succès seul => HEALTHY (chaîne légale 0009 : PENDING→PROCESSING→SUCCESS).
+    await pool17.query(`UPDATE public.mikrotik_sync SET state = 'PROCESSING' WHERE locked_by = 'itest-imp17-worker'`);
+    await pool17.query(`UPDATE public.mikrotik_sync SET state = 'SUCCESS' WHERE locked_by = 'itest-imp17-worker'`);
+    stats = await repo17.getAdminDashboardStats(since);
+    expect(computeSyncState({ pending: stats.syncPending, failed: stats.syncFailed, success: stats.syncSuccess })).toBe('HEALTHY');
   });
 });
