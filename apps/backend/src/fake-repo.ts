@@ -4,7 +4,15 @@
  */
 import { OFFERS } from '@dg/shared';
 import { randomUUID } from 'node:crypto';
-import type { ActivePlan, BackendRepo, CreateOrderInputDb, OrderRecord, PaymentRecord } from './repo.js';
+import type {
+  ActivePlan,
+  AllocateResult,
+  BackendRepo,
+  CreateOrderInputDb,
+  OrderRecord,
+  PaymentRecord,
+  TicketRecord,
+} from './repo.js';
 
 export class FakeRepo implements BackendRepo {
   pingFails = false;
@@ -51,6 +59,7 @@ export class FakeRepo implements BackendRepo {
     const order: OrderRecord = {
       id: randomUUID(),
       customerId: input.customerId,
+      planId: this.getOrCreatePlanId(String(input.planSnapshot['offer_id'] ?? 'INCONNU')),
       state: 'CREATED',
       currency: 'XOF',
       planSnapshot: input.planSnapshot,
@@ -64,6 +73,83 @@ export class FakeRepo implements BackendRepo {
   async getOrderById(id: string): Promise<OrderRecord | null> {
     return this.orders.get(id) ?? null;
   }
+  // --- IMP-15 : plans + tickets + allocation (mêmes sémantiques que PgRepo) ---
+  private planIds = new Map<string, string>();
+
+  getOrCreatePlanId(offerId: string): string {
+    let id = this.planIds.get(offerId);
+    if (!id) {
+      id = randomUUID();
+      this.planIds.set(offerId, id);
+    }
+    return id;
+  }
+
+  tickets = new Map<string, TicketRecord>();
+
+  /** Fixture de test : ajoute un ticket AVAILABLE pour une offre. */
+  seedTicket(offerId: string, prefix = 'TEST'): TicketRecord {
+    const ticket: TicketRecord = {
+      id: randomUUID(),
+      batchId: randomUUID(),
+      planId: this.getOrCreatePlanId(offerId),
+      dbState: 'AVAILABLE',
+      routerState: 'UNUSED',
+      orderId: null,
+      codePrefixHint: prefix,
+      soldAt: null,
+      mikrotikComment: null,
+    };
+    this.tickets.set(ticket.id, ticket);
+    return ticket;
+  }
+
+  async allocateTicketForOrder(orderId: string): Promise<AllocateResult> {
+    const order = this.orders.get(orderId);
+    if (!order) return { status: 'illegal' };
+    if (order.state === 'TICKET_ALLOCATED' || order.state === 'DELIVERED') {
+      const existing = [...this.tickets.values()].find(
+        (t) => t.orderId === orderId && (t.dbState === 'SOLD' || t.dbState === 'USED'),
+      );
+      return existing
+        ? { status: 'allocated', ticketId: existing.id, codePrefixHint: existing.codePrefixHint }
+        : { status: 'illegal' };
+    }
+    if (order.state !== 'PAID') return { status: 'illegal' };
+    const candidate = [...this.tickets.values()].find(
+      (t) => t.planId === order.planId && t.dbState === 'AVAILABLE',
+    );
+    if (!candidate) return { status: 'no-stock' };
+    candidate.dbState = 'SOLD';
+    candidate.orderId = orderId;
+    candidate.soldAt = new Date();
+    order.state = 'TICKET_ALLOCATED';
+    return { status: 'allocated', ticketId: candidate.id, codePrefixHint: candidate.codePrefixHint };
+  }
+
+  async deliverOrder(orderId: string): Promise<'delivered' | 'already-delivered' | 'illegal'> {
+    const order = this.orders.get(orderId);
+    if (!order) return 'illegal';
+    if (order.state === 'DELIVERED') return 'already-delivered';
+    if (order.state !== 'TICKET_ALLOCATED') return 'illegal';
+    order.state = 'DELIVERED';
+    return 'delivered';
+  }
+
+  async getSoldTicketsForCustomer(
+    customerId: string,
+  ): Promise<Array<TicketRecord & { offerId: string | null }>> {
+    const out: Array<TicketRecord & { offerId: string | null }> = [];
+    for (const t of this.tickets.values()) {
+      if (t.dbState !== 'SOLD' && t.dbState !== 'USED') continue;
+      if (!t.orderId) continue;
+      const order = this.orders.get(t.orderId);
+      if (!order || order.customerId !== customerId) continue;
+      out.push({ ...t, offerId: String(order.planSnapshot['offer_id'] ?? '') || null });
+    }
+    return out;
+  }
+
   // --- IMP-14 : paiements + webhooks (mêmes sémantiques que PgRepo) ---
   payments = new Map<string, PaymentRecord>();
   paymentEvents = new Set<string>();

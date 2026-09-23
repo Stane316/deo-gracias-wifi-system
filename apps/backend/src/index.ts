@@ -5,14 +5,17 @@
  */
 export const APP_NAME = 'dg-backend' as const;
 export { buildApp, type BuildAppOptions } from './app.js';
+export { allocateAndDeliver, type DeliveryLog, type DeliveryOutcome } from './tickets.js';
 export {
   PgRepo,
   buildPlanSnapshot,
   type ActivePlan,
   type BackendRepo,
   type CreateOrderInputDb,
+  type AllocateResult,
   type OrderRecord,
   type PaymentRecord,
+  type TicketRecord,
 } from './repo.js';
 export {
   FEDAPAY_SIGNATURE_HEADER,

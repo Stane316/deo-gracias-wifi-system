@@ -164,9 +164,10 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **106/106** avec DATABASE_URL
-(backend 71 dont 13 d'intégration réelle, shared 33, frontend 1, connector 1),
-93 + 13 skippés sans. C'est exactement ce que joue la CI GitHub à chaque push.
+Attendu actuellement : typecheck 4/4 ; tests **117/117** avec DATABASE_URL
+(backend 82 dont 16 d'intégration réelle — y compris concurrence d'allocation
+de tickets, shared 33, frontend 1, connector 1), 101 + 16 skippés sans.
+C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo
 

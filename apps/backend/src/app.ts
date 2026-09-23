@@ -6,7 +6,7 @@
  * Les routes paiements/tickets/admin/connector arrivent en IMP-13→21.
  */
 import rateLimit from '@fastify/rate-limit';
-import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
 import { canOrderTransition, type OrderState } from '@dg/shared';
 import {
   FEDAPAY_SIGNATURE_HEADER,
@@ -34,6 +34,7 @@ import {
   type OrderView,
 } from './schemas.js';
 import { buildPlanSnapshot, type BackendRepo, type OrderRecord } from './repo.js';
+import { allocateAndDeliver } from './tickets.js';
 
 export interface BuildAppOptions {
   repo: BackendRepo;
@@ -351,11 +352,20 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
               return reply.status(200).send({ ignored: 'montant_divergent', event_id: event.eventId });
             }
             const res = await repo.confirmPayment(payment.id);
-            return reply.status(200).send(
-              res === 'confirmed'
-                ? { processed: 'confirmed', event_id: event.eventId, payment_id: payment.id, order_state: 'PAID' }
-                : { ignored: 'transition_illegale', event_id: event.eventId },
-            );
+            if (res !== 'confirmed') {
+              return reply.status(200).send({ ignored: 'transition_illegale', event_id: event.eventId });
+            }
+            // IMP-15 (doc 06 §90 étapes 11-15) : paiement confirmé => allocation
+            // atomique du ticket puis livraison. Échec de stock = le paiement
+            // CONFIRMÉ est préservé, l'ordre reste PAID (invariant 6, §88 retry).
+            const delivery = await allocateAndDeliver(repo, payment.orderId, app.log);
+            return reply.status(200).send({
+              processed: 'confirmed',
+              event_id: event.eventId,
+              payment_id: payment.id,
+              order_state: delivery.orderState,
+              delivery: delivery.status,
+            });
           }
           case 'transaction.declined':
           case 'transaction.canceled': {
@@ -376,6 +386,90 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         }
       },
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // IMP-15 — Tickets : GET /tickets/mine (client) + POST /admin/orders/:id/allocate
+  // (retry admin, matrice de récupération doc 06 §88). JAMAIS de code en clair :
+  // la base ne stocke que code_hash (0004) — la réponse expose l'empreinte info
+  // (préfixe/état) uniquement.
+  // ---------------------------------------------------------------------------
+  const resolveCustomerId = async (req: FastifyRequest): Promise<string | null> => {
+    const token = bearerToken(req);
+    if (!token) return null;
+    const session = sessions.get(token);
+    if (session) return session.customerId;
+    if (verifier) {
+      const identity = await verifier.verify(token);
+      if (identity) {
+        const phoneParsed = identity.phone ? phoneSchema.safeParse(identity.phone) : null;
+        if (phoneParsed?.success) {
+          const customerId = await repo.findOrCreateCustomer(phoneParsed.data);
+          await repo.linkCustomerAuth(customerId, identity.sub);
+          return customerId;
+        }
+      }
+    }
+    return null;
+  };
+
+  app.get('/tickets/mine', async (req, reply) => {
+    const customerId = await resolveCustomerId(req);
+    if (!customerId) {
+      return reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', GENERIC_401));
+    }
+    const tickets = await repo.getSoldTicketsForCustomer(customerId);
+    return {
+      customer_id: customerId,
+      tickets: tickets.map((t) => ({
+        id: t.id,
+        offer_id: t.offerId,
+        db_state: t.dbState,
+        router_state: t.routerState,
+        sold_at: t.soldAt,
+        code_prefix_hint: t.codePrefixHint,
+      })),
+    };
+  });
+
+  app.post('/admin/orders/:id/allocate', async (req, reply) => {
+    if (!verifier) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    const actor = identity ? `admin:${identity.sub}` : 'anonymous';
+    if (!identity || !identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({
+        actor,
+        action: 'admin_auth_denied',
+        entity: 'auth',
+        ...(identity ? { entityId: identity.sub } : {}),
+      });
+      return reply.status(identity ? 403 : 401).type('application/problem+json')
+        .send(problem(identity ? 403 : 401, identity ? 'Accès refusé' : 'Authentification échouée',
+          identity ? 'Rôle administrateur requis.' : GENERIC_401));
+    }
+    const parsed = orderIdParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Paramètre invalide', 'id doit être un UUID.'));
+    }
+    const order = await repo.getOrderById(parsed.data.id);
+    if (!order) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Commande introuvable', `Aucune commande avec l'id ${parsed.data.id}.`));
+    }
+    const outcome = await allocateAndDeliver(repo, order.id, app.log);
+    await repo.logAudit({
+      actor,
+      action: `admin_allocate_${outcome.status}`,
+      entity: 'orders',
+      entityId: order.id,
+    });
+    return reply.status(200).send(outcome);
   });
 
   // ---------------------------------------------------------------------------

@@ -65,7 +65,8 @@ Routes livrees : `GET /healthz`, `GET /readyz`, `GET /offers`, `POST /orders`
 (Idempotency-Key obligatoire, doc 06 §21), `GET /orders/:id` (IMP-12) ;
 `POST /auth/phone/request`, `POST /auth/phone/verify`, `POST /auth/logout`,
 `GET /auth/me`, `GET /admin/me` (IMP-13) ; `POST /orders/:id/pay`,
-`POST /webhooks/fedapay` (IMP-14). Erreurs RFC 7807
+`POST /webhooks/fedapay` (IMP-14) ; `GET /tickets/mine`,
+`POST /admin/orders/:id/allocate` (IMP-15). Erreurs RFC 7807
 (`application/problem+json`) ; rate-limit 100 req/min/IP (durci sur /auth :
 5 req/30 min et 10/min) ; prix toujours calcule cote serveur (doc 10 §10.3 —
 le body est strict, toute cle inconnue est rejetee).
@@ -104,10 +105,30 @@ le body est strict, toute cle inconnue est rejetee).
 - Aucune dependance npm ajoutee (fetch natif + node:crypto) ; aucun appel
   reseau dans les tests (fetch stubbe + signatures generees localement).
 
+## Tickets : allocation atomique + livraison (IMP-15)
+
+- Apres un webhook `transaction.approved` valide, le backend : confirme le
+  paiement, **alloue atomiquement** un ticket `AVAILABLE` du plan de la commande
+  (`SELECT ... FOR UPDATE SKIP LOCKED` puis `RESERVED→SOLD`, commande
+  `PAID→TICKET_ALLOCATED`, le tout en UNE transaction — doc 06 §29-30, jamais
+  deux commandes sur le meme ticket), puis livre (`DELIVERED`, doc 06 §90).
+- Stock epuise : le paiement CONFIRME est preserve, la commande reste `PAID`,
+  audit `ticket_allocation_failed` ; retry admin via
+  `POST /admin/orders/:id/allocate` (matrice de recuperation doc 06 §88).
+- Idempotence : rejeu = jamais de seconde allocation ni double livraison
+  (invariants 2, 5, 7 — doc 06 §89).
+- `GET /tickets/mine` : tickets vendus du client (session phone ou JWT) ;
+  **jamais de code en clair** — la base ne stocke que `code_hash` (0004,
+  INC-01/INC-04) ; la reponse expose l'etat + le prefixe indicatif seulement.
+- L'empaquetage SECURITY DEFINER (blueprint §3.3) interviendra au deploiement
+  Supabase heberge, ou la RLS s'applique aux appelants (decision signalee).
+
 Tests : unitaires (fake repo, sans base) + **integration reelle** `repo.pg.test.ts`
 executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
-`postgres:17` + migrations dans le job `Typecheck + tests`). Attendu : 106/106
-avec base (backend 71 dont 13 d'integration), 93 + 13 skips sans.
+`postgres:17` + migrations dans le job `Typecheck + tests`), dont un test de
+**concurrence reelle** : 6 allocations simultanees sur 3 tickets => exactement
+3 livrees, 0 double attribution. Attendu : 117/117 avec base (backend 82 dont
+16 d'integration), 101 + 16 skips sans.
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

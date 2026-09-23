@@ -19,6 +19,8 @@ export interface ActivePlan {
 export interface OrderRecord {
   id: string;
   customerId: string;
+  /** IMP-15 : plan de la commande (mapping tickets.plan_id lors de l'allocation). */
+  planId: string;
   state: string;
   currency: string;
   planSnapshot: Record<string, unknown>;
@@ -69,6 +71,18 @@ export interface BackendRepo {
     paymentId: string,
     to: { payment: 'FAILED' | 'CANCELLED'; order: 'FAILED' | 'CANCELLED' },
   ): Promise<'failed' | 'illegal'>;
+  // --- IMP-15 : allocation atomique + livraison (doc 06 §29-31, blueprint §3.3) ---
+  /**
+   * Allocation atomique : un ticket AVAILABLE du plan de la commande passe
+   * RESERVED→SOLD et la commande PAID→TICKET_ALLOCATED, en UNE transaction
+   * (FOR UPDATE SKIP LOCKED — doc 06 §30, invariant 2). Jamais deux commandes
+   * sur le même ticket, même sous concurrence.
+   */
+  allocateTicketForOrder(orderId: string): Promise<AllocateResult>;
+  /** TICKET_ALLOCATED→DELIVERED ; idempotent (invariant 7 : jamais double livraison). */
+  deliverOrder(orderId: string): Promise<'delivered' | 'already-delivered' | 'illegal'>;
+  /** Tickets vendus d'un client (own rows, blueprint §6) — JAMAIS de code en clair. */
+  getSoldTicketsForCustomer(customerId: string): Promise<Array<TicketRecord & { offerId: string | null }>>;
   /** Journalisation des connexions admin (doc 09 §8) — audit_logs insert-only. */
   logAudit(entry: {
     actor: string;
@@ -116,9 +130,39 @@ export interface PaymentRecord {
   updatedAt: Date;
 }
 
+interface TicketRow {
+  id: string;
+  batch_id: string;
+  plan_id: string;
+  db_state: string;
+  router_state: string;
+  order_id: string | null;
+  code_prefix_hint: string | null;
+  sold_at: Date | null;
+  mikrotik_comment: string | null;
+}
+
+export interface TicketRecord {
+  id: string;
+  batchId: string;
+  planId: string;
+  dbState: string;
+  routerState: string;
+  orderId: string | null;
+  codePrefixHint: string | null;
+  soldAt: Date | null;
+  mikrotikComment: string | null;
+}
+
+export type AllocateResult =
+  | { status: 'allocated'; ticketId: string; codePrefixHint: string | null }
+  | { status: 'no-stock' }
+  | { status: 'illegal' };
+
 interface OrderRow {
   id: string;
   customer_id: string;
+  plan_id: string;
   state: string;
   currency: string;
   plan_snapshot: Record<string, unknown>;
@@ -153,10 +197,25 @@ function mapPayment(row: PaymentRow): PaymentRecord {
   };
 }
 
+function mapTicket(row: TicketRow): TicketRecord {
+  return {
+    id: row.id,
+    batchId: row.batch_id,
+    planId: row.plan_id,
+    dbState: row.db_state,
+    routerState: row.router_state,
+    orderId: row.order_id,
+    codePrefixHint: row.code_prefix_hint,
+    soldAt: row.sold_at,
+    mikrotikComment: row.mikrotik_comment,
+  };
+}
+
 function mapOrder(row: OrderRow): OrderRecord {
   return {
     id: row.id,
     customerId: row.customer_id,
+    planId: row.plan_id,
     state: row.state,
     currency: row.currency,
     planSnapshot: row.plan_snapshot,
@@ -225,14 +284,14 @@ export class PgRepo implements BackendRepo {
       `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
        VALUES ($1, $2, $3::jsonb, $4)
        ON CONFLICT (idempotency_key) DO NOTHING
-       RETURNING id, customer_id, state, currency, plan_snapshot, created_at, updated_at`,
+       RETURNING id, customer_id, plan_id, state, currency, plan_snapshot, created_at, updated_at`,
       [input.customerId, input.planId, JSON.stringify(input.planSnapshot), input.idempotencyKey],
     );
     const fresh = inserted.rows[0];
     if (fresh) return { order: mapOrder(fresh), created: true };
     // Replay : la clé existe déjà => on retourne la commande initiale (idempotence §21).
     const existing = await this.pool.query<OrderRow>(
-      `SELECT id, customer_id, state, currency, plan_snapshot, created_at, updated_at
+      `SELECT id, customer_id, plan_id, state, currency, plan_snapshot, created_at, updated_at
        FROM public.orders WHERE idempotency_key = $1`,
       [input.idempotencyKey],
     );
@@ -243,7 +302,7 @@ export class PgRepo implements BackendRepo {
 
   async getOrderById(id: string): Promise<OrderRecord | null> {
     const res = await this.pool.query<OrderRow>(
-      `SELECT id, customer_id, state, currency, plan_snapshot, created_at, updated_at
+      `SELECT id, customer_id, plan_id, state, currency, plan_snapshot, created_at, updated_at
        FROM public.orders WHERE id = $1`,
       [id],
     );
@@ -272,6 +331,94 @@ export class PgRepo implements BackendRepo {
     } finally {
       client.release();
     }
+  }
+
+  async allocateTicketForOrder(orderId: string): Promise<AllocateResult> {
+    return this.withTx(async (q) => {
+      const o = await q(
+        `SELECT state, plan_id FROM public.orders WHERE id = $1 FOR UPDATE`,
+        [orderId],
+      );
+      const order = o.rows[0];
+      if (!order) return { status: 'illegal' } as const;
+      if (String(order['state']) === 'TICKET_ALLOCATED' || String(order['state']) === 'DELIVERED') {
+        // Déjà allouée : on ne ré-alloue JAMAIS (invariants 2 et 7).
+        const existing = await q(
+          `SELECT id, code_prefix_hint FROM public.tickets WHERE order_id = $1 AND db_state IN ('SOLD','USED') LIMIT 1`,
+          [orderId],
+        );
+        const t = existing.rows[0];
+        return t
+          ? ({ status: 'allocated', ticketId: String(t['id']), codePrefixHint: (t['code_prefix_hint'] as string | null) ?? null } as const)
+          : ({ status: 'illegal' } as const);
+      }
+      if (String(order['state']) !== 'PAID') return { status: 'illegal' } as const;
+      // Un seul ticket AVAILABLE du plan, verrouillé ; SKIP LOCKED = les allocations
+      // concurrentes passent au ticket suivant sans se bloquer (blueprint §3.3).
+      const t = await q(
+        `SELECT id FROM public.tickets
+         WHERE plan_id = $1 AND db_state = 'AVAILABLE'
+         ORDER BY created_at
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED`,
+        [String(order['plan_id'])],
+      );
+      const candidate = t.rows[0];
+      if (!candidate) return { status: 'no-stock' } as const;
+      const reserved = await q(
+        `UPDATE public.tickets
+         SET db_state = 'RESERVED', order_id = $2, reserved_at = now()
+         WHERE id = $1 AND db_state = 'AVAILABLE'
+         RETURNING id, code_prefix_hint`,
+        [String(candidate['id']), orderId],
+      );
+      const res = reserved.rows[0];
+      if (!res) return { status: 'no-stock' } as const; // re-vérification post-verrou (doc 06 §30)
+      await q(`UPDATE public.tickets SET db_state = 'SOLD', sold_at = now() WHERE id = $1 AND db_state = 'RESERVED'`, [
+        String(candidate['id']),
+      ]);
+      const upd = await q(
+        `UPDATE public.orders SET state = 'TICKET_ALLOCATED' WHERE id = $1 AND state = 'PAID' RETURNING id`,
+        [orderId],
+      );
+      if (!upd.rows[0]) throw new TxAbort('illegal'); // ROLLBACK complet : ticket jamais orphelin
+      return {
+        status: 'allocated',
+        ticketId: String(candidate['id']),
+        codePrefixHint: (res['code_prefix_hint'] as string | null) ?? null,
+      } as const;
+    }).catch((err: unknown) => {
+      if (err instanceof TxAbort) return { status: 'illegal' } as const;
+      throw err;
+    });
+  }
+
+  async deliverOrder(orderId: string): Promise<'delivered' | 'already-delivered' | 'illegal'> {
+    const res = await this.pool.query(
+      `UPDATE public.orders SET state = 'DELIVERED' WHERE id = $1 AND state = 'TICKET_ALLOCATED' RETURNING id`,
+      [orderId],
+    );
+    if (res.rowCount === 1) return 'delivered';
+    const cur = await this.pool.query(`SELECT state FROM public.orders WHERE id = $1`, [orderId]);
+    const row = cur.rows[0];
+    if (!row) return 'illegal';
+    return String(row['state']) === 'DELIVERED' ? 'already-delivered' : 'illegal';
+  }
+
+  async getSoldTicketsForCustomer(
+    customerId: string,
+  ): Promise<Array<TicketRecord & { offerId: string | null }>> {
+    const res = await this.pool.query<TicketRow & { offer_id: string | null }>(
+      `SELECT t.id, t.batch_id, t.plan_id, t.db_state, t.router_state, t.order_id,
+              t.code_prefix_hint, t.sold_at, t.mikrotik_comment,
+              o.plan_snapshot->>'offer_id' AS offer_id
+       FROM public.tickets t
+       JOIN public.orders o ON o.id = t.order_id
+       WHERE o.customer_id = $1 AND t.db_state IN ('SOLD','USED')
+       ORDER BY t.sold_at DESC`,
+      [customerId],
+    );
+    return res.rows.map((row) => ({ ...mapTicket(row), offerId: row.offer_id ?? null }));
   }
 
   async getCustomerById(customerId: string): Promise<{ id: string; phone: string } | null> {

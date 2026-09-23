@@ -185,6 +185,15 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > `UNIQUE(provider_event_id)` (doc 06 §20-21) ; vérification montant/devise (doc 06 §23) ;
 > transitions atomiques payment+order (doc 06 §24). Le frontend n’est jamais une preuve de
 > paiement (doc 06 §17). Sans clés : 503 honnêtes. Aucune dépendance npm ajoutée.
+> **LIVRAISON IMP-15 (23/09/2026)** : allocation atomique des tickets + livraison —
+> après webhook approuvé : `RESERVED→SOLD` (commande `PAID→TICKET_ALLOCATED→DELIVERED`)
+> en une transaction SQL `FOR UPDATE SKIP LOCKED` (doc 06 §29-30, jamais deux commandes sur
+> le même ticket — prouvé par test de concurrence réelle 6 allocations/3 tickets) ;
+> stock épuisé = paiement CONFIRMÉ préservé, ordre `PAID`, audit `ticket_allocation_failed`,
+> retry admin `POST /admin/orders/:id/allocate` (§88) ; `GET /tickets/mine` (jamais de code
+> en clair, `code_hash` seulement — 0004) ; idempotence rejeu (invariants 2/5/7).
+> Note : l’empaquetage `SECURITY DEFINER` (§3.3) sera posé au déploiement Supabase hébergé
+> (RLS applicable aux appelants) ; aucune migration ajoutée — 0010 reste le seed stock (IMP-16).
 
 ## 6. Workers / jobs
 
