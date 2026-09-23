@@ -83,16 +83,23 @@ Toujours dans Git Bash, à la racine du repo :
 
 ```bash
 export DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias"
-bash tools/db-migrate.sh up       # applique 0001→0009 (idempotent : déjà jouées = no-op)
+bash tools/db-migrate.sh up       # applique 0001→0010 (idempotent : déjà jouées = no-op)
 bash tools/db-migrate.sh smoke    # contrat de schéma (15 tables…)
 bash tools/db-migrate.sh rls      # matrice RLS anon/authenticated/service_role
 bash tools/db-migrate.sh states   # gardes de transitions + audit (IMP-11)
 ```
 
-Attendu : `OK: up (9 migrations appliquées)`, `OK: smoke`, `OK: rls`,
+Attendu : `OK: up (10 migrations appliquées)`, `OK: smoke`, `OK: rls`,
 `OK: states` (NOTICE « transitions interdites refusées, chaînes valides acceptées,
 audit alimenté (14) »). En cas d'échec : `bash tools/db-migrate.sh reset` (down+up
 complets) puis relancer smoke/rls/states.
+
+> La migration `0010` (IMP-16) seede le stock réel Mikmon : 6 batches et
+> 660 tickets hashés (aucun code en clair dans le repo — les PDF du coffre
+> sont l'unique source). `smoke` vérifie désormais cette structure (6 batches,
+> 660 tickets, unicité des empreintes, distribution Grille A). Les tests
+> d'intégration partagent cette base seedée mais ne la consomment JAMAIS
+> (parking hors allocation pendant les suites IMP-14/15).
 
 > La base locale est un bac à sable : `reset` ne détruit QUE la base locale, jamais le
 > cloud (le cloud se gère exclusivement via GUIDE-07).
@@ -164,9 +171,10 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **117/117** avec DATABASE_URL
-(backend 82 dont 16 d'intégration réelle — y compris concurrence d'allocation
-de tickets, shared 33, frontend 1, connector 1), 101 + 16 skippés sans.
+Attendu actuellement : typecheck 4/4 ; tests **132/132** avec DATABASE_URL
+(backend 85 dont 19 d'intégration réelle — y compris concurrence d'allocation
+de tickets et vérification du stock seedé 0010, shared 45, frontend 1,
+connector 1), 113 + 19 skippés sans.
 C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo

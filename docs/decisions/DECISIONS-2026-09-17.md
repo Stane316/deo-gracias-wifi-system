@@ -38,3 +38,16 @@
 
 - Le tableau de statut master suit désormais l'ordre D1 ; toute implémentation de W2 exécutée avant son tour exige une nouvelle validation.
 - IMP-06 ne sera PAS exécuté avant IMP-37 (contrairement au plan initial) : le stock de tickets digitaux sera en réalité généré par le backend (IMP-18/19) via le Connector après IMP-23 ; la génération Mikmon manuelle de W2 ne servira que de stock de secours/transition, quantités recalibrées à ce moment (N4).
+
+## D6/D7 — Seed du stock Mikmon en base (IMP-16, 23/09/2026) : APPLIQUÉ
+
+- **D6 — Empreintes non salées** : `code_hash = sha256(code)` sans sel (précédent D2,
+  INC-03/INC-04) : les codes ne sont valides que sur le site physique de Déo Gracias ;
+  un préfixe indicatif de 2 caractères (`code_prefix_hint`) est stocké pour le support.
+- **D7 — Stock seedé protégé des tests** : les tests d'intégration ne consomment JAMAIS
+  l'inventaire réel (parking AVAILABLE→RESERVED pendant les suites IMP-14/15, restauration
+  après ; le bloc IMP-16 restaure le ticket qu'il alloue). Migration idempotente (UUID fixes
+  + ON CONFLICT), rollback documenté (échoue naturellement si un ticket seedé est déjà vendu).
+- **En attente d'arbitrage propriétaire** : l'empaquetage `SECURITY DEFINER` des fonctions
+  d'allocation (blueprint §3.3) — exposé structuré au rapport IMP-16 ; ne pas implémenter
+  avant décision.

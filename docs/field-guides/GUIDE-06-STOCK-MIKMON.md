@@ -5,6 +5,7 @@
 > **Paramètres validés (17/09)** : quantités proportionnelles **660** = 5-HEURES 300 · 12-HEURES 60 · 24-HEURES 100 · 72-HEURES 120 · 1-SEMAINE 40 · 1-MOIS 40 ; **aucune impression** (stock digital seul) ; Mikhmon sur PC Windows ; propriétaire sur site.
 > **Prérequis** : sauvegarde v2 existante (3 copies) ; WinBox ouvert ; Mikhmon Windows lancé avec sa session connectée au routeur (API restreinte au LAN — vous êtes sur le LAN, OK) ; terminal WinBox ouvert en parallèle.
 > **Règles** : aucune autre modification routeur ; le dump exporté contient les mots de passe des tickets = SECRET (jamais au chat, jamais Git, 3 copies chiffrées si cloud) ; si une génération échoue ou produit des valeurs non conformes : STOP et me contacter avant toute correction manuelle.
+> **Statut (23/09/2026)** : génération exécutée et validée le 17/09 ; le stock de 660 tickets est seedé en base par la migration `0010` (IMP-16) — empreintes sha256 seulement, codes jamais en base ni en Git (PDF du coffre = unique source).
 
 ---
 

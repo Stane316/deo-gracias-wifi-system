@@ -76,3 +76,67 @@ BEGIN
   RAISE NOTICE 'smoke OK : 15 tables, % triggers updated_at, gardes présentes', n_triggers;
 END;
 $$;
+
+-- IMP-16 — Assertions du stock digital Mikmon (migration 0010).
+-- 6 batches + 660 tickets hashés, distribution Grille A, unicité des empreintes.
+DO $$
+DECLARE
+  n_batches  integer;
+  n_tickets  integer;
+  n_distinct integer;
+BEGIN
+  SELECT count(*) INTO n_batches
+  FROM public.ticket_batches WHERE notes LIKE 'mikmon-2026-09-17-B%';
+  IF n_batches <> 6 THEN
+    RAISE EXCEPTION 'smoke stock: attendu 6 batches Mikmon, trouvé %', n_batches;
+  END IF;
+
+  SELECT count(*) INTO n_tickets
+  FROM public.tickets t
+  JOIN public.ticket_batches b ON b.id = t.batch_id
+  WHERE b.notes LIKE 'mikmon-2026-09-17-B%';
+  IF n_tickets <> 660 THEN
+    RAISE EXCEPTION 'smoke stock: attendu 660 tickets, trouvé %', n_tickets;
+  END IF;
+
+  SELECT count(DISTINCT t.code_hash) INTO n_distinct
+  FROM public.tickets t
+  JOIN public.ticket_batches b ON b.id = t.batch_id
+  WHERE b.notes LIKE 'mikmon-2026-09-17-B%';
+  IF n_distinct <> 660 THEN
+    RAISE EXCEPTION 'smoke stock: empreintes code_hash non uniques (%/660)', n_distinct;
+  END IF;
+
+  -- Distribution conforme au manifeste IMP-06 §1 (Grille A).
+  IF EXISTS (
+    SELECT 1 FROM (
+      SELECT p.offer_id, count(*) AS n
+      FROM public.tickets t
+      JOIN public.ticket_batches b ON b.id = t.batch_id
+      JOIN public.plans p ON p.id = t.plan_id
+      WHERE b.notes LIKE 'mikmon-2026-09-17-B%'
+      GROUP BY p.offer_id
+    ) d
+    WHERE NOT (
+         (d.offer_id = '5-HEURES'  AND d.n = 300)
+      OR (d.offer_id = '12-HEURES' AND d.n = 60)
+      OR (d.offer_id = '24-HEURES' AND d.n = 100)
+      OR (d.offer_id = '72-HEURES' AND d.n = 120)
+      OR (d.offer_id = '1-SEMAINE' AND d.n = 40)
+      OR (d.offer_id = '1-MOIS'    AND d.n = 40))
+  ) THEN
+    RAISE EXCEPTION 'smoke stock: distribution par offre non conforme au manifeste';
+  END IF;
+
+  -- Tout ticket du stock est AVAILABLE (aucun vendu au moment du seed).
+  IF EXISTS (
+    SELECT 1 FROM public.tickets t
+    JOIN public.ticket_batches b ON b.id = t.batch_id
+    WHERE b.notes LIKE 'mikmon-2026-09-17-B%' AND t.db_state <> 'AVAILABLE'
+  ) THEN
+    RAISE EXCEPTION 'smoke stock: tickets du seed doivent être AVAILABLE';
+  END IF;
+
+  RAISE NOTICE 'smoke stock OK : 6 batches, 660 tickets hashés, distribution Grille A';
+END;
+$$;

@@ -24,6 +24,31 @@ class FakeVerifier implements AuthVerifier {
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
 
+// IMP-16 : le stock Mikmon seedé (0010) est l'inventaire RÉEL — les tests
+// d'intégration ne doivent jamais le consommer ni le voir (l'allocation est FIFO
+// par created_at et les tickets seedés sont les plus anciens). On le « parque »
+// hors AVAILABLE via des transitions LÉGALES réversibles
+// (AVAILABLE→RESERVED, puis RESERVED→RELEASED→AVAILABLE au déparkage).
+async function parkMikmonStock(pool: Pool): Promise<void> {
+  await pool.query(
+    `UPDATE public.tickets SET db_state = 'RESERVED', reserved_at = now()
+     WHERE db_state = 'AVAILABLE'
+       AND batch_id IN (SELECT id FROM public.ticket_batches WHERE source = 'mikmon-manual')`,
+  );
+}
+async function unParkMikmonStock(pool: Pool): Promise<void> {
+  await pool.query(
+    `UPDATE public.tickets SET db_state = 'RELEASED'
+     WHERE db_state = 'RESERVED'
+       AND batch_id IN (SELECT id FROM public.ticket_batches WHERE source = 'mikmon-manual')`,
+  );
+  await pool.query(
+    `UPDATE public.tickets SET db_state = 'AVAILABLE', reserved_at = NULL
+     WHERE db_state = 'RELEASED'
+       AND batch_id IN (SELECT id FROM public.ticket_batches WHERE source = 'mikmon-manual')`,
+  );
+}
+
 describeDb('PgRepo + API sur Postgres réel (DATABASE_URL)', () => {
   const pool = new Pool({ connectionString: DATABASE_URL });
   const repo = new PgRepo(pool);
@@ -263,6 +288,12 @@ describeDb('IMP-14 — paiements + webhooks sur Postgres réel', () => {
          WHERE c.phone LIKE '019714%' OR o.idempotency_key LIKE 'itest-imp14-pg-%')`,
     );
     await pool2.query(
+      `DELETE FROM public.tickets WHERE order_id IN (
+         SELECT id FROM public.orders
+          WHERE idempotency_key LIKE 'itest-imp14-pg-%'
+             OR customer_id IN (SELECT id FROM public.customers WHERE phone LIKE '019714%'))`,
+    );
+    await pool2.query(
       `DELETE FROM public.orders
        WHERE idempotency_key LIKE 'itest-imp14-pg-%'
           OR customer_id IN (SELECT id FROM public.customers WHERE phone LIKE '019714%')`,
@@ -271,11 +302,13 @@ describeDb('IMP-14 — paiements + webhooks sur Postgres réel', () => {
   };
 
   beforeAll(async () => {
+    await parkMikmonStock(pool2);
     await cleanup14();
     payApp = await buildApp({ repo: repo2, payment: { provider: new FakeProviderPg(), webhookSecret: WH_SECRET } });
   });
   afterAll(async () => {
     await cleanup14();
+    await unParkMikmonStock(pool2);
     await payApp.close();
     await pool2.end();
   });
@@ -421,6 +454,10 @@ describeDb('IMP-15 — allocation atomique tickets sur Postgres réel', () => {
       `DELETE FROM public.payments WHERE order_id IN
          (SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp15-pg-%')`,
     );
+    await pool15.query(
+      `DELETE FROM public.tickets WHERE order_id IN (
+         SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp15-pg-%')`,
+    );
     await pool15.query(`DELETE FROM public.orders WHERE idempotency_key LIKE 'itest-imp15-pg-%'`);
     await pool15.query(`DELETE FROM public.customers WHERE phone LIKE '019715%'`);
   };
@@ -460,6 +497,7 @@ describeDb('IMP-15 — allocation atomique tickets sur Postgres réel', () => {
   let app15: Awaited<ReturnType<typeof buildApp>>;
 
   beforeAll(async () => {
+    await parkMikmonStock(pool15);
     await cleanup15();
     const plans = await pool15.query(
       `SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`,
@@ -472,6 +510,7 @@ describeDb('IMP-15 — allocation atomique tickets sur Postgres réel', () => {
   });
   afterAll(async () => {
     await cleanup15();
+    await unParkMikmonStock(pool15);
     await app15.close();
     await pool15.end();
   });
@@ -575,5 +614,146 @@ describeDb('IMP-15 — allocation atomique tickets sur Postgres réel', () => {
     expect(tickets).toHaveLength(1);
     expect(tickets[0]).toMatchObject({ offer_id: '24-HEURES', db_state: 'SOLD' });
     expect(JSON.stringify(body)).not.toContain('password');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// IMP-16 — Stock digital Mikmon seedé (migration 0010) sur Postgres réel.
+// Vérifie la structure EXACTE du manifeste IMP-06 : 6 batches, 660 tickets
+// hashés, distribution Grille A, unicité des empreintes — puis une allocation
+// réelle depuis le stock seedé (preuve du mapping plan_id), ticket restauré après.
+// Fixtures : clés itest-imp16-pg-%, téléphones 019716%.
+// ---------------------------------------------------------------------------
+describeDb('IMP-16 — stock Mikmon seedé (0010) sur Postgres réel', () => {
+  const pool16 = new Pool({ connectionString: DATABASE_URL });
+  const repo16 = new PgRepo(pool16);
+
+  const MANIFESTE = [
+    { tag: 'B1', offer: '5-HEURES', qty: 300, sha: '2c62a8285ae8491541406e2b6d0c6d27781f8333587b7e3b96e437bb0e22f9c1' },
+    { tag: 'B2', offer: '12-HEURES', qty: 60, sha: '01a2c12ebc6acd2bc5d41f93c0bac453a8afb6fabe6c8328dc4ae599fe3c1e89' },
+    { tag: 'B3', offer: '24-HEURES', qty: 100, sha: '157bfc82e05fe56a34aea6a3ca9cead2dce72bcde524ff9ec573fae9a8589fde' },
+    { tag: 'B4', offer: '72-HEURES', qty: 120, sha: '18fb11a7c2e6a81bf05f42e6aae6a6b302198afca3ef0c38047a18447a8f6b45' },
+    { tag: 'B5', offer: '1-SEMAINE', qty: 40, sha: 'e6f6727cb80b7b3c09f7c2236b656cf698d416c4a6d3f2734b5d609eb66c3e5d' },
+    { tag: 'B6', offer: '1-MOIS', qty: 40, sha: '637c13cff788e65f348035e70e78d972b68bb448480b13361879ef573cf61e3d' },
+  ];
+  const SEED_FILTER = `notes LIKE 'mikmon-2026-09-17-B%'`;
+
+  const cleanup16 = async (): Promise<void> => {
+    await pool16.query(
+      `DELETE FROM public.tickets WHERE order_id IN (
+         SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp16-pg-%')`,
+    );
+    await pool16.query(`DELETE FROM public.orders WHERE idempotency_key LIKE 'itest-imp16-pg-%'`);
+    await pool16.query(`DELETE FROM public.customers WHERE phone LIKE '019716%'`);
+  };
+
+  beforeAll(async () => {
+    await cleanup16();
+  });
+  afterAll(async () => {
+    await cleanup16();
+    await pool16.end();
+  });
+
+  it('6 batches mikmon-manual : quantités, empreintes PDF et tags du manifeste IMP-06', async () => {
+    const batches = await pool16.query(
+      `SELECT source, quantity, manifest_sha256, notes, generated_at
+       FROM public.ticket_batches WHERE ${SEED_FILTER} ORDER BY notes`,
+    );
+    expect(batches.rows).toHaveLength(6);
+    batches.rows.forEach((row, i) => {
+      const lot = MANIFESTE[i];
+      expect(row).toMatchObject({
+        source: 'mikmon-manual',
+        quantity: lot?.qty,
+        manifest_sha256: lot?.sha,
+        notes: `mikmon-2026-09-17-${lot?.tag} (${lot?.offer}, manifeste IMP-06)`,
+      });
+      expect(new Date(row['generated_at'] as string).toISOString()).toContain('2026-09-17');
+    });
+    const total = batches.rows.reduce((acc, r) => acc + Number(r['quantity']), 0);
+    expect(total).toBe(660);
+  });
+
+  it('660 tickets AVAILABLE : empreintes sha256 uniques, préfixes 2 car., distribution Grille A', async () => {
+    const tickets = await pool16.query(
+      `SELECT t.code_hash, t.code_prefix_hint, t.db_state, p.offer_id
+       FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       JOIN public.plans p ON p.id = t.plan_id
+       WHERE b.${SEED_FILTER}`,
+    );
+    expect(tickets.rows).toHaveLength(660);
+    const hashes = new Set<string>();
+    const dist: Record<string, number> = {};
+    for (const row of tickets.rows) {
+      expect(String(row['code_hash'])).toMatch(/^[0-9a-f]{64}$/);
+      expect(String(row['code_prefix_hint'])).toMatch(/^[a-z0-9]{2}$/);
+      expect(row['db_state']).toBe('AVAILABLE'); // stock neuf jamais vendu
+      hashes.add(String(row['code_hash']));
+      const offer = String(row['offer_id']);
+      dist[offer] = (dist[offer] ?? 0) + 1;
+    }
+    expect(hashes.size).toBe(660); // unicité (aussi contrainte UNIQUE en base)
+    for (const lot of MANIFESTE) {
+      expect(dist[lot.offer]).toBe(lot.qty);
+    }
+  });
+
+  it('allocation réelle depuis le stock seedé (B3 24-HEURES), puis restauration du ticket', async () => {
+    // Commande 24-HEURES passée PAID par transitions autorisées (gardes 0009).
+    const cust = await pool16.query(`INSERT INTO public.customers (phone) VALUES ('0197160001') RETURNING id`);
+    const plan = await pool16.query(`SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`);
+    const ord = await pool16.query(
+      `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
+       VALUES ($1, $2, '{"offer_id":"24-HEURES","price_snapshot":300}'::jsonb, 'itest-imp16-pg-alloc1') RETURNING id`,
+      [String(cust.rows[0]?.['id']), String(plan.rows[0]?.['id'])],
+    );
+    const orderId = String(ord.rows[0]?.['id']);
+    await pool16.query(`UPDATE public.orders SET state = 'PAYMENT_PENDING' WHERE id = $1`, [orderId]);
+    await pool16.query(`UPDATE public.orders SET state = 'PAID' WHERE id = $1`, [orderId]);
+
+    const before = await pool16.query(
+      `SELECT count(*)::int AS n FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE b.notes = 'mikmon-2026-09-17-B3' AND t.db_state = 'AVAILABLE'`,
+    );
+    const outcome = await allocateAndDeliver(repo16, orderId);
+    expect(outcome.status).toBe('delivered');
+
+    // Le ticket alloué provient BIEN du lot seedé B3 (mapping plan_id correct).
+    const sold = await pool16.query(
+      `SELECT t.db_state, b.notes FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE t.order_id = $1`,
+      [orderId],
+    );
+    expect(sold.rows).toHaveLength(1);
+    expect(sold.rows[0]).toMatchObject({ db_state: 'SOLD', notes: 'mikmon-2026-09-17-B3 (24-HEURES, manifeste IMP-06)' });
+    expect((await repo16.getOrderById(orderId))?.state).toBe('DELIVERED');
+
+    // Restauration : le stock seedé est l'inventaire réel — le ticket consommé
+    // est remis AVAILABLE (bypass superuser de la garde, immédiatement réactivée ;
+    // SOLD→AVAILABLE n'existe pas dans la machine — c'est un nettoyage de test).
+    await pool16.query(`ALTER TABLE public.tickets DISABLE TRIGGER tickets_state_guard`);
+    try {
+      await pool16.query(
+        `UPDATE public.tickets SET db_state = 'AVAILABLE', order_id = NULL, sold_at = NULL, reserved_at = NULL
+         WHERE order_id = $1`,
+        [orderId],
+      );
+    } finally {
+      await pool16.query(`ALTER TABLE public.tickets ENABLE TRIGGER tickets_state_guard`);
+    }
+    await pool16.query(`DELETE FROM public.orders WHERE id = $1`, [orderId]);
+    await pool16.query(`DELETE FROM public.customers WHERE id = $1`, [String(cust.rows[0]?.['id'])]);
+
+    const after = await pool16.query(
+      `SELECT count(*)::int AS n FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE b.notes = 'mikmon-2026-09-17-B3' AND t.db_state = 'AVAILABLE'`,
+    );
+    expect(after.rows[0]?.['n']).toBe(Number(before.rows[0]?.['n'])); // stock intact
   });
 });

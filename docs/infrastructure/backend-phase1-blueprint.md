@@ -195,6 +195,20 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > Note : l’empaquetage `SECURITY DEFINER` (§3.3) sera posé au déploiement Supabase hébergé
 > (RLS applicable aux appelants) ; aucune migration ajoutée — 0010 reste le seed stock (IMP-16).
 
+> **LIVRAISON IMP-16 (23/09/2026)** : `0010_seed_stock_mikmon` livré — les 660 tickets du
+> manifeste IMP-06 (17/09/2026) sont seedés en base : 6 batches `source='mikmon-manual'`
+> (notes `mikmon-2026-09-17-B1..B6`, UUID fixes, quantités 300/60/100/120/40/40) et 660
+> tickets `AVAILABLE` dont la base ne stocke que `sha256(code)` (jamais de code en clair,
+> doc 06 §88-90, 0004) + préfixe indicatif 2 caractères. Générateur déterministe
+> `tools/gen-seed-stock-0010.py` (lit le coffre, vérifie sha256 PDF ↔ manifeste, comptes,
+> séquences, profils Grille A) ; migration idempotente (ON CONFLICT DO NOTHING) compatible
+> avec `db-migrate.sh up` ; rollback `down/0010` (tickets puis batches). Tests : smoke étendu,
+> `packages/shared/src/stock-sync.test.ts` (12 tests), bloc intégration IMP-16 dans
+> `repo.pg.test.ts`, et convention de parking du stock seedé pendant les suites IMP-14/15.
+> Décisions consignées dans `docs/decisions/DECISIONS-2026-09-17.md` (D6/D7) ; l'empaquetage
+> `SECURITY DEFINER` (§3.3) reste à arbitrer par le propriétaire (exposé structuré au rapport
+> IMP-16) — non implémenté à ce stade.
+
 ## 6. Workers / jobs
 
 | Job | Déclencheur | Rôle |

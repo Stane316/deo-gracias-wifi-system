@@ -1,6 +1,7 @@
 -- IMP-10 — Tests de la matrice RLS (anon / authenticated / service_role).
 -- Exécuté par `tools/db-migrate.sh rls` (CI job db-migrations + local).
--- Prérequis : migrations 0001→0008 appliquées (le seed 0008 fournit les 6 plans).
+-- Prérequis : migrations 0001→0010 appliquées (0008 = 6 plans Grille A ; 0010 = stock
+-- Mikmon 660 tickets — le test RLS vérifie que ce stock n'est visible QUE de service_role).
 -- Méthode : fixtures posées en superuser, puis SET ROLE + claim JWT simulé
 -- (request.jwt.claim.sub = auth.uid(), même mécanique que Supabase).
 -- Toute violation de la matrice = RAISE EXCEPTION (échec CI).
@@ -8,6 +9,7 @@
 DO $do$
 DECLARE
   n        integer;
+  n_stock  integer;   -- IMP-16 : tickets du stock seedé (0010), invisibles aux clients
   uid_a    uuid := 'aaaaaaaa-0000-0000-0000-0000000000aa';
   uid_b    uuid := 'bbbbbbbb-0000-0000-0000-0000000000bb';
   cust_a   uuid := 'aaaaaaaa-0000-0000-0000-000000000001';
@@ -18,6 +20,8 @@ DECLARE
   plan_5h  uuid;
 BEGIN
   -- ── Fixtures (superuser) ──────────────────────────────────────────────────
+  SELECT count(*) INTO n_stock FROM public.tickets;  -- baseline : stock Mikmon seedé
+
   SELECT id INTO plan_5h FROM public.plans WHERE offer_id = '5-HEURES' AND version = 1;
   IF plan_5h IS NULL THEN
     RAISE EXCEPTION 'rls: seed 0008 absent (plan 5-HEURES introuvable)';
@@ -86,7 +90,7 @@ BEGIN
     SELECT count(*) INTO n FROM public.customers;
     IF n <> 2 THEN RAISE EXCEPTION 'rls: service_role voit % customers (attendu 2)', n; END IF;
     SELECT count(*) INTO n FROM public.tickets;
-    IF n <> 1 THEN RAISE EXCEPTION 'rls: service_role voit % tickets (attendu 1)', n; END IF;
+    IF n <> n_stock + 1 THEN RAISE EXCEPTION 'rls: service_role voit % tickets (attendu % = stock + fixture)', n, n_stock + 1; END IF;
     SELECT count(*) INTO n FROM public.mikrotik_sync;   -- table ops : accessible backend
     IF n <> 0 THEN RAISE EXCEPTION 'rls: service_role mikrotik_sync inattendu (% )', n; END IF;
   RESET ROLE;

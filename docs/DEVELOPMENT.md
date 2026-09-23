@@ -130,6 +130,35 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
 3 livrees, 0 double attribution. Attendu : 117/117 avec base (backend 82 dont
 16 d'integration), 101 + 16 skips sans.
 
+## Stock digital seedé en base (IMP-16)
+
+- La migration `supabase/migrations/0010_seed_stock_mikmon.sql` charge
+  l'inventaire RÉEL Mikmon (manifeste IMP-06 du 17/09/2026) : 6 batches
+  `source='mikmon-manual'` (notes `mikmon-2026-09-17-B1..B6`) et 660 tickets
+  (B1 5-HEURES ×300, B2 12-HEURES ×60, B3 24-HEURES ×100, B4 72-HEURES ×120,
+  B5 1-SEMAINE ×40, B6 1-MOIS ×40). Les PDF du coffre sont la SEULE source
+  des codes : la migration ne contient que `sha256(code)` (jamais de code en
+  clair, doc 06 §88-90) + un préfixe indicatif de 2 caractères.
+- Régénération : `python3 tools/gen-seed-stock-0010.py` (déterministe — lit
+  le coffre, vérifie sha256 des PDF ↔ manifeste, comptes/séquences/format,
+  profils Grille A, puis réémet la migration). La sortie est idempotente :
+  UUID fixes + `ON CONFLICT DO NOTHING`, compatible avec `db-migrate.sh up`
+  qui réapplique tous les fichiers sans tracking.
+- Conséquence CI : le job `Typecheck + tests` migre la base AVANT
+  `npm test` — les tests d'intégration partagent donc la base seedée.
+  Convention (helpers `parkMikmonStock`/`unParkMikmonStock` de
+  `repo.pg.test.ts`) : les suites IMP-14/15 mettent le stock seedé hors
+  `AVAILABLE` via des transitions légales (AVAILABLE→RESERVED, puis
+  RESERVED→RELEASED→AVAILABLE) avant/après leurs tests — l'allocation étant
+  FIFO par `created_at`, les tickets seedés seraient sinon consommés les
+  premiers. Le stock réel n'est JAMAIS consommé par les tests ; le bloc
+  IMP-16 consomme un ticket puis le restaure (bypass superuser de la garde,
+  immédiatement réactivé).
+- Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
+  manifeste, distribution, unicité, idempotence, ordre du rollback).
+- Attendu : 132/132 avec base (backend 85 dont 19 d'intégration, shared 45,
+  connector 1, frontend 1). Sans base : les intégrations pg skippent proprement.
+
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 
 Dès que des fichiers modifiant `package.json` / `package-lock.json` sont récupérés depuis le
