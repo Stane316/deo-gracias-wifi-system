@@ -4,6 +4,7 @@
  */
 import { OFFERS } from '@dg/shared';
 import { randomUUID } from 'node:crypto';
+import type { AdminDashboardDbStats, AlertAckRecord } from './admin.js';
 import type {
   ActivePlan,
   AllocateResult,
@@ -251,6 +252,38 @@ export class FakeRepo implements BackendRepo {
   async linkCustomerAuth(customerId: string, authUserId: string): Promise<void> {
     this.linked.push([customerId, authUserId]);
   }
+
+  // IMP-17 — stats admin pilotables par les tests unitaires (doc 09 §12-13).
+  dashboardStats: AdminDashboardDbStats = {
+    ordersCountToday: 0,
+    paymentsConfirmedToday: 0,
+    revenueTodayFcfa: 0,
+    ticketsDeliveredToday: 0,
+    ticketsByState: {},
+    availableByOffer: {},
+    incidentsOpen: 0,
+    syncPending: 0,
+    syncFailed: 0,
+    syncSuccess: 0,
+  };
+  async getAdminDashboardStats(_since: Date): Promise<AdminDashboardDbStats> {
+    return this.dashboardStats;
+  }
+  ticketsStatsByOffer: Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }> = [];
+  async getTicketsStatsByOffer(): Promise<Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }>> {
+    return this.ticketsStatsByOffer;
+  }
+  alerts = new Map<string, { id: string; rule: string; severity: string; acknowledgedAt: Date | null }>();
+  async acknowledgeAlert(id: string): Promise<AlertAckRecord | null> {
+    const a = this.alerts.get(id);
+    if (!a) return null;
+    if (a.acknowledgedAt != null) {
+      return { id: a.id, rule: a.rule, severity: a.severity, acknowledgedAt: a.acknowledgedAt, alreadyAcknowledged: true };
+    }
+    a.acknowledgedAt = new Date();
+    return { id: a.id, rule: a.rule, severity: a.severity, acknowledgedAt: a.acknowledgedAt, alreadyAcknowledged: false };
+  }
+
   async close(): Promise<void> {}
 }
 

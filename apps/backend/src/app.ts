@@ -35,6 +35,7 @@ import {
 } from './schemas.js';
 import { buildPlanSnapshot, type BackendRepo, type OrderRecord } from './repo.js';
 import { allocateAndDeliver } from './tickets.js';
+import { buildDashboardPayload, startOfBusinessDay } from './admin.js';
 
 export interface BuildAppOptions {
   repo: BackendRepo;
@@ -590,6 +591,131 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     }
     await repo.logAudit({ actor, action: 'admin_auth_ok', entity: 'auth', entityId: identity.sub });
     return { sub: identity.sub, role: identity.role, email: identity.email };
+  });
+
+  // IMP-17 — Dashboard admin : chiffres depuis données persistées (doc 09 §13),
+  // jamais reconstruits côté frontend.
+  app.get('/admin/dashboard', async (req, reply) => {
+    if (!verifier) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    if (!identity) {
+      await repo.logAudit({ actor: 'anonymous', action: 'admin_auth_denied', entity: 'auth' });
+      return reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', GENERIC_401));
+    }
+    const actor = `admin:${identity.sub}`;
+    if (!identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({ actor, action: 'admin_auth_denied', entity: 'auth', entityId: identity.sub });
+      return reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Accès refusé', 'Rôle administrateur requis.'));
+    }
+    const now = new Date();
+    const since = startOfBusinessDay(now);
+    const stats = await repo.getAdminDashboardStats(since);
+    const plans = await repo.listActivePlans();
+    const offerIds = Array.from(new Set(plans.map((pl) => pl.offerId)));
+    return buildDashboardPayload(stats, offerIds, now);
+  });
+
+  // IMP-17 — Inventaire détaillé par offre (doc 09 §12.1 Inventaire).
+  app.get('/admin/tickets/stats', async (req, reply) => {
+    if (!verifier) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    if (!identity) {
+      await repo.logAudit({ actor: 'anonymous', action: 'admin_auth_denied', entity: 'auth' });
+      return reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', GENERIC_401));
+    }
+    const actor = `admin:${identity.sub}`;
+    if (!identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({ actor, action: 'admin_auth_denied', entity: 'auth', entityId: identity.sub });
+      return reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Accès refusé', 'Rôle administrateur requis.'));
+    }
+    const rows = await repo.getTicketsStatsByOffer();
+    const offers = rows.map((r) => {
+      const states = r.states;
+      const available = (states['AVAILABLE'] ?? 0) + (states['RELEASED'] ?? 0);
+      const reserved = states['RESERVED'] ?? 0;
+      const sold = (states['SOLD'] ?? 0) + (states['USED'] ?? 0);
+      const expired = Object.entries(states)
+        .filter(([k]) => !['AVAILABLE', 'RELEASED', 'RESERVED', 'SOLD', 'USED'].includes(k))
+        .reduce((acc, [, v]) => acc + v, 0);
+      return {
+        offer_id: r.offerId,
+        price_fcfa: r.priceFcfa,
+        available,
+        reserved,
+        sold,
+        expired,
+        total: available + reserved + sold + expired,
+      };
+    });
+    const totals = offers.reduce(
+      (acc, o) => ({
+        available: acc.available + o.available,
+        reserved: acc.reserved + o.reserved,
+        sold: acc.sold + o.sold,
+        expired: acc.expired + o.expired,
+        total: acc.total + o.total,
+      }),
+      { available: 0, reserved: 0, sold: 0, expired: 0, total: 0 },
+    );
+    return { offers, totals };
+  });
+
+  // IMP-17 — Reconnaissance d'une alerte (doc 09 §4.E). Idempotent : re-ack => 200.
+  app.post('/admin/alerts/:id/ack', async (req, reply) => {
+    if (!verifier) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    const actor = identity ? `admin:${identity.sub}` : 'anonymous';
+    if (!identity || !identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({
+        actor,
+        action: 'admin_auth_denied',
+        entity: 'auth',
+        ...(identity ? { entityId: identity.sub } : {}),
+      });
+      return reply.status(identity ? 403 : 401).type('application/problem+json')
+        .send(problem(identity ? 403 : 401, identity ? 'Accès refusé' : 'Authentification échouée',
+          identity ? 'Rôle administrateur requis.' : GENERIC_401));
+    }
+    const parsed = orderIdParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Paramètre invalide', 'id doit être un UUID.'));
+    }
+    const result = await repo.acknowledgeAlert(parsed.data.id);
+    if (!result) {
+      await repo.logAudit({ actor, action: 'admin_alert_ack_notfound', entity: 'alerts', entityId: parsed.data.id });
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Alerte introuvable', `Aucune alerte avec l'id ${parsed.data.id}.`));
+    }
+    await repo.logAudit({
+      actor,
+      action: result.alreadyAcknowledged ? 'admin_alert_ack_noop' : 'admin_alert_ack',
+      entity: 'alerts',
+      entityId: result.id,
+    });
+    return {
+      id: result.id,
+      rule: result.rule,
+      severity: result.severity,
+      acknowledged_at: result.acknowledgedAt.toISOString(),
+      already_acknowledged: result.alreadyAcknowledged,
+    };
   });
 
   return app;

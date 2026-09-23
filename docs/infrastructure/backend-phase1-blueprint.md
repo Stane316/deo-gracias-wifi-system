@@ -205,9 +205,21 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > avec `db-migrate.sh up` ; rollback `down/0010` (tickets puis batches). Tests : smoke étendu,
 > `packages/shared/src/stock-sync.test.ts` (12 tests), bloc intégration IMP-16 dans
 > `repo.pg.test.ts`, et convention de parking du stock seedé pendant les suites IMP-14/15.
-> Décisions consignées dans `docs/decisions/DECISIONS-2026-09-17.md` (D6/D7) ; l'empaquetage
-> `SECURITY DEFINER` (§3.3) reste à arbitrer par le propriétaire (exposé structuré au rapport
-> IMP-16) — non implémenté à ce stade.
+> Décisions consignées dans `docs/decisions/DECISIONS-2026-09-17.md` (D6/D7). `SECURITY DEFINER`
+> (§3.3) : **arbitré le 23/09/2026 — Option A (statu quo Phase 1)** : `service_role` côté
+> serveur + logique en TypeScript ; bascule DEFINER à revisiter au déploiement Supabase hébergé.
+
+> **LIVRAISON IMP-17 (23/09/2026)** : API admin du dashboard (doc 09 §12-13) —
+> `GET /admin/dashboard` (chiffres du jour : CA = paiements CONFIRMÉS réels, commandes,
+> tickets délivrés ; inventaire disponibles/réservés/vendus/expirés + offres proches de
+> l'épuisement ; système : file `mikrotik_sync` HEALTHY/WARNING/ERROR/UNKNOWN, incidents
+> ouverts, Connector UNKNOWN en Phase 1), `GET /admin/tickets/stats` (inventaire par offre
+> Grille A) et `POST /admin/alerts/:id/ack` (atomique + idempotent + audité). Jour courant
+> métier = Africa/Porto-Novo. **Règle §13 respectée** : chiffres issus de requêtes sur les
+> données persistées, jamais reconstruits côté frontend. Auth admin identique à IMP-13.
+> Logique pure `apps/backend/src/admin.ts` ; aucune migration (schéma 0001→0010 suffisant).
+> Tests : `admin.test.ts` (13 tests) + bloc intégration IMP-17 (4 tests) dans `repo.pg.test.ts`
+> sur base seedée réelle.
 
 ## 6. Workers / jobs
 

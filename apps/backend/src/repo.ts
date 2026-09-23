@@ -4,6 +4,8 @@
  * et des tests d'intégration réels (PgRepo sur Postgres éphémère CI / sandbox).
  */
 import type { Pool } from 'pg';
+import type { AdminDashboardDbStats, AlertAckRecord } from './admin.js';
+
 
 export interface ActivePlan {
   planId: string;
@@ -92,6 +94,14 @@ export interface BackendRepo {
   }): Promise<void>;
   /** Lie un compte Supabase Auth au client (RLS « own rows » via auth_user_id, 0007). */
   linkCustomerAuth(customerId: string, authUserId: string): Promise<void>;
+
+  /** IMP-17 — agrégats du dashboard admin (doc 09 §12-13), jour courant = depuis `since`. */
+  getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats>;
+  /** IMP-17 — inventaire par offre active (doc 09 §12.1). */
+  getTicketsStatsByOffer(): Promise<Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }>>;
+  /** IMP-17 — reconnaissance d'alerte, atomique et idempotente (doc 09 §4.E). */
+  acknowledgeAlert(id: string): Promise<AlertAckRecord | null>;
+
   close(): Promise<void>;
 }
 
@@ -587,6 +597,116 @@ export class PgRepo implements BackendRepo {
        WHERE id = $1 AND (auth_user_id IS NULL OR auth_user_id = $2)`,
       [customerId, authUserId],
     );
+  }
+
+  async getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats> {
+    const [orders, payments, delivered, byState, byOffer, incidents, sync] = await Promise.all([
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM public.orders WHERE created_at >= $1`,
+        [since],
+      ),
+      this.pool.query(
+        `SELECT count(*)::int AS n,
+                coalesce(sum(amount_fcfa), 0)::bigint AS total
+         FROM public.payments WHERE state = 'CONFIRMED' AND confirmed_at >= $1`,
+        [since],
+      ),
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM public.tickets WHERE sold_at >= $1`,
+        [since],
+      ),
+      this.pool.query(
+        `SELECT db_state, count(*)::int AS n FROM public.tickets GROUP BY db_state`,
+      ),
+      this.pool.query(
+        `SELECT p.offer_id, count(*)::int AS n
+         FROM public.tickets t JOIN public.plans p ON p.id = t.plan_id
+         WHERE t.db_state IN ('AVAILABLE', 'RELEASED')
+         GROUP BY p.offer_id`,
+      ),
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM public.incidents WHERE state IN ('OPEN', 'INVESTIGATING')`,
+      ),
+      this.pool.query(
+        `SELECT count(*) FILTER (WHERE state IN ('PENDING', 'PROCESSING', 'RETRY'))::int AS pending,
+                count(*) FILTER (WHERE state IN ('FAILED', 'BLOCKED', 'MANUAL_REVIEW'))::int AS failed,
+                count(*) FILTER (WHERE state = 'SUCCESS')::int AS success
+         FROM public.mikrotik_sync`,
+      ),
+    ]);
+    const ticketsByState: Record<string, number> = {};
+    for (const row of byState.rows) ticketsByState[String(row['db_state'])] = Number(row['n']);
+    const availableByOffer: Record<string, number> = {};
+    for (const row of byOffer.rows) availableByOffer[String(row['offer_id'])] = Number(row['n']);
+    return {
+      ordersCountToday: Number(orders.rows[0]?.['n'] ?? 0),
+      paymentsConfirmedToday: Number(payments.rows[0]?.['n'] ?? 0),
+      revenueTodayFcfa: Number(payments.rows[0]?.['total'] ?? 0),
+      ticketsDeliveredToday: Number(delivered.rows[0]?.['n'] ?? 0),
+      ticketsByState,
+      availableByOffer,
+      incidentsOpen: Number(incidents.rows[0]?.['n'] ?? 0),
+      syncPending: Number(sync.rows[0]?.['pending'] ?? 0),
+      syncFailed: Number(sync.rows[0]?.['failed'] ?? 0),
+      syncSuccess: Number(sync.rows[0]?.['success'] ?? 0),
+    };
+  }
+
+  async getTicketsStatsByOffer(): Promise<Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }>> {
+    const result = await this.pool.query(
+      `SELECT ap.offer_id, ap.price_fcfa, t.db_state, count(t.id)::int AS n
+       FROM (SELECT DISTINCT ON (offer_id) offer_id, price_fcfa
+             FROM public.plans WHERE active_to IS NULL
+             ORDER BY offer_id, version DESC) ap
+       LEFT JOIN public.plans p ON p.offer_id = ap.offer_id
+       LEFT JOIN public.tickets t ON t.plan_id = p.id
+       GROUP BY ap.offer_id, ap.price_fcfa, t.db_state
+       ORDER BY ap.price_fcfa`,
+    );
+    const byOffer = new Map<string, { offerId: string; priceFcfa: number; states: Record<string, number> }>();
+    for (const row of result.rows) {
+      const offerId = String(row['offer_id']);
+      let entry = byOffer.get(offerId);
+      if (!entry) {
+        entry = { offerId, priceFcfa: Number(row['price_fcfa']), states: {} };
+        byOffer.set(offerId, entry);
+      }
+      if (row['db_state'] != null) entry.states[String(row['db_state'])] = Number(row['n']);
+    }
+    return Array.from(byOffer.values());
+  }
+
+  async acknowledgeAlert(id: string): Promise<AlertAckRecord | null> {
+    // Atomique : le WHERE acknowledged_at IS NULL rend le ack concurrent-safe.
+    const updated = await this.pool.query(
+      `UPDATE public.alerts SET acknowledged_at = now()
+       WHERE id = $1 AND acknowledged_at IS NULL
+       RETURNING id, rule, severity, acknowledged_at`,
+      [id],
+    );
+    if (updated.rows[0]) {
+      const row = updated.rows[0];
+      return {
+        id: String(row['id']),
+        rule: String(row['rule']),
+        severity: String(row['severity']),
+        acknowledgedAt: row['acknowledged_at'] as Date,
+        alreadyAcknowledged: false,
+      };
+    }
+    const existing = await this.pool.query(
+      `SELECT id, rule, severity, acknowledged_at FROM public.alerts WHERE id = $1`,
+      [id],
+    );
+    if (!existing.rows[0]) return null;
+    const row = existing.rows[0];
+    return {
+      id: String(row['id']),
+      rule: String(row['rule']),
+      severity: String(row['severity']),
+      acknowledgedAt: row['acknowledged_at'] as Date,
+      alreadyAcknowledged: true,
+    };
   }
 
   async close(): Promise<void> {

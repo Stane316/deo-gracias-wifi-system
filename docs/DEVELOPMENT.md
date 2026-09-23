@@ -156,8 +156,26 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 132/132 avec base (backend 85 dont 19 d'intégration, shared 45,
+- Attendu : 149/149 avec base (backend 102 dont 23 d'intégration, shared 45,
   connector 1, frontend 1). Sans base : les intégrations pg skippent proprement.
+
+## API admin : dashboard, stats tickets, ack alertes (IMP-17)
+
+- `GET /admin/dashboard` (doc 09 §12.1) : indicateurs du jour (CA = somme des
+  paiements CONFIRMÉS du jour, commandes, paiements confirmés, tickets délivrés),
+  inventaire (disponibles/réservés/vendus/expirés + offres proches de
+  l'épuisement, seuil 10), système (état de la file `mikrotik_sync`, incidents
+  ouverts, Connector = UNKNOWN en Phase 1).
+- **Règle doc 09 §13** : tous les chiffres proviennent des données persistées
+  (requêtes réelles) — jamais reconstruits côté frontend.
+- Jour courant métier = jour calendaire à `Africa/Porto-Novo` (UTC+1 fixe,
+  site de Calavi) ; logique pure testable dans `apps/backend/src/admin.ts`.
+- `GET /admin/tickets/stats` : inventaire par offre Grille A (prix, états, totaux).
+- `POST /admin/alerts/:id/ack` : reconnaissance atomique (`WHERE acknowledged_at
+  IS NULL`) et idempotente (rejeu => `already_acknowledged: true`, même
+  horodatage) ; 404 si inconnue ; chaque action est auditée (`audit_logs`).
+- Auth : identique à IMP-13 (JWT Supabase + rôle ADMIN/SUPER_ADMIN, messages
+  génériques, 503 sans configuration). Aucune migration ajoutée.
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

@@ -48,6 +48,7 @@
   l'inventaire réel (parking AVAILABLE→RESERVED pendant les suites IMP-14/15, restauration
   après ; le bloc IMP-16 restaure le ticket qu'il alloue). Migration idempotente (UUID fixes
   + ON CONFLICT), rollback documenté (échoue naturellement si un ticket seedé est déjà vendu).
-- **En attente d'arbitrage propriétaire** : l'empaquetage `SECURITY DEFINER` des fonctions
-  d'allocation (blueprint §3.3) — exposé structuré au rapport IMP-16 ; ne pas implémenter
-  avant décision.
+- **ARBITRÉ (23/09/2026, propriétaire)** : `SECURITY DEFINER` (blueprint §3.3) = **Option A,
+  statu quo Phase 1** — le backend garde `service_role` côté serveur, la logique d'allocation
+  reste en TypeScript (19 tests d'intégration réels). Bascule vers une fonction DEFINER à
+  revisiter au déploiement Supabase hébergé (Phase 2), via migration dédiée.
