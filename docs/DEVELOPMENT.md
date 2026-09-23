@@ -156,7 +156,7 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 149/149 avec base (backend 102 dont 23 d'intégration, shared 45,
+- Attendu : 169/169 avec base (backend 122 dont 26 d'intégration, shared 45,
   connector 1, frontend 1). Sans base : les intégrations pg skippent proprement.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
@@ -176,6 +176,26 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   horodatage) ; 404 si inconnue ; chaque action est auditée (`audit_logs`).
 - Auth : identique à IMP-13 (JWT Supabase + rôle ADMIN/SUPER_ADMIN, messages
   génériques, 503 sans configuration). Aucune migration ajoutée.
+
+## Génération de tickets digitaux par le backend (IMP-18)
+
+- `POST /admin/batches` (body `{offer_id, quantity}` — 1..200, contrat Mikmon
+  §3.5) : crée un lot `source='backend'` + ses tickets + les ordres
+  `create_ticket` en file `mikrotik_sync`, en UNE transaction (repo
+  `createBackendBatch`).
+- Formats contrat Mikmon §3 : nom routeur `dg` + 6 caractères [a-z0-9] ;
+  code client 8 caractères SANS ambigus (0/o/1/l/i exclus) ; comment
+  `vc-<seq>-<mm.dd.yy>-` au fuseau du site ; profile + limit-uptime pris dans
+  `plans` (jamais déduits du nom, doc 09 §36).
+- Séquence digitale : `settings.backend_batch_seq`, atomique, démarre à 100
+  (les batches Mikmon manuels occupent 1..6).
+- **Codes clairs** : affichés UNE seule fois dans la réponse (`code_export`, à
+  archiver au coffre) ; la base ne stocke que `sha256(code)` (0004). Le clair
+  ne vit ensuite que dans `mikrotik_sync.payload`, le temps de la synchro
+  routeur (purge au succès — IMP-21/24).
+- Logique pure : `apps/backend/src/ticketgen.ts` (RNG injectable, seedable).
+- Aucune migration : schéma 0001→0010 suffisant ; le test RLS utilise une
+  baseline dynamique pour `settings` (catalogue public, 0007).
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

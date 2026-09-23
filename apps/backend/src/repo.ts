@@ -4,7 +4,9 @@
  * et des tests d'intégration réels (PgRepo sur Postgres éphémère CI / sandbox).
  */
 import type { Pool } from 'pg';
+import { createHash } from 'node:crypto';
 import type { AdminDashboardDbStats, AlertAckRecord } from './admin.js';
+import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs, type GeneratedTicketSpec } from './ticketgen.js';
 
 
 export interface ActivePlan {
@@ -35,6 +37,17 @@ export interface CreateOrderInputDb {
   planId: string;
   planSnapshot: Record<string, unknown>;
   idempotencyKey: string;
+}
+
+/** IMP-18 — résultat de la génération d'un lot digital (le code clair n'est
+ * retourné QU'À la création : affichage unique, puis uniquement sha256 en base). */
+export interface CreatedBackendBatch {
+  batchId: string;
+  seq: number;
+  offerId: string;
+  quantity: number;
+  generatedAt: Date;
+  specs: GeneratedTicketSpec[];
 }
 
 export interface BackendRepo {
@@ -94,6 +107,11 @@ export interface BackendRepo {
   }): Promise<void>;
   /** Lie un compte Supabase Auth au client (RLS « own rows » via auth_user_id, 0007). */
   linkCustomerAuth(customerId: string, authUserId: string): Promise<void>;
+
+  /** IMP-18 — génération d'un lot de tickets digitaux (contrat Mikmon §3) :
+   * batch + tickets hashés + ordres `create_ticket` en file `mikrotik_sync`,
+   * le tout en UNE transaction. Retourne les codes clairs UNE seule fois. */
+  createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch>;
 
   /** IMP-17 — agrégats du dashboard admin (doc 09 §12-13), jour courant = depuis `since`. */
   getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats>;
@@ -597,6 +615,78 @@ export class PgRepo implements BackendRepo {
        WHERE id = $1 AND (auth_user_id IS NULL OR auth_user_id = $2)`,
       [customerId, authUserId],
     );
+  }
+
+  async createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch> {
+    const plan = await this.getActivePlanByOffer(input.offerId);
+    if (!plan) throw new Error(`offre sans plan actif : ${input.offerId}`);
+    return this.withTx(async (q) => {
+      // Séquence digitale atomique (settings) : 100, 101, ... (contrat §3.3).
+      await q(
+        `INSERT INTO public.settings (key, value)
+         VALUES ('backend_batch_seq', jsonb_build_object('next', $1::int))
+         ON CONFLICT (key) DO NOTHING`,
+        [FIRST_BACKEND_BATCH_SEQ + 1],
+      );
+      const seqRes = await q(
+        `UPDATE public.settings
+         SET value = jsonb_build_object('next', (value->>'next')::int + 1)
+         WHERE key = 'backend_batch_seq'
+         RETURNING (value->>'next')::int - 1 AS seq`,
+      );
+      const seq = Number(seqRes.rows[0]?.['seq']);
+      const specs = generateTicketSpecs({ seq, quantity: input.quantity });
+
+      const batchRes = await q(
+        `INSERT INTO public.ticket_batches (source, quantity, notes)
+         VALUES ('backend', $1, $2) RETURNING id, generated_at`,
+        [input.quantity, `backend-gen seq ${seq} (${input.offerId}, IMP-18)`],
+      );
+      const batchId = String(batchRes.rows[0]?.['id']);
+      const generatedAt = batchRes.rows[0]?.['generated_at'] as Date;
+
+      // Tickets : JAMAIS de code en clair en base (0004, INC-01/INC-04) —
+      // uniquement sha256(code) + préfixe indicatif 2 caractères.
+      const ticketValues: string[] = [];
+      const ticketParams: unknown[] = [];
+      specs.forEach((spec, i) => {
+        const codeHash = createHash('sha256').update(spec.clientCode).digest('hex');
+        const t = i * 5;
+        ticketValues.push(`($${t + 1}, $${t + 2}, $${t + 3}, $${t + 4}, $${t + 5})`);
+        ticketParams.push(batchId, codeHash, spec.clientCode.slice(0, 2), plan.planId, spec.mikrotikComment);
+      });
+      const ticketRes = await q(
+        `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id, mikrotik_comment)
+         VALUES ${ticketValues.join(', ')}
+         RETURNING id, code_hash`,
+        ticketParams,
+      );
+      const idByHash = new Map(ticketRes.rows.map((r) => [String(r['code_hash']), String(r['id'])]));
+
+      // File mikrotik_sync : le code clair ne vit QUE dans le payload, le temps
+      // de la synchronisation routeur (purge au succès — IMP-21/24).
+      const syncValues: string[] = [];
+      const syncParams: unknown[] = [];
+      specs.forEach((spec, i) => {
+        const codeHash = createHash('sha256').update(spec.clientCode).digest('hex');
+        syncValues.push(`('create_ticket', $${i + 1}::jsonb)`);
+        syncParams.push(JSON.stringify({
+          ticket_id: idByHash.get(codeHash),
+          batch_seq: seq,
+          name: spec.routerName,
+          password: spec.clientCode,
+          profile: plan.mikrotikProfile,
+          limit_uptime: plan.limitUptime,
+          comment: spec.mikrotikComment,
+        }));
+      });
+      await q(
+        `INSERT INTO public.mikrotik_sync (operation, payload) VALUES ${syncValues.join(', ')}`,
+        syncParams,
+      );
+
+      return { batchId, seq, offerId: input.offerId, quantity: input.quantity, generatedAt, specs };
+    });
   }
 
   async getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats> {

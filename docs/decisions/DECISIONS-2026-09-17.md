@@ -52,3 +52,16 @@
   statu quo Phase 1** — le backend garde `service_role` côté serveur, la logique d'allocation
   reste en TypeScript (19 tests d'intégration réels). Bascule vers une fonction DEFINER à
   revisiter au déploiement Supabase hébergé (Phase 2), via migration dédiée.
+
+## D8/D9 — Génération digitale des tickets (IMP-18, 24/09/2026) : APPLIQUÉ
+
+- **D8 — Préfixe `vc` conservé (contrat Mikmon §3.3)** : les lots digitaux réutilisent le
+  comment `vc-<seq>-<mm.dd.yy>-` sans AUCUNE écriture routeur (profils/On-Login/moniteurs
+  intouchés). L'alternative « étendre l'On-Login » est exclue en phase 1 par les interdits
+  du contrat §3.5. **Confirmation propriétaire demandée** avant la première synchro réelle.
+- **D9 — Cycle de vie du code clair** : affiché UNE seule fois à la génération (réponse de
+  `POST /admin/batches`, à archiver au coffre) ; la base ne stocke que `sha256(code)` (0004,
+  INC-01/INC-04) ; le clair ne subsiste ensuite que dans `mikrotik_sync.payload`, jusqu'au
+  succès de la synchro routeur, où il devra être purgé (IMP-21/24). La séquence digitale
+  (`settings.backend_batch_seq`, à partir de 100) est lisible par anon (catalogue public
+  0007) : information de sensibilité mineure, acceptée en phase 1.

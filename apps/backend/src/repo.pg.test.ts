@@ -875,3 +875,103 @@ describeDb('IMP-17 — statistiques admin sur Postgres réel', () => {
     expect(computeSyncState({ pending: stats.syncPending, failed: stats.syncFailed, success: stats.syncSuccess })).toBe('HEALTHY');
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// IMP-18 — Génération de lots digitaux par le backend sur Postgres réel
+// (contrat Mikmon §3) : batch source='backend', tickets sha256-only (0004),
+// file mikrotik_sync create_ticket avec payload complet, séquence atomique.
+// Cleanup : supprime les lots source='backend' (sync -> tickets -> batches).
+// ---------------------------------------------------------------------------
+describeDb('IMP-18 — génération de lots digitaux sur Postgres réel', () => {
+  const pool18 = new Pool({ connectionString: DATABASE_URL });
+  const repo18 = new PgRepo(pool18);
+
+  const cleanup18 = async (): Promise<void> => {
+    const batches = await pool18.query(`SELECT id FROM public.ticket_batches WHERE source = 'backend'`);
+    const ids = batches.rows.map((r) => String(r['id']));
+    if (ids.length > 0) {
+      await pool18.query(
+        `DELETE FROM public.mikrotik_sync WHERE operation = 'create_ticket'
+         AND payload->>'ticket_id' IN (SELECT id::text FROM public.tickets WHERE batch_id = ANY($1::uuid[]))`,
+        [ids],
+      );
+      await pool18.query(`DELETE FROM public.tickets WHERE batch_id = ANY($1::uuid[])`, [ids]);
+      await pool18.query(`DELETE FROM public.ticket_batches WHERE id = ANY($1::uuid[])`, [ids]);
+    }
+  };
+
+  beforeAll(async () => { await cleanup18(); });
+  afterAll(async () => { await cleanup18(); await pool18.end(); });
+
+  it('lot 24-HEURES : tickets sha256-only + file create_ticket avec payload contrat', async () => {
+    const created = await repo18.createBackendBatch({ offerId: '24-HEURES', quantity: 5 });
+    expect(created.seq).toBeGreaterThanOrEqual(100); // séquence digitale (contrat §3.3)
+    expect(created.specs).toHaveLength(5);
+
+    const batch = await pool18.query(
+      `SELECT source, quantity, notes FROM public.ticket_batches WHERE id = $1`,
+      [created.batchId],
+    );
+    expect(batch.rows[0]).toMatchObject({ source: 'backend', quantity: 5 });
+    expect(String(batch.rows[0]?.['notes'])).toContain(`backend-gen seq ${created.seq}`);
+
+    // Tickets : empreintes exactes des codes exportés, JAMAIS le clair (0004).
+    const expectedHashes = new Set(
+      created.specs.map((sp) => createHash('sha256').update(sp.clientCode).digest('hex')),
+    );
+    const tickets = await pool18.query(
+      `SELECT t.code_hash, t.code_prefix_hint, t.mikrotik_comment, t.db_state, p.offer_id
+       FROM public.tickets t JOIN public.plans p ON p.id = t.plan_id
+       WHERE t.batch_id = $1`,
+      [created.batchId],
+    );
+    expect(tickets.rows).toHaveLength(5);
+    for (const row of tickets.rows) {
+      expect(expectedHashes.has(String(row['code_hash']))).toBe(true);
+      expect(String(row['code_prefix_hint'])).toMatch(/^[2-9a-hjkmnp-z]{2}$/);
+      expect(String(row['mikrotik_comment'])).toMatch(/^vc-\d{3,}-\d{2}\.\d{2}\.\d{2}-$/);
+      expect(row['db_state']).toBe('AVAILABLE');
+      expect(row['offer_id']).toBe('24-HEURES');
+    }
+
+    // File mikrotik_sync : 5 ordres PENDING au payload complet (contrat §3).
+    const sync = await pool18.query(
+      `SELECT payload FROM public.mikrotik_sync
+       WHERE operation = 'create_ticket' AND state = 'PENDING'
+         AND payload->>'batch_seq' = $1`,
+      [String(created.seq)],
+    );
+    expect(sync.rows).toHaveLength(5);
+    for (const row of sync.rows) {
+      const pl = row['payload'] as Record<string, unknown>;
+      expect(pl['profile']).toBe('24-HEURES');
+      expect(pl['limit_uptime']).toBe('1d00:00:00'); // plan, jamais déduit du nom (doc 09 §36)
+      expect(String(pl['name'])).toMatch(/^dg[a-z0-9]{6}$/);
+      expect(String(pl['password'])).toMatch(/^[2-9a-hjkmnp-z]{8}$/);
+      expect(pl['comment']).toBe(created.specs[0]?.mikrotikComment);
+      // Corrélation exacte : sha256(password du payload) = code_hash du ticket pointé.
+      const ticket = await pool18.query(
+        `SELECT code_hash FROM public.tickets WHERE id = $1 AND batch_id = $2`,
+        [String(pl['ticket_id']), created.batchId],
+      );
+      expect(ticket.rows).toHaveLength(1);
+      expect(String(ticket.rows[0]?.['code_hash']))
+        .toBe(createHash('sha256').update(String(pl['password'])).digest('hex'));
+    }
+  });
+
+  it('séquence atomique : le lot suivant reçoit seq+1, le comment la porte', async () => {
+    const b1 = await repo18.createBackendBatch({ offerId: '5-HEURES', quantity: 2 });
+    const b2 = await repo18.createBackendBatch({ offerId: '5-HEURES', quantity: 2 });
+    expect(b2.seq).toBe(b1.seq + 1);
+    expect(b2.specs[0]?.mikrotikComment).toContain(`vc-${b2.seq}-`);
+  });
+
+  it('offre inconnue : rejet sans écriture partielle', async () => {
+    await expect(repo18.createBackendBatch({ offerId: '9-HEURES', quantity: 2 })).rejects.toThrow();
+    const rest = await pool18.query(`SELECT count(*)::int AS n FROM public.ticket_batches WHERE source = 'backend'`);
+    // Seuls les lots des tests précédents existent (5-HEURES ×2 ici + lot 24-HEURES).
+    expect(Number(rest.rows[0]?.['n'])).toBeLessThanOrEqual(3);
+  });
+});

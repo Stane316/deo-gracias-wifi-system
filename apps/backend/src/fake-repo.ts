@@ -5,6 +5,8 @@
 import { OFFERS } from '@dg/shared';
 import { randomUUID } from 'node:crypto';
 import type { AdminDashboardDbStats, AlertAckRecord } from './admin.js';
+import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs } from './ticketgen.js';
+import type { CreatedBackendBatch } from './repo.js';
 import type {
   ActivePlan,
   AllocateResult,
@@ -251,6 +253,32 @@ export class FakeRepo implements BackendRepo {
   linked: Array<[string, string]> = [];
   async linkCustomerAuth(customerId: string, authUserId: string): Promise<void> {
     this.linked.push([customerId, authUserId]);
+  }
+
+  // IMP-18 — génération de lots digitaux en mémoire.
+  backendBatchSeq = FIRST_BACKEND_BATCH_SEQ;
+  createdBatches: CreatedBackendBatch[] = [];
+  syncOps: Array<{ operation: string; payload: Record<string, unknown> }> = [];
+  async createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch> {
+    const plan = await this.getActivePlanByOffer(input.offerId);
+    if (!plan) throw new Error(`offre sans plan actif : ${input.offerId}`);
+    const seq = this.backendBatchSeq;
+    this.backendBatchSeq += 1;
+    const specs = generateTicketSpecs({ seq, quantity: input.quantity });
+    const batch: CreatedBackendBatch = {
+      batchId: randomUUID(), seq, offerId: input.offerId, quantity: input.quantity, generatedAt: new Date(), specs,
+    };
+    this.createdBatches.push(batch);
+    for (const spec of specs) {
+      this.syncOps.push({
+        operation: 'create_ticket',
+        payload: {
+          batch_seq: seq, name: spec.routerName, password: spec.clientCode,
+          profile: plan.mikrotikProfile, limit_uptime: plan.limitUptime, comment: spec.mikrotikComment,
+        },
+      });
+    }
+    return batch;
   }
 
   // IMP-17 — stats admin pilotables par les tests unitaires (doc 09 §12-13).

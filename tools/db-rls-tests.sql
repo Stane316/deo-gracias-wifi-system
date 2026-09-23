@@ -10,6 +10,7 @@ DO $do$
 DECLARE
   n        integer;
   n_stock  integer;   -- IMP-16 : tickets du stock seedé (0010), invisibles aux clients
+  n_settings integer; -- IMP-18 : settings peut porter le séquenceur de lots (catalogue public, 0007)
   uid_a    uuid := 'aaaaaaaa-0000-0000-0000-0000000000aa';
   uid_b    uuid := 'bbbbbbbb-0000-0000-0000-0000000000bb';
   cust_a   uuid := 'aaaaaaaa-0000-0000-0000-000000000001';
@@ -21,6 +22,7 @@ DECLARE
 BEGIN
   -- ── Fixtures (superuser) ──────────────────────────────────────────────────
   SELECT count(*) INTO n_stock FROM public.tickets;  -- baseline : stock Mikmon seedé
+  SELECT count(*) INTO n_settings FROM public.settings; -- baseline : séquenceur éventuel (IMP-18)
 
   SELECT id INTO plan_5h FROM public.plans WHERE offer_id = '5-HEURES' AND version = 1;
   IF plan_5h IS NULL THEN
@@ -46,7 +48,7 @@ BEGIN
     SELECT count(*) INTO n FROM public.plans;
     IF n <> 6 THEN RAISE EXCEPTION 'rls: anon voit % plans (attendu 6)', n; END IF;
     SELECT count(*) INTO n FROM public.settings;
-    IF n <> 0 THEN RAISE EXCEPTION 'rls: anon voit % lignes settings (attendu 0, table vide)', n; END IF;
+    IF n <> n_settings THEN RAISE EXCEPTION 'rls: anon voit % lignes settings (attendu %, catalogue public 0007)', n, n_settings; END IF;
   RESET ROLE;
 
   -- ── authenticated A : own rows uniquement ────────────────────────────────

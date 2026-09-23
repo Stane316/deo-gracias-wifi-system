@@ -221,6 +221,20 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > Tests : `admin.test.ts` (13 tests) + bloc intégration IMP-17 (4 tests) dans `repo.pg.test.ts`
 > sur base seedée réelle.
 
+> **LIVRAISON IMP-18 (24/09/2026)** : génération de lots digitaux par le backend (remplace
+> Mikmon, D5/N4) — `POST /admin/batches` : lot `source='backend'` + tickets + ordres
+> `create_ticket` en file `mikrotik_sync`, en UNE transaction (`repo.createBackendBatch`).
+> Contrat Mikmon §3 respecté : name `dg`+6 [a-z0-9], code client 8 caractères sans ambigus,
+> comment `vc-<seq>-<mm.dd.yy>-` (séquence digitale atomique dans `settings`, à partir de 100),
+> profile/limit-uptime depuis `plans` (jamais déduits du nom, doc 09 §36), ≤ 200/lot (§3.5).
+> Codes clairs : affichage UNIQUE dans la réponse (à archiver au coffre) ; la base ne garde
+> que `sha256(code)` (0004) ; le clair ne vit ensuite que dans `mikrotik_sync.payload` jusqu'à
+> la synchro routeur (purge au succès — IMP-21/24). Aucune migration. Tests : `ticketgen.test.ts`
+> (8), `batches.test.ts` (9), bloc intégration IMP-18 (3) sur Postgres réel.
+> **DÉCISION PROPRIÉTAIRE à confirmer (contrat §3.3)** : préfixe `vc` réutilisé tel quel
+> (zéro écriture routeur — l'alternative « étendre l'On-Login » est exclue par le contrat §3.5
+> en phase 1). À valider avant la première synchro réelle (IMP-24).
+
 ## 6. Workers / jobs
 
 | Job | Déclencheur | Rôle |

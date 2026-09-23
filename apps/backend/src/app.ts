@@ -25,6 +25,7 @@ import {
 import {
   authPhoneRequestSchema,
   authPhoneVerifySchema,
+  createBatchBodySchema,
   createOrderBodySchema,
   idempotencyKeySchema,
   normalizePhone,
@@ -716,6 +717,67 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       acknowledged_at: result.acknowledgedAt.toISOString(),
       already_acknowledged: result.alreadyAcknowledged,
     };
+  });
+
+  // IMP-18 — génération d'un lot de tickets digitaux par le backend (contrat
+  // Mikmon §3) : batch + tickets hashés + ordres create_ticket en file
+  // mikrotik_sync, en UNE transaction. Les codes clairs sont retournés UNE
+  // SEULE fois (affichage voucher), la base ne garde que sha256 (0004).
+  app.post('/admin/batches', async (req, reply) => {
+    if (!verifier) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    const actor = identity ? `admin:${identity.sub}` : 'anonymous';
+    if (!identity || !identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({
+        actor,
+        action: 'admin_auth_denied',
+        entity: 'auth',
+        ...(identity ? { entityId: identity.sub } : {}),
+      });
+      return reply.status(identity ? 403 : 401).type('application/problem+json')
+        .send(problem(identity ? 403 : 401, identity ? 'Accès refusé' : 'Authentification échouée',
+          identity ? 'Rôle administrateur requis.' : GENERIC_401));
+    }
+    const parsed = createBatchBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      const q = (req.body as { quantity?: unknown } | null)?.quantity;
+      const detail = typeof q === 'number' && (!Number.isInteger(q) || q < 1 || q > 200)
+        ? 'quantity doit être un entier entre 1 et 200 (contrat Mikmon §3.5 : ~200 créations/lot max, RAM 128 Mo).'
+        : 'offer_id doit être une offre de la Grille A, quantity un entier 1..200.';
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Corps invalide', detail));
+    }
+    const plan = await repo.getActivePlanByOffer(parsed.data.offer_id);
+    if (!plan) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Offre sans plan actif', `Aucun plan actif pour l'offre ${parsed.data.offer_id}.`));
+    }
+    const batch = await repo.createBackendBatch({ offerId: parsed.data.offer_id, quantity: parsed.data.quantity });
+    await repo.logAudit({
+      actor,
+      action: 'admin_batch_created',
+      entity: 'ticket_batches',
+      entityId: batch.batchId,
+    });
+    return reply.status(201).send({
+      batch: {
+        id: batch.batchId,
+        seq: batch.seq,
+        offer_id: batch.offerId,
+        quantity: batch.quantity,
+        generated_at: batch.generatedAt.toISOString(),
+      },
+      code_export: batch.specs.map((spec) => ({
+        router_name: spec.routerName,
+        code: spec.clientCode,
+        comment: spec.mikrotikComment,
+      })),
+      export_warning: 'Codes en clair : affichage UNIQUE. Archiver immédiatement au coffre (PDF/chiffré) ; la base ne conserve que les empreintes sha256.',
+    });
   });
 
   return app;

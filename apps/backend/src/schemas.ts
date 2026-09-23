@@ -10,6 +10,12 @@ import { z } from 'zod';
 
 const OFFER_IDS = OFFERS.map((o) => o.id) as [OfferId, ...OfferId[]];
 
+/** IMP-18 — génération d'un lot de tickets digitaux (contrat Mikmon §3.5 : ≤ 200/lot). */
+export const createBatchBodySchema = z.object({
+  offer_id: z.enum(OFFER_IDS),
+  quantity: z.number().int().min(1).max(200),
+}).strict();
+
 /**
  * Téléphone Bénin (identification minimale, doc 06 §06) : 10 chiffres commençant
  * par 01 (plan de numérotation national), préfixe international +229 toléré et
