@@ -156,8 +156,9 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 256/256 avec base (backend 164 dont 43 d'intégration, shared 45,
-  connector 46, frontend 1). Sans base : les intégrations pg skippent proprement.
+- Attendu : 265/265 avec base (backend 169 dont 43 d'intégration + 5 modes démo,
+  shared 45, connector 46, frontend 5). Sans base : les intégrations pg skippent
+  proprement.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
 
@@ -336,6 +337,26 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   drainé vers le DryRunConnector => run OK sans alerte ; voucher désactivé côté
   routeur => MISMATCH ticket_paye_absent + alerte WARNING + vue admin).
 - Les alertes restent ouvertes jusqu'à acquittement (`POST /admin/alerts/:id/ack`).
+
+## Démo visuelle locale (IMP-25)
+
+- SPA React/Vite (`apps/frontend`) : espace client (connexion OTP dev, offres
+  Grille A, commande, paiement, ticket) + console admin (tableau de bord
+  IMP-17, stats tickets, réconciliation IMP-24 avec acquittement). Le
+  navigateur n'appelle que des chemins relatifs `/api/…` (proxy Vite vers le
+  backend ; jamais de localhost côté navigateur). GUIDE-09 = mode d'emploi.
+- Modes DEV (jamais en production, garde-fous codés en dur) :
+  `DevStaticAuthVerifier` (jeton admin statique actif seulement sans Supabase
+  et avec AUTH_DEV_MODE=1), `DevPaymentProvider` + `POST /webhooks/dev-approve`
+  (actif seulement sans clé FedaPay et avec PAYMENT_DEV_MODE=1 ; n'approuve
+  que les paiements `DEV-…` ; réutilise le chemin réel
+  confirmPayment → allocateAndDeliver).
+- Production = mêmes routes, variables Supabase/FedaPay réelles : aucun
+  changement de code nécessaire.
+- Tests : 5 backend (verifieur, E2E mémoire commande→livraison, garde-fous)
+  + 4 frontend (formatage). Démo validée de bout en bout sur Postgres réel
+  (OTP→commande→paiement DEV→approbation→DELIVERED→ticket ; runs OK/MISMATCH
+  + alerte dans la vue admin).
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

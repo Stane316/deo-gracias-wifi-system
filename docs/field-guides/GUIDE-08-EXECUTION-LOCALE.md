@@ -6,10 +6,9 @@
 > (cloud = GUIDE-07). **Durée première installation** : 30–45 min ; ensuite 2 commandes
 > par session (tableau §7).
 >
-> État du produit à ce jour : **backend API uniquement** (JSON). L'interface visuelle
-> (SPA React/Vite, `apps/frontend`) arrive à l'**IMP-25** — ce guide sera alors complété
-> d'une section « frontend ». En attendant, la « démo » se fait via curl/navigateur sur
-> les routes JSON (`/healthz`, `/offers`, …).
+> État du produit : backend API **et interface visuelle** (SPA React/Vite,
+> `apps/frontend`) depuis l'**IMP-25** — voir le **GUIDE-09-DEMO-VISUELLE.md**
+> pour lancer et manipuler la démo complète (espace client + console admin).
 
 ## 0. Architecture du repo (ce qui tourne où)
 
@@ -208,14 +207,14 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **256/256** avec DATABASE_URL
-(backend 164 dont 43 d'intégration réelle — y compris concurrence d'allocation
-de tickets, vérification du stock seedé 0010, statistiques admin, génération de
-lots digitaux, échéance d'activation, workers IMP-20, contrat Connector IMP-21
-(dont E2E dry-run), Connector v0 read-only IMP-22 sur base réelle,
-réconciliation v0 bout en bout IMP-24 (runs + alertes + vue admin) ; le client
-RouterOS API IMP-23 est testé contre un stub protocolaire (sans routeur),
-shared 45, frontend 1, connector 46), 213 + 43 skippés sans.
+Attendu actuellement : typecheck 4/4 ; tests **265/265** avec DATABASE_URL
+(backend 169 — dont 43 d'intégration réelle : concurrence d'allocation,
+stock seedé 0010, statistiques admin, lots digitaux, échéance d'activation,
+workers IMP-20, contrat Connector IMP-21 (dont E2E dry-run), Connector v0
+read-only IMP-22, réconciliation v0 IMP-24 bout en bout, et 5 tests des modes
+démo IMP-25 ; le client RouterOS API IMP-23 est testé contre un stub
+protocolaire sans routeur ; shared 45, frontend 5, connector 46),
+222 + 43 skippés sans.
 C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo

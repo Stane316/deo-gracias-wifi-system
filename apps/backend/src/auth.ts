@@ -17,7 +17,7 @@
  * - Rôle admin lu dans `app_metadata.role` du compte Supabase (ADMIN | SUPER_ADMIN,
  *   doc 09 §6.2) ; les autres rôles (OPERATOR…) viendront avec le dashboard IMP-17.
  */
-import { createHash, randomBytes, randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 
 export interface AuthIdentity {
   sub: string;
@@ -32,6 +32,29 @@ export interface AuthVerifier {
 }
 
 export const ADMIN_ROLES: readonly string[] = ['ADMIN', 'SUPER_ADMIN'];
+
+/**
+ * IMP-25 — Vérificateur DEV pour la démo visuelle locale : un unique jeton
+ * statique (env DEV_ADMIN_TOKEN) donne le rôle ADMIN. Utilisé SEULEMENT si
+ * Supabase n'est PAS configuré ET AUTH_DEV_MODE=1 (server.ts) ; la production
+ * utilise exclusivement SupabaseAuthVerifier. Comparaison en temps constant.
+ */
+export class DevStaticAuthVerifier implements AuthVerifier {
+  private readonly expected: Buffer;
+
+  constructor(
+    token: string,
+    private readonly sub = 'dev-admin',
+  ) {
+    this.expected = createHash('sha256').update(token).digest();
+  }
+
+  async verify(accessToken: string): Promise<AuthIdentity | null> {
+    const provided = createHash('sha256').update(accessToken).digest();
+    if (provided.length !== this.expected.length || !timingSafeEqual(provided, this.expected)) return null;
+    return { sub: this.sub, phone: null, email: null, role: 'ADMIN' };
+  }
+}
 
 /**
  * Vérification Supabase Auth standard : GET {url}/auth/v1/user avec le Bearer token

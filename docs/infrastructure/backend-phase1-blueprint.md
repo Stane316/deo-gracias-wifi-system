@@ -261,6 +261,12 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > `WORKERS=off`, stoppé proprement au hook `onClose`. Aucune migration. Tests :
 > `workers.test.ts` (11 unitaires) + bloc intégration IMP-20 (5) sur Postgres réel.
 
+> **LIVRAISON IMP-25 (24/09/2026)** : démo visuelle — SPA React/Vite `apps/frontend`
+> (espace client complet + console admin : dashboard, tickets, réconciliation), branchée sur le
+> backend réel via proxy `/api`. Modes DEV gardés : `DevStaticAuthVerifier` (admin sans Supabase),
+> `DevPaymentProvider` + `/webhooks/dev-approve` (paiement simulé, chemin serveur identique au
+> webhook réel). Migrations : aucune. Tests +9 (backend 169, frontend 5). Guide : GUIDE-09.
+
 > **LIVRAISON IMP-24 (24/09/2026)** : réconciliation v0 branchée de bout en bout —
 > `reconcile-runner.ts` (attendu backend + observé DryRunConnector/RouterOS => rapport persisté
 > `reconciliation_runs` + alertes WARNING), repo `listReconciliationRuns`/`listOpenReconciliationAlerts`,

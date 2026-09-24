@@ -5,7 +5,8 @@
  */
 import { Pool } from 'pg';
 import { buildApp } from './app.js';
-import { SupabaseAuthVerifier } from './auth.js';
+import { DevStaticAuthVerifier, SupabaseAuthVerifier } from './auth.js';
+import { DevPaymentProvider } from './dev-payment.js';
 import { FedaPayClient } from './fedapay.js';
 import { PgRepo } from './repo.js';
 
@@ -21,9 +22,16 @@ const repo = new PgRepo(new Pool({ connectionString: databaseUrl }));
 // AUTH_DEV_MODE=1 active le renvoi du code OTP en local (jamais en production).
 const supabaseUrl = process.env['SUPABASE_URL'];
 const supabaseAnonKey = process.env['SUPABASE_ANON_KEY'];
-const verifier =
-  supabaseUrl && supabaseAnonKey ? new SupabaseAuthVerifier(supabaseUrl, supabaseAnonKey) : undefined;
 const devMode = ['1', 'true'].includes((process.env['AUTH_DEV_MODE'] ?? '').toLowerCase());
+// IMP-25 — démo visuelle locale : si Supabase est absent, AUTH_DEV_MODE=1 et
+// DEV_ADMIN_TOKEN défini, un jeton statique donne le rôle ADMIN (JAMAIS en prod).
+const devAdminToken = process.env['DEV_ADMIN_TOKEN'];
+const verifier =
+  supabaseUrl && supabaseAnonKey
+    ? new SupabaseAuthVerifier(supabaseUrl, supabaseAnonKey)
+    : devMode && devAdminToken && devAdminToken.length > 0
+      ? new DevStaticAuthVerifier(devAdminToken)
+      : undefined;
 
 // IMP-14 — FedaPay : clés depuis l'environnement uniquement (jamais au repo).
 const fedapaySecretKey = process.env['FEDAPAY_SECRET_KEY'];
@@ -31,9 +39,15 @@ const fedapayWebhookSecret = process.env['FEDAPAY_WEBHOOK_SECRET'];
 // IMP-21 — auth Connector : token long-lived dédié (blueprint §7).
 const connectorToken = process.env['CONNECTOR_TOKEN'];
 const fedapayEnvironment = process.env['FEDAPAY_ENVIRONMENT'] === 'live' ? 'live' : 'sandbox';
+// IMP-25 — démo visuelle locale : paiement simulé seulement si PAYMENT_DEV_MODE=1
+// ET aucune clé FedaPay (la vraie integration prime toujours). Jamais en prod.
+const paymentDevMode =
+  ['1', 'true'].includes((process.env['PAYMENT_DEV_MODE'] ?? '').toLowerCase()) && !fedapaySecretKey;
 const provider = fedapaySecretKey
   ? new FedaPayClient({ secretKey: fedapaySecretKey, environment: fedapayEnvironment })
-  : undefined;
+  : paymentDevMode
+    ? new DevPaymentProvider()
+    : undefined;
 
 const app = await buildApp({
   repo,
@@ -42,6 +56,7 @@ const app = await buildApp({
   payment: {
     ...(provider ? { provider } : {}),
     ...(fedapayWebhookSecret ? { webhookSecret: fedapayWebhookSecret } : {}),
+    ...(paymentDevMode ? { devMode: true } : {}),
   },
   // IMP-21 — contrat Connector : absent => routes /connector 503 (honnête).
   ...(connectorToken && connectorToken.length > 0 ? { connector: { token: connectorToken } } : {}),

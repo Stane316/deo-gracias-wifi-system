@@ -28,6 +28,7 @@ import {
   authPhoneVerifySchema,
   connectorClaimBodySchema,
   connectorInventoryReportSchema,
+  devApproveBodySchema,
   connectorResultBodySchema,
   createBatchBodySchema,
   createOrderBodySchema,
@@ -67,6 +68,8 @@ export interface BuildAppOptions {
     toleranceS?: number;
     /** Horloge injectable (tests). */
     nowS?: () => number;
+    /** IMP-25 — true = démo locale : monte POST /webhooks/dev-approve. Jamais en prod. */
+    devMode?: boolean;
   };
   /** IMP-21 — contrat Connector (blueprint §5) : token long-lived dédié ;
    * absent => routes /connector 503 (non configuré). D12 : 3 tentatives,
@@ -429,6 +432,42 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       },
     );
   });
+
+  // IMP-25 — DÉMO LOCALE : approbation simulée d'un paiement DEV (jamais en
+  // production : route montée seulement si payment.devMode, activé par
+  // PAYMENT_DEV_MODE=1 SANS FEDAPAY_SECRET_KEY). Réutilise exactement le chemin
+  // « confirmé => allocation => livraison » du webhook réel.
+  if (payCfg?.devMode) {
+    app.post('/webhooks/dev-approve', async (req, reply) => {
+      const parsed = devApproveBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.status(400).type('application/problem+json')
+          .send(problem(400, 'Body invalide', 'payment_id (UUID) requis.'));
+      }
+      const payment = await repo.getPaymentById(parsed.data.payment_id);
+      if (!payment) {
+        return reply.status(404).type('application/problem+json')
+          .send(problem(404, 'Paiement introuvable', 'Aucun paiement avec cet id.'));
+      }
+      // Garde-fou : seuls les paiements du provider DEV sont approuvables ici.
+      if (payment.providerRef == null || !payment.providerRef.startsWith('DEV-')) {
+        return reply.status(409).type('application/problem+json')
+          .send(problem(409, 'Paiement non-DEV', 'Cette route n’approuve que les paiements de démonstration.'));
+      }
+      const res = await repo.confirmPayment(payment.id);
+      if (res !== 'confirmed') {
+        return reply.status(200).send({ ignored: 'transition_illegale', payment_id: payment.id });
+      }
+      const delivery = await allocateAndDeliver(repo, payment.orderId, app.log);
+      await repo.logAudit({ actor: 'system', action: 'dev_payment_approved', entity: 'payments', entityId: payment.id });
+      return reply.status(200).send({
+        processed: 'confirmed',
+        payment_id: payment.id,
+        order_state: delivery.orderState,
+        delivery: delivery.status,
+      });
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // IMP-15 — Tickets : GET /tickets/mine (client) + POST /admin/orders/:id/allocate

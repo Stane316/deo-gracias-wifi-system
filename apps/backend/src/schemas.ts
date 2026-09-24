@@ -76,6 +76,11 @@ export const connectorResultBodySchema = z
 /** IMP-22 — rapport de lecture read-only posté par le Connector v0 : alimente
  * `reconciliation_runs` (routeur vu, §4) ; jamais de code clair, jamais
  * d'écriture routeur. */
+/** IMP-25 — démo locale : corps de POST /webhooks/dev-approve (mode DEV uniquement). */
+export const devApproveBodySchema = z
+  .object({ payment_id: z.string().uuid() })
+  .strict();
+
 export const connectorInventoryReportSchema = z
   .object({
     router_total_seen: z.number().int().min(0),
