@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, storage, type Offer, type OrderView, type TicketView } from '../api.js';
-import { formatFcfa, formatHours, problemDetail } from '../format.js';
+import { backendUnreachableMessage, formatFcfa, formatHours, problemDetail } from '../format.js';
 
 /**
  * IMP-25 — Parcours client de la démo : connexion OTP (mode DEV), choix
@@ -27,7 +27,7 @@ export function Accueil() {
     void (async () => {
       const res = await api<Offer[]>('/offers');
       if (res.ok && res.body) setOffers(res.body);
-      else setOffersError(problemDetail(res.body));
+      else setOffersError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
       if (storage.customerToken()) setAuthState('connected');
     })();
   }, []);

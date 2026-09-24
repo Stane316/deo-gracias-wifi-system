@@ -112,6 +112,18 @@ mode **Direct connection** (session, port 5432) → copier l'URI
 Mot de passe oublié : même page → **Reset database password** (le nouveau mot
 de passe s'affiche une fois : copiez-le dans votre `.env`, jamais au repo).
 
+> ⚠️ **LES DEUX URL SUPABASE — ne JAMAIS les intervertir** (erreur observée en
+> réel le 24/09, `connect ETIMEDOUT …:5432`) :
+>
+> | Variable | Forme exacte | Où la lire |
+> |---|---|---|
+> | `DATABASE_URL` | `postgres://postgres.[ref]:MOT_DE_PASSE@db.[ref].supabase.co:5432/postgres` | Settings → **Database** → Connection string → URI (Direct) |
+> | `SUPABASE_URL` | `https://[ref].supabase.co` | Settings → **API** → Project URL |
+>
+> Copier l'URL `https://…supabase.co` dans `DATABASE_URL` fait tenter à pg une
+> connexion TCP vers `https://` → timeout. Depuis IMP-25.4, le backend **refuse
+> de démarrer** avec un message qui nomme exactement cette confusion.
+
 **Vérifier sans révéler** : dans un terminal, `echo $DATABASE_URL | cut -c1-30`
 (montre le début seulement) ou tester la connexion :
 `psql "$DATABASE_URL" -c "select 1"`.

@@ -23,6 +23,15 @@ export function formatDateTime(iso: string | null): string {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** IMP-25.4 — le backend est-il injoignable (proxy en erreur, corps non-JSON) ? */
+export function backendUnreachableMessage(status: number, body: unknown): string | null {
+  if (body !== null) return null; // réponse structurée => message porté par problemDetail
+  if (status === 0 || status >= 500) {
+    return 'Backend injoignable : démarrez-le avec « npm run start -w @dg/backend » puis rechargez (GUIDE-09 §3).';
+  }
+  return null;
+}
+
 /** Extrait le message d'un problème RFC 7807 ou d'une réponse quelconque. */
 export function problemDetail(body: unknown): string {
   if (body && typeof body === 'object') {

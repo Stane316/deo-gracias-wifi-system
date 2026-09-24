@@ -6,6 +6,7 @@
 import { config as loadDotenv } from 'dotenv';
 import { Pool } from 'pg';
 import { buildApp } from './app.js';
+import { explainDatabaseUrlProblem } from './env-check.js';
 import { DevStaticAuthVerifier, SupabaseAuthVerifier } from './auth.js';
 import { DevPaymentProvider } from './dev-payment.js';
 import { FedaPayClient } from './fedapay.js';
@@ -17,8 +18,11 @@ import { PgRepo } from './repo.js';
 for (const envPath of ['.env', '../../.env']) loadDotenv({ path: envPath });
 
 const databaseUrl = process.env['DATABASE_URL'];
-if (!databaseUrl) {
-  console.error('DATABASE_URL manquante (voir .env.example). Abandon.');
+// IMP-25.4 — rejette immédiatement une DATABASE_URL mal formée (ex. URL du projet
+// Supabase copiée à la place de la chaîne postgres://).
+const dbUrlProblem = explainDatabaseUrlProblem(databaseUrl);
+if (dbUrlProblem) {
+  console.error(`DATABASE_URL invalide : ${dbUrlProblem}`);
   process.exit(1);
 }
 

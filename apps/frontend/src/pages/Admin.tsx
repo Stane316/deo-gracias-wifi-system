@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, storage, type ReconciliationView } from '../api.js';
-import { formatDateTime, formatFcfa, problemDetail } from '../format.js';
+import { backendUnreachableMessage, formatDateTime, formatFcfa, problemDetail } from '../format.js';
 
 interface DashboardPayload {
   generated_at: string;
@@ -51,15 +51,15 @@ export function Admin() {
     if (tab === 'dashboard') {
       const res = await api<DashboardPayload>('/admin/dashboard', { token: storage.adminToken() });
       if (res.ok && res.body) setDashboard(res.body);
-      else setError(problemDetail(res.body));
+      else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
     } else if (tab === 'tickets') {
       const res = await api<TicketsStats>('/admin/tickets/stats', { token: storage.adminToken() });
       if (res.ok && res.body) setStats(res.body);
-      else setError(problemDetail(res.body));
+      else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
     } else {
       const res = await api<ReconciliationView>('/admin/reconciliation', { token: storage.adminToken() });
       if (res.ok && res.body) setRecon(res.body);
-      else setError(problemDetail(res.body));
+      else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
     }
   }, [tab]);
 

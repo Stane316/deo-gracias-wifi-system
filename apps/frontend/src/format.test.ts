@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { formatDateTime, formatFcfa, formatHours, problemDetail } from './format.js';
+import {
+  backendUnreachableMessage,
+  formatDateTime,
+  formatFcfa,
+  formatHours,
+  problemDetail,
+} from './format.js';
 
 describe('IMP-25 — formatage', () => {
   it('formatFcfa : séparateurs de milliers + F', () => {
@@ -18,6 +24,13 @@ describe('IMP-25 — formatage', () => {
     expect(formatDateTime(null)).toBe('—');
     expect(formatDateTime('pas-une-date')).toBe('—');
     expect(formatDateTime('2026-09-24T13:05:00Z')).toMatch(/^\d{2}\/\d{2}\/2026 \d{2}:\d{2}$/);
+  });
+
+  it('backendUnreachableMessage : 5xx sans corps => message actionnable', () => {
+    expect(backendUnreachableMessage(500, null)).toContain('npm run start');
+    expect(backendUnreachableMessage(0, null)).toContain('npm run start');
+    expect(backendUnreachableMessage(503, { detail: 'x' })).toBeNull();
+    expect(backendUnreachableMessage(404, null)).toBeNull();
   });
 
   it('problemDetail : detail > title > défaut', () => {
