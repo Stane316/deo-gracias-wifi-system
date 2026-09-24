@@ -156,8 +156,8 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 250/250 avec base (backend 162 dont 41 d'intégration, shared 45,
-  connector 42, frontend 1). Sans base : les intégrations pg skippent proprement.
+- Attendu : 256/256 avec base (backend 164 dont 43 d'intégration, shared 45,
+  connector 46, frontend 1). Sans base : les intégrations pg skippent proprement.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
 
@@ -317,6 +317,25 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   remove, gateway, probe. AUCUN test ne touche un routeur réel (prompt 02).
 - Imports du backend vers le connector en **chemins relatifs** (leçon IMP-22 :
   résolution indépendante de node_modules/symlinks/paths).
+
+## Réconciliation v0 de bout en bout (IMP-24)
+
+- `reconcile-runner.ts` (connector) : le cycle complet read-only —
+  attendu plateforme (`GET /connector/inventory/expected`) + observé routeur
+  => `reconcileReadOnly` (IMP-22) => rapport (`POST /connector/inventory/report`)
+  qui persiste `reconciliation_runs` + alerte WARNING `router_readonly_mismatch`
+  en cas de MISMATCH (garde-fou INC-03).
+- Observé : v0 = `observedFromDryRun` (DryRunConnector en mémoire) ; W2 =
+  `observedFromRouterOs` (printHotspotUsers via l'API classique, IMP-23).
+  Transport injectable : `HttpInventoryTransport` (fetch, CONNECTOR_TOKEN) ou
+  adaptateur `app.inject` en tests. AUCUNE écriture routeur (contrat §4.5).
+- Backend : `listReconciliationRuns` / `listOpenReconciliationAlerts` (repo) +
+  `GET /admin/reconciliation` (rôle ADMIN requis) : runs récents (mode,
+  violations, nb anomalies) + alertes de réconciliation non acquittées.
+- Tests : 4 unitaires runner (transport fake) + 2 E2E pg réels (lot digital
+  drainé vers le DryRunConnector => run OK sans alerte ; voucher désactivé côté
+  routeur => MISMATCH ticket_paye_absent + alerte WARNING + vue admin).
+- Les alertes restent ouvertes jusqu'à acquittement (`POST /admin/alerts/:id/ack`).
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

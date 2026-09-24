@@ -130,6 +130,24 @@ export interface BackendRepo {
   }): Promise<string>;
   /** IMP-20 — lève une alerte (règle, sévérité, payload). */
   raiseAlert(alert: { rule: string; severity: 'INFO' | 'WARNING' | 'CRITICAL'; payload: Record<string, unknown> }): Promise<string>;
+  /** IMP-24 — historique des runs de réconciliation (vue admin). */
+  listReconciliationRuns(limit?: number): Promise<Array<{
+    id: string;
+    startedAt: string;
+    finishedAt: string | null;
+    routerTotalExpected: number | null;
+    routerTotalSeen: number | null;
+    status: 'RUNNING' | 'OK' | 'MISMATCH';
+    diff: Record<string, unknown> | null;
+  }>>;
+  /** IMP-24 — alertes de réconciliation non acquittées (vue admin). */
+  listOpenReconciliationAlerts(limit?: number): Promise<Array<{
+    id: string;
+    rule: string;
+    severity: 'INFO' | 'WARNING' | 'CRITICAL';
+    createdAt: string;
+    payload: Record<string, unknown>;
+  }>>;
 
   /** IMP-19 — expire les tickets SOLD dont l'échéance d'activation est dépassée
    * (double garde-fou, contrat §3.6). Transition légale SOLD→EXPIRED (0011),
@@ -1021,6 +1039,60 @@ export class PgRepo implements BackendRepo {
       [run.routerTotalExpected, run.routerTotalSeen, JSON.stringify(run.diff), run.status],
     );
     return String(res.rows[0]?.['id']);
+  }
+
+  /** IMP-24 — Historique des runs de réconciliation (vue admin, plus récents d'abord). */
+  async listReconciliationRuns(limit = 20): Promise<Array<{
+    id: string;
+    startedAt: string;
+    finishedAt: string | null;
+    routerTotalExpected: number | null;
+    routerTotalSeen: number | null;
+    status: 'RUNNING' | 'OK' | 'MISMATCH';
+    diff: Record<string, unknown> | null;
+  }>> {
+    const res = await this.pool.query(
+      `SELECT id, started_at, finished_at, router_total_expected, router_total_seen, status, diff
+       FROM public.reconciliation_runs
+       ORDER BY started_at DESC
+       LIMIT $1`,
+      [Math.max(1, Math.min(limit, 100))],
+    );
+    return res.rows.map((r) => ({
+      id: String(r['id']),
+      startedAt: String(r['started_at']),
+      finishedAt: r['finished_at'] != null ? String(r['finished_at']) : null,
+      routerTotalExpected: r['router_total_expected'] != null ? Number(r['router_total_expected']) : null,
+      routerTotalSeen: r['router_total_seen'] != null ? Number(r['router_total_seen']) : null,
+      status: String(r['status']) as 'RUNNING' | 'OK' | 'MISMATCH',
+      diff: (r['diff'] ?? null) as Record<string, unknown> | null,
+    }));
+  }
+
+  /** IMP-24 — Alertes de réconciliation non acquittées (vue admin). */
+  async listOpenReconciliationAlerts(limit = 50): Promise<Array<{
+    id: string;
+    rule: string;
+    severity: 'INFO' | 'WARNING' | 'CRITICAL';
+    createdAt: string;
+    payload: Record<string, unknown>;
+  }>> {
+    const res = await this.pool.query(
+      `SELECT id, rule, severity, created_at, payload
+       FROM public.alerts
+       WHERE acknowledged_at IS NULL
+         AND rule IN ('router_readonly_mismatch', 'sync_blocked')
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [Math.max(1, Math.min(limit, 200))],
+    );
+    return res.rows.map((r) => ({
+      id: String(r['id']),
+      rule: String(r['rule']),
+      severity: String(r['severity']) as 'INFO' | 'WARNING' | 'CRITICAL',
+      createdAt: String(r['created_at']),
+      payload: (r['payload'] ?? {}) as Record<string, unknown>,
+    }));
   }
 
   async raiseAlert(alert: { rule: string; severity: 'INFO' | 'WARNING' | 'CRITICAL'; payload: Record<string, unknown> }): Promise<string> {

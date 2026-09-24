@@ -11,6 +11,7 @@ import {
   DEFAULT_RESERVED_TTL_MS,
   runOrderExpiry,
   runReconciliationSim,
+  runSyncRequeue,
   runWebhookSweeper,
   startWorkers,
 } from './workers.js';
@@ -186,6 +187,26 @@ describe('IMP-20 — reconciler simulé', () => {
     expect(report.violations).toEqual(['delivered_without_ticket:2']);
     expect(repo.alertsRaised).toHaveLength(1);
     expect(repo.alertsRaised[0]).toMatchObject({ rule: 'reconciliation_mismatch', severity: 'CRITICAL' });
+  });
+});
+
+describe('IMP-21 — sync-requeue (verrous perdus)', () => {
+  it('PROCESSING bloqué au-delà du seuil => RETRY immédiat ; récent laissé', async () => {
+    const repo = new FakeRepo();
+    await repo.createBackendBatch({ offerId: '24-HEURES', quantity: 2 });
+    const [stuck, fresh] = repo.syncOps;
+    if (!stuck || !fresh) throw new Error('file vide');
+    const w = await repo.claimSyncOp('w1', new Date());
+    const w2 = await repo.claimSyncOp('w1', new Date());
+    void w; void w2;
+    stuck.updatedAt = new Date(Date.now() - 11 * 60_000); // verrou perdu (> 10 min)
+    const before = fresh.attempts;
+
+    const requeued = await runSyncRequeue(repo, new Date());
+    expect(requeued).toEqual([stuck.id]);
+    expect(stuck.state).toBe('RETRY');
+    expect(stuck.attempts).toBe(before); // non incrémenté : l'échec n'est pas au Connector
+    expect(fresh.state).toBe('PROCESSING'); // récent : pas touché
   });
 });
 

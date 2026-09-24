@@ -261,6 +261,13 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > `WORKERS=off`, stoppé proprement au hook `onClose`. Aucune migration. Tests :
 > `workers.test.ts` (11 unitaires) + bloc intégration IMP-20 (5) sur Postgres réel.
 
+> **LIVRAISON IMP-24 (24/09/2026)** : réconciliation v0 branchée de bout en bout —
+> `reconcile-runner.ts` (attendu backend + observé DryRunConnector/RouterOS => rapport persisté
+> `reconciliation_runs` + alertes WARNING), repo `listReconciliationRuns`/`listOpenReconciliationAlerts`,
+> route admin `GET /admin/reconciliation` (runs + alertes ouvertes). Toujours strictement
+> read-only côté routeur (§4.5). Aucune migration (tables 0005/0006 existantes). Tests +6
+> (backend 164, connector 46).
+
 > **LIVRAISON IMP-23 (24/09/2026)** : client zero-dep de l'API classique RouterOS
 > (doc 07 §37 : binaire, jamais REST) — `routeros-protocol.ts` (longueurs variables, phrases,
 > `!re/!done/!trap/!fatal`), `RouterOsApiClient` (TCP api / TLS api-ssl, login clair + bascule

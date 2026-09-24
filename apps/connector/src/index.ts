@@ -50,3 +50,5 @@ export { RouterOsApiClient, RouterOsApiError } from './routeros-client.js';
 export type { RouterOsConnectOptions } from './routeros-client.js';
 export { applyQueueOp } from './routeros-gateway.js';
 export { StubRouterOsServer } from './testing/stub-routeros.js';
+export { HttpInventoryTransport, observedFromDryRun, observedFromRouterOs, runReconciliationOnce } from './reconcile-runner.js';
+export type { InventoryReportBody, InventoryTransport, ObservedSource, ReconciliationOutcome } from './reconcile-runner.js';

@@ -23,6 +23,12 @@ import { HOTSPOT_ACTIVE_FIXTURE, MIKHMON_JOURNAL_FIXTURE } from '../../connector
 import { ReadOnlyConnectorV0 } from '../../connector/src/read-only.js';
 import { reconcileReadOnly, type PlatformExpected } from '../../connector/src/reconcile.js';
 import { drainQueue, type ClaimedOp, type ResultBody, type SyncTransport } from '../../connector/src/sync-client.js';
+import {
+  observedFromDryRun,
+  runReconciliationOnce,
+  type InventoryReportBody,
+  type InventoryTransport,
+} from '../../connector/src/reconcile-runner.js';
 
 class FakeVerifier implements AuthVerifier {
   identities = new Map<string, AuthIdentity>();
@@ -1545,3 +1551,204 @@ describeDb('IMP-22 — inventaire read-only sur Postgres réel', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// IMP-24 — Réconciliation Connector v0 de bout en bout : le DryRunConnector
+// (lecture routeur) est branché sur reconcileReadOnly + persistance réelle
+// reconciliation_runs/alerts, puis consultable via GET /admin/reconciliation.
+// ---------------------------------------------------------------------------
+describeDb('IMP-24 — réconciliation v0 bout en bout sur Postgres réel', () => {
+  const pool24 = new Pool({ connectionString: DATABASE_URL });
+  const repo24 = new PgRepo(pool24);
+  const TOKEN24 = 'itest-imp24-pg-token';
+  const verifier24 = new FakeVerifier();
+  let blockStart: Date = new Date();
+  const runIds: string[] = [];
+
+  const cleanup24 = async (): Promise<void> => {
+    if (runIds.length > 0) {
+      await pool24.query(`DELETE FROM public.alerts WHERE payload->>'run_id' = ANY($1::text[])`, [runIds]);
+      await pool24.query(`DELETE FROM public.reconciliation_runs WHERE id = ANY($1::uuid[])`, [runIds]);
+    }
+    await pool24.query(`DELETE FROM public.mikrotik_sync WHERE created_at >= $1`, [blockStart]);
+    await pool24.query(
+      `DELETE FROM public.tickets WHERE batch_id IN (
+         SELECT id FROM public.ticket_batches WHERE source = 'backend' AND created_at >= $1)`,
+      [blockStart],
+    );
+    await pool24.query(`DELETE FROM public.ticket_batches WHERE source = 'backend' AND created_at >= $1`, [blockStart]);
+  };
+
+  beforeAll(async () => {
+    const res = await pool24.query(`SELECT now() AS t`);
+    blockStart = new Date(res.rows[0]?.['t'] as string);
+    verifier24.identities.set('tok-imp24-admin', { sub: 'sub-imp24-admin', phone: null, email: 'imp24@dg.bj', role: 'ADMIN' });
+    verifier24.identities.set('tok-imp24-user', { sub: 'sub-imp24-user', phone: null, email: null, role: null });
+    await cleanup24();
+    // Isolation : alertes de réconciliation non acquittées héritées d'exécutions
+    // locales précédentes (E2E IMP-22) — en prod elles restent jusqu'à l'acquittement.
+    await pool24.query(
+      `DELETE FROM public.alerts
+       WHERE acknowledged_at IS NULL
+         AND rule IN ('router_readonly_mismatch', 'sync_blocked')
+         AND created_at < $1`,
+      [blockStart],
+    );
+  });
+  afterAll(async () => { await cleanup24(); await pool24.end(); });
+
+  /** Transport inventaire branché sur app.inject (pas de réseau). */
+  const makeInventoryTransport = (app24: Awaited<ReturnType<typeof buildApp>>): InventoryTransport => ({
+    async fetchExpected(): Promise<PlatformExpected> {
+      const res = await app24.inject({
+        method: 'GET', url: '/connector/inventory/expected',
+        headers: { authorization: `Bearer ${TOKEN24}` },
+      });
+      if (res.statusCode !== 200) throw new Error(`expected HTTP ${res.statusCode}`);
+      const body = res.json() as Record<string, unknown>;
+      return {
+        digitalVouchers: ((body['digital_vouchers'] ?? []) as Array<Record<string, unknown>>).map((v) => ({
+          name: String(v['name']), profile: String(v['profile']), comment: String(v['comment']),
+        })),
+        legacyCodeHashes: (body['legacy_code_hashes'] ?? []) as string[],
+      };
+    },
+    async sendReport(report: InventoryReportBody): Promise<{ runId: string; status: 'OK' | 'MISMATCH' }> {
+      const res = await app24.inject({
+        method: 'POST', url: '/connector/inventory/report',
+        headers: { authorization: `Bearer ${TOKEN24}` },
+        payload: report,
+      });
+      if (res.statusCode !== 201) throw new Error(`report HTTP ${res.statusCode}: ${res.body}`);
+      const body = res.json() as Record<string, unknown>;
+      return { runId: String(body['run_id']), status: body['status'] === 'MISMATCH' ? 'MISMATCH' : 'OK' };
+    },
+  });
+
+  /** Transport file mikrotik_sync branché sur app.inject (comme IMP-21). */
+  const makeSyncTransport = (app24: Awaited<ReturnType<typeof buildApp>>): SyncTransport => ({
+    async claim(workerId: string): Promise<ClaimedOp | null> {
+      const res = await app24.inject({
+        method: 'POST', url: '/connector/sync/claim',
+        headers: { authorization: `Bearer ${TOKEN24}` },
+        payload: { worker_id: workerId },
+      });
+      if (res.statusCode === 204) return null;
+      if (res.statusCode !== 200) throw new Error(`claim HTTP ${res.statusCode}`);
+      const body = res.json() as Record<string, unknown>;
+      return {
+        id: String(body['id']), operation: String(body['operation']),
+        payload: (body['payload'] ?? {}) as Record<string, unknown>,
+        state: String(body['state']), attempts: Number(body['attempts'] ?? 0),
+      };
+    },
+    async reportResult(opId: string, body: ResultBody): Promise<void> {
+      const res = await app24.inject({
+        method: 'POST', url: `/connector/sync/${opId}/result`,
+        headers: { authorization: `Bearer ${TOKEN24}` },
+        payload: body,
+      });
+      if (res.statusCode !== 200) throw new Error(`result HTTP ${res.statusCode}: ${res.body}`);
+    },
+  });
+
+  it('E2E cohérent : lot digital appliqué au DryRunConnector => run OK persisté, zéro alerte, vue admin', async () => {
+    const batch = await repo24.createBackendBatch({ offerId: '5-HEURES', quantity: 2 });
+    expect(batch.specs).toHaveLength(2);
+
+    const app24 = await buildApp({ repo: repo24, connector: { token: TOKEN24 }, auth: { verifier: verifier24 } });
+    try {
+      const router = new DryRunConnector();
+      const drained = await drainQueue(makeSyncTransport(app24), router, 'imp24-e2e');
+      expect(drained).toEqual({ processed: 2, success: 2, retry: 0 });
+
+      const outcome = await runReconciliationOnce(makeInventoryTransport(app24), observedFromDryRun(router));
+      runIds.push(outcome.runId);
+      expect(outcome.status).toBe('OK');
+      expect(outcome.report.routerTotalSeen).toBe(2);
+
+      const run = await pool24.query(
+        `SELECT status, router_total_seen, router_total_expected, diff FROM public.reconciliation_runs WHERE id = $1`,
+        [outcome.runId],
+      );
+      expect(run.rows[0]?.['status']).toBe('OK');
+      expect(Number(run.rows[0]?.['router_total_seen'])).toBe(2);
+      // Attendu = 2 vouchers digitaux + 660 empreintes legacy (stock 0010).
+      expect(Number(run.rows[0]?.['router_total_expected'])).toBe(2 + 660);
+      expect(run.rows[0]?.['diff']).toMatchObject({ mode: 'readonly_v0', status_source: 'connector' });
+
+      const alerts = await pool24.query(`SELECT count(*)::int AS n FROM public.alerts WHERE payload->>'run_id' = $1`, [outcome.runId]);
+      expect(Number(alerts.rows[0]?.['n'])).toBe(0);
+
+      // Vue admin : run visible, aucune alerte ouverte de réconciliation.
+      const adminRes = await app24.inject({
+        method: 'GET', url: '/admin/reconciliation',
+        headers: { authorization: 'Bearer tok-imp24-admin' },
+      });
+      expect(adminRes.statusCode).toBe(200);
+      const view = adminRes.json() as { runs: Array<Record<string, unknown>>; open_alerts: unknown[] };
+      const seen = view.runs.find((r) => r['id'] === outcome.runId);
+      expect(seen).toMatchObject({ status: 'OK', mode: 'readonly_v0', anomalies_count: 0 });
+      expect(view.open_alerts).toHaveLength(0);
+
+      // Non-admin => 403 ; sans token => 401.
+      const forbidden = await app24.inject({
+        method: 'GET', url: '/admin/reconciliation',
+        headers: { authorization: 'Bearer tok-imp24-user' },
+      });
+      expect(forbidden.statusCode).toBe(403);
+      const unauth = await app24.inject({ method: 'GET', url: '/admin/reconciliation' });
+      expect(unauth.statusCode).toBe(401);
+    } finally {
+      await app24.close();
+    }
+  });
+
+  it('E2E divergence : voucher désactivé côté routeur => MISMATCH + alerte WARNING + vue admin', async () => {
+    const batch = await repo24.createBackendBatch({ offerId: '12-HEURES', quantity: 1 });
+    expect(batch.specs).toHaveLength(1);
+
+    const app24 = await buildApp({ repo: repo24, connector: { token: TOKEN24 }, auth: { verifier: verifier24 } });
+    try {
+      const router = new DryRunConnector();
+      const drained = await drainQueue(makeSyncTransport(app24), router, 'imp24-e2e');
+      expect(drained).toEqual({ processed: 1, success: 1, retry: 0 });
+
+      const created = router.inventory()[0];
+      expect(created).toBeDefined();
+      const disabled = router.dispatch('disable_ticket', { name: created?.name });
+      expect(disabled.ok).toBe(true);
+
+      const outcome = await runReconciliationOnce(makeInventoryTransport(app24), observedFromDryRun(router));
+      runIds.push(outcome.runId);
+      expect(outcome.status).toBe('MISMATCH');
+      expect(outcome.report.violations.join(',')).toContain('ticket_paye_absent');
+
+      const run = await pool24.query(`SELECT status FROM public.reconciliation_runs WHERE id = $1`, [outcome.runId]);
+      expect(run.rows[0]?.['status']).toBe('MISMATCH');
+      const alerts = await pool24.query(
+        `SELECT rule, severity FROM public.alerts WHERE payload->>'run_id' = $1`,
+        [outcome.runId],
+      );
+      expect(alerts.rows[0]).toMatchObject({ rule: 'router_readonly_mismatch', severity: 'WARNING' });
+
+      // Vue admin : dernier run MISMATCH + alerte ouverte correspondante.
+      const adminRes = await app24.inject({
+        method: 'GET', url: '/admin/reconciliation',
+        headers: { authorization: 'Bearer tok-imp24-admin' },
+      });
+      expect(adminRes.statusCode).toBe(200);
+      const view = adminRes.json() as { runs: Array<Record<string, unknown>>; open_alerts: Array<Record<string, unknown>> };
+      expect(view.runs[0]).toMatchObject({ id: outcome.runId, status: 'MISMATCH' });
+      // Le compte exact dépend des vouchers attendus encore présents en base
+      // (ici : celui du lot courant + ceux du test précédent, absents de CE routeur).
+      expect(view.runs[0]?.['violations']).toEqual(
+        expect.arrayContaining([expect.stringMatching(/^ticket_paye_absent:\d+$/)]),
+      );
+      expect(view.open_alerts.some((a) => a['rule'] === 'router_readonly_mismatch' && a['run_id'] === outcome.runId)).toBe(true);
+    } finally {
+      await app24.close();
+    }
+  });
+});
+

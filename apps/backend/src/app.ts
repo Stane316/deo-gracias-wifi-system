@@ -954,6 +954,52 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     return reply.status(201).send({ run_id: runId, status: body.status });
   });
 
+  // IMP-24 — vue admin de la réconciliation (contrat §4.4, INC-03) : runs
+  // persistés par le rapport Connector + alertes non acquittées.
+  app.get('/admin/reconciliation', async (req, reply) => {
+    if (!verifier) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    if (!identity) {
+      await repo.logAudit({ actor: 'anonymous', action: 'admin_auth_denied', entity: 'auth' });
+      return reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', GENERIC_401));
+    }
+    const actor = `admin:${identity.sub}`;
+    if (!identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({ actor, action: 'admin_auth_denied', entity: 'auth', entityId: identity.sub });
+      return reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Accès refusé', 'Rôle administrateur requis.'));
+    }
+    const [runs, openAlerts] = await Promise.all([
+      repo.listReconciliationRuns(20),
+      repo.listOpenReconciliationAlerts(50),
+    ]);
+    return {
+      runs: runs.map((r) => ({
+        id: r.id,
+        started_at: r.startedAt,
+        finished_at: r.finishedAt,
+        router_total_expected: r.routerTotalExpected,
+        router_total_seen: r.routerTotalSeen,
+        status: r.status,
+        mode: (r.diff?.['mode'] as string | undefined) ?? null,
+        violations: (r.diff?.['violations'] as string[] | undefined) ?? [],
+        anomalies_count: Array.isArray(r.diff?.['anomalies']) ? (r.diff['anomalies'] as unknown[]).length : 0,
+      })),
+      open_alerts: openAlerts.map((a) => ({
+        id: a.id,
+        rule: a.rule,
+        severity: a.severity,
+        created_at: a.createdAt,
+        run_id: (a.payload['run_id'] as string | undefined) ?? null,
+      })),
+    };
+  });
+
   // IMP-20 — workers in-process (blueprint §6, D11) : order-expiry,
   // webhook-sweeper (si provider FedaPay configuré), reconciler simulé.
   if (opts.workers?.enabled) {

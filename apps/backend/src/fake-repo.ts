@@ -319,6 +319,34 @@ export class FakeRepo implements BackendRepo {
     this.alertsRaised.push(alert);
     return randomUUID();
   }
+  async listReconciliationRuns(limit = 20): Promise<Array<{
+    id: string; startedAt: string; finishedAt: string | null; routerTotalExpected: number | null;
+    routerTotalSeen: number | null; status: 'RUNNING' | 'OK' | 'MISMATCH'; diff: Record<string, unknown> | null;
+  }>> {
+    return [...this.reconciliationRuns].slice(-Math.max(1, limit)).reverse().map((r) => ({
+      id: String(r['id'] ?? ''),
+      startedAt: String(r['startedAt'] ?? new Date().toISOString()),
+      finishedAt: r['finishedAt'] != null ? String(r['finishedAt']) : null,
+      routerTotalExpected: r['routerTotalExpected'] != null ? Number(r['routerTotalExpected']) : null,
+      routerTotalSeen: r['routerTotalSeen'] != null ? Number(r['routerTotalSeen']) : null,
+      status: (r['status'] ?? 'RUNNING') as 'RUNNING' | 'OK' | 'MISMATCH',
+      diff: (r['diff'] ?? null) as Record<string, unknown> | null,
+    }));
+  }
+  async listOpenReconciliationAlerts(limit = 50): Promise<Array<{
+    id: string; rule: string; severity: 'INFO' | 'WARNING' | 'CRITICAL'; createdAt: string; payload: Record<string, unknown>;
+  }>> {
+    return this.alertsRaised
+      .filter((a) => a.rule === 'router_readonly_mismatch' || a.rule === 'sync_blocked')
+      .slice(-Math.max(1, limit)).reverse()
+      .map((a) => ({
+        id: randomUUID(),
+        rule: a.rule,
+        severity: a.severity as 'INFO' | 'WARNING' | 'CRITICAL',
+        createdAt: new Date().toISOString(),
+        payload: a.payload,
+      }));
+  }
 
   async expireOverdueTickets(now: Date): Promise<string[]> {
     const out: string[] = [];
