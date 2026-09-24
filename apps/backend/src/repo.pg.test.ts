@@ -15,20 +15,14 @@ import { PgRepo } from './repo.js';
 import { computeSyncState, startOfBusinessDay } from './admin.js';
 import { allocateAndDeliver } from './tickets.js';
 import { runOrderExpiry, runReconciliationSim } from './workers.js';
-import {
-  DryRunConnector,
-  drainQueue,
-  HOTSPOT_ACTIVE_FIXTURE,
-  HOTSPOT_USERS_TABULAR_FIXTURE,
-  MIKHMON_JOURNAL_FIXTURE,
-  ReadOnlyConnectorV0,
-  reconcileReadOnly,
-  seedLegacyInventory,
-  type ClaimedOp,
-  type PlatformExpected,
-  type ResultBody,
-  type SyncTransport,
-} from '@dg/connector';
+// Imports RELATIFS vers les sources du paquet connector (leçon IMP-22 : aucune
+// dépendance à l'état de node_modules/symlinks/paths — résolution directe).
+import { DryRunConnector } from '../../connector/src/dry-run.js';
+import { seedLegacyInventory, HOTSPOT_USERS_TABULAR_FIXTURE } from '../../connector/src/fixtures/hotspot-users.fixture.js';
+import { HOTSPOT_ACTIVE_FIXTURE, MIKHMON_JOURNAL_FIXTURE } from '../../connector/src/fixtures/readonly.fixture.js';
+import { ReadOnlyConnectorV0 } from '../../connector/src/read-only.js';
+import { reconcileReadOnly, type PlatformExpected } from '../../connector/src/reconcile.js';
+import { drainQueue, type ClaimedOp, type ResultBody, type SyncTransport } from '../../connector/src/sync-client.js';
 
 class FakeVerifier implements AuthVerifier {
   identities = new Map<string, AuthIdentity>();

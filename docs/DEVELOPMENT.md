@@ -156,8 +156,8 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 237/237 avec base (backend 162 dont 41 d'intégration, shared 45,
-  connector 29, frontend 1). Sans base : les intégrations pg skippent proprement.
+- Attendu : 250/250 avec base (backend 162 dont 41 d'intégration, shared 45,
+  connector 42, frontend 1). Sans base : les intégrations pg skippent proprement.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
 
@@ -296,6 +296,27 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   (inventaire à figer en IMP-35, décision D13).
 - E2E réel : expected sur base réelle + lectures fixtures => rapport MISMATCH
   tracé + alerte ; rapport cohérent => run OK sans alerte.
+
+## Client RouterOS API classique + premières écritures (IMP-23)
+
+- Doc 07 §37 : l'API **classique binaire** RouterOS (jamais le REST, non garanti
+  en 6.49). `routeros-protocol.ts` : longueurs variables (1-5 octets, vecteurs
+  wiki), phrases mots+mot vide, réponses `!re/!done/!trap/!fatal`.
+- `RouterOsApiClient` (zero-dep : node:net/tls/crypto) : TCP `api` ou TLS
+  `api-ssl`, login clair (mode primaire LAN) + bascule challenge md5 (schéma
+  hex simplifié, ajustement binaire au W2 — P6), `talk()`, opérations hotspot
+  (`add`/`print`/`set disabled`/`remove`/find par `?name=`).
+- `applyQueueOp` : passerelle file `mikrotik_sync` -> routeur avec le même
+  contrat de résultat que le DryRunConnector (create_ticket => add,
+  disable_ticket => find+set, read/refresh => print).
+- `probePermissions()` (P6) : sonde lecture + écriture avec un user jetable
+  `dgprobe0` créé puis supprimé ; rapport `{read, write, detail}` à exécuter
+  sur site en W2 avec le compte `dg-connector` (permissions réelles à valider).
+- Tests : stub TCP protocolaire en mémoire (`testing/stub-routeros.ts`) —
+  login clair/challenge, traps (doublon, panne temporaire), E2E add/print/set/
+  remove, gateway, probe. AUCUN test ne touche un routeur réel (prompt 02).
+- Imports du backend vers le connector en **chemins relatifs** (leçon IMP-22 :
+  résolution indépendante de node_modules/symlinks/paths).
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

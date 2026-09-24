@@ -17,3 +17,36 @@ export {
   HOTSPOT_USERS_TABULAR_FIXTURE,
   seedLegacyInventory,
 } from './fixtures/hotspot-users.fixture.js';
+export {
+  normalizeRouterOsDate,
+  parseHotspotActive,
+  parseLimitUptime,
+  parseMikhmonJournal,
+  parseRouterOsDuration,
+} from './readonly-parsers.js';
+export type { HotspotActiveRecord, MikhmonJournalEntry } from './readonly-parsers.js';
+export { reconcileReadOnly, UPTIME_TOLERANCE_S } from './reconcile.js';
+export type {
+  ExpectedDigitalVoucher,
+  PlatformExpected,
+  ReadOnlyAnomaly,
+  ReadOnlyAnomalyKind,
+  ReconcileReadOnlyReport,
+  RouterObserved,
+} from './reconcile.js';
+export { ReadOnlyConnectorV0 } from './read-only.js';
+export type { ReadOnlySources } from './read-only.js';
+export { HOTSPOT_ACTIVE_FIXTURE, MIKHMON_JOURNAL_FIXTURE } from './fixtures/readonly.fixture.js';
+export {
+  decodeLength,
+  encodeLength,
+  encodeSentence,
+  encodeWord,
+  parseSentence,
+  replyWordsToReply,
+} from './routeros-protocol.js';
+export type { DecodedLength, ParsedSentence, RouterOsReply } from './routeros-protocol.js';
+export { RouterOsApiClient, RouterOsApiError } from './routeros-client.js';
+export type { RouterOsConnectOptions } from './routeros-client.js';
+export { applyQueueOp } from './routeros-gateway.js';
+export { StubRouterOsServer } from './testing/stub-routeros.js';

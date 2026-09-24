@@ -261,6 +261,16 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > `WORKERS=off`, stoppé proprement au hook `onClose`. Aucune migration. Tests :
 > `workers.test.ts` (11 unitaires) + bloc intégration IMP-20 (5) sur Postgres réel.
 
+> **LIVRAISON IMP-23 (24/09/2026)** : client zero-dep de l'API classique RouterOS
+> (doc 07 §37 : binaire, jamais REST) — `routeros-protocol.ts` (longueurs variables, phrases,
+> `!re/!done/!trap/!fatal`), `RouterOsApiClient` (TCP api / TLS api-ssl, login clair + bascule
+> challenge md5 schéma hex simplifié D14, opérations hotspot add/print/set/remove/find),
+> `applyQueueOp` = passerelle `mikrotik_sync` -> routeur (même contrat de résultat que le
+> dry-run), `probePermissions()` pour le P6 (user jetable `dgprobe0`). Testé contre un stub
+> TCP protocolaire en mémoire (login clair/challenge, traps doublon/panne, E2E complet) —
+> aucun routeur réel touché (prompt 02) ; permissions réelles `dg-connector` en W2. Aucune
+> migration. Tests connector +13 (42 au total).
+
 > **LIVRAISON IMP-22 (24/09/2026)** : Connector v0 STRICTEMENT READ-ONLY (contrat §4.5) —
 > `@dg/connector` : parsers `/ip hotspot active` (sessions live, comment `;;;` = `vc-…` ou
 > échéance) et journal Mikhmon (`/system script` comment=mikhmon, `-|-`, deux formats de date

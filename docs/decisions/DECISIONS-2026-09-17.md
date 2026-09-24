@@ -128,3 +128,16 @@
   et `alerts` (côté backend, sur rapport du Connector) ; AUCUNE méthode
   d'écriture vers le routeur dans `ReadOnlyConnectorV0` (impératif contrat §4.5,
   vérifié par test de surface).
+
+## D14 — Accès routeur W2 : API classique, login, probe (IMP-23, 24/09/2026) : APPLIQUÉ
+
+- **API classique binaire** (doc 07 §37) sur `api` (TCP LAN) ou `api-ssl`
+  (TLS) ; REST exclu. Le code clair du ticket ne quitte JAMAIS le LAN
+  (architecture §38) ; purge W2 au succès (engagement IMP-18).
+- **Login** : clair en mode primaire (LAN privé, machine dédiée) ; bascule
+  challenge md5 implémentée en schéma hex simplifié (`'0'+md5hex`) — le format
+  binaire exact (octet 0x00 + digest) sera ajusté sur le routeur réel en W2
+  (P6), où `probePermissions()` validera lecture+écriture avec `dg-connector`.
+- **Probe** : user jetable `dgprobe0` (profil Admin-free) créé puis supprimé
+  dans la même sonde ; aucun résidu si la sonde aboutit ; en cas de trap
+  d'écriture, le rapport `write:false` documente la permission manquante.

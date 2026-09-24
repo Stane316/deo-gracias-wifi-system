@@ -8,7 +8,7 @@
  *
  * Injection d'échecs (`failNext`) pour tester le retry/backoff côté backend.
  */
-import { OFFERS } from '@dg/shared';
+import { OFFERS } from '../../../packages/shared/src/index.js';
 import { extractVoucherComment, type HotspotUserRecord } from './hotspot-parser.js';
 
 /** Profils connus du routeur : Grille A + legacy (contrat Mikmon §5). */
