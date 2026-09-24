@@ -49,6 +49,30 @@ export const createOrderBodySchema = z
 export type CreateOrderBody = z.input<typeof createOrderBodySchema>;
 export type CreateOrderInput = z.output<typeof createOrderBodySchema>;
 
+/** IMP-21 — claim d'une opération de la file (contrat Connector, blueprint §5). */
+export const connectorClaimBodySchema = z.object({
+  worker_id: z.string().trim().min(1).max(120),
+}).strict();
+
+/** IMP-21 — résultat d'une opération réclamée : succès (result optionnel) OU
+ * échec (error obligatoire). La politique retry/backoff est côté serveur (D12). */
+export const connectorResultBodySchema = z
+  .object({
+    success: z.boolean(),
+    result: z.record(z.unknown()).optional(),
+    error: z
+      .object({ code: z.string().trim().min(1).max(80), message: z.string().trim().min(1).max(500) })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .refine((b) => b.success === true || b.error != null, {
+    message: 'en échec, le champ error (code + message) est obligatoire',
+  })
+  .refine((b) => b.success !== true || b.error == null, {
+    message: 'en succès, le champ error doit être absent',
+  });
+
 /** Idempotency-Key (doc 06 §21, blueprint §5) : obligatoire sur POST /orders. */
 export const idempotencyKeySchema = z.string().trim().min(8).max(200);
 

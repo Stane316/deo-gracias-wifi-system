@@ -136,6 +136,31 @@ export interface BackendRepo {
    * auditée par la garde 0009. Retourne les ids expirés. */
   expireOverdueTickets(now: Date): Promise<string[]>;
 
+  /** IMP-21 — réclamation atomique (SKIP LOCKED) de la prochaine opération
+   * traitable : PENDING, ou RETRY dont l'échéance `next_retry_at` est passée.
+   * Passe l'opération en PROCESSING, verrouille (`locked_by`) et incrémente
+   * `attempts`. Retourne null si la file est vide. */
+  claimSyncOp(workerId: string, now: Date): Promise<SyncOpRecord | null>;
+  /** IMP-21 — lecture d'une opération de la file. */
+  getSyncOpById(id: string): Promise<SyncOpRecord | null>;
+  /** IMP-21 — résolution d'une opération PROCESSING : succès => SUCCESS ;
+   * échec => RETRY (avec `nextRetryAt`) ou BLOCKED (`nextRetryAt` null).
+   * Politique (max tentatives / backoff) décidée par l'appelant (D12). */
+  resolveSyncOp(
+    id: string,
+    outcome:
+      | { kind: 'success'; result?: Record<string, unknown> }
+      | { kind: 'failure'; error: { code: string; message: string }; nextRetryAt: Date | null },
+    now: Date,
+  ): Promise<SyncResolveOutcome>;
+  /** IMP-21 — opérations PROCESSING bloquées (verrou perdu, Connector mort) =>
+   * FAILED -> RETRY réessayable immédiatement (transition PROCESSING->PENDING
+   * n'existe pas en 0009 ; `attempts` n'est PAS incrémenté). */
+  requeueStuckSyncOps(stuckSince: Date, now: Date): Promise<string[]>;
+  /** IMP-21 — purge le code clair (`password`) du payload après succès de la
+   * synchro (INC-04 ; engagement IMP-18 : le clair ne survit pas au succès). */
+  purgeSyncPayloadSecret(id: string): Promise<void>;
+
   /** IMP-18 — génération d'un lot de tickets digitaux (contrat Mikmon §3) :
    * batch + tickets hashés + ordres `create_ticket` en file `mikrotik_sync`,
    * le tout en UNE transaction. Retourne les codes clairs UNE seule fois. */
@@ -172,6 +197,29 @@ interface PaymentRow {
   confirmed_at: Date | null;
   created_at: Date;
   updated_at: Date;
+}
+
+export type SyncOperation = 'read_status' | 'create_ticket' | 'disable_ticket' | 'refresh_inventory';
+export type SyncState = 'PENDING' | 'PROCESSING' | 'SUCCESS' | 'FAILED' | 'RETRY' | 'BLOCKED' | 'MANUAL_REVIEW';
+
+/** IMP-21 — opération de la file `mikrotik_sync` (doc 06 §33-34). */
+export interface SyncOpRecord {
+  id: string;
+  operation: SyncOperation;
+  payload: Record<string, unknown>;
+  state: SyncState;
+  attempts: number;
+  nextRetryAt: Date | null;
+  lockedBy: string | null;
+  result: Record<string, unknown> | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Résultat de `resolveSyncOp` : état final après résolution (ou `illegal`). */
+export interface SyncResolveOutcome {
+  state: 'SUCCESS' | 'RETRY' | 'BLOCKED' | 'illegal';
+  attempts: number;
 }
 
 export interface PaymentRecord {
@@ -239,6 +287,21 @@ function mapPlan(row: PlanRow): ActivePlan {
     mikrotikProfile: row.mikrotik_profile,
     limitUptime: row.limit_uptime,
     version: row.version,
+  };
+}
+
+function mapSyncOp(row: Record<string, unknown>): SyncOpRecord {
+  return {
+    id: String(row.id),
+    operation: row.operation as SyncOperation,
+    payload: (row.payload ?? {}) as Record<string, unknown>,
+    state: row.state as SyncState,
+    attempts: Number(row.attempts),
+    nextRetryAt: row.next_retry_at == null ? null : new Date(row.next_retry_at as string),
+    lockedBy: row.locked_by == null ? null : String(row.locked_by),
+    result: row.result == null ? null : (row.result as Record<string, unknown>),
+    createdAt: new Date(row.created_at as string),
+    updatedAt: new Date(row.updated_at as string),
   };
 }
 
@@ -656,6 +719,110 @@ export class PgRepo implements BackendRepo {
        WHERE id = $1 AND (auth_user_id IS NULL OR auth_user_id = $2)`,
       [customerId, authUserId],
     );
+  }
+
+  // IMP-21 — file mikrotik_sync : claim / résolution / requeue (contrat Connector).
+  async claimSyncOp(workerId: string, now: Date): Promise<SyncOpRecord | null> {
+    const res = await this.pool.query(
+      `UPDATE public.mikrotik_sync
+       SET state = 'PROCESSING', locked_by = $1, attempts = attempts + 1
+       WHERE id = (
+         SELECT id FROM public.mikrotik_sync
+         WHERE state = 'PENDING' OR (state = 'RETRY' AND next_retry_at <= $2)
+         ORDER BY created_at ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT 1
+       )
+       RETURNING *`,
+      [workerId, now],
+    );
+    const row = res.rows[0];
+    return row ? mapSyncOp(row) : null;
+  }
+
+  async getSyncOpById(id: string): Promise<SyncOpRecord | null> {
+    const res = await this.pool.query(`SELECT * FROM public.mikrotik_sync WHERE id = $1`, [id]);
+    const row = res.rows[0];
+    return row ? mapSyncOp(row) : null;
+  }
+
+  async resolveSyncOp(
+    id: string,
+    outcome:
+      | { kind: 'success'; result?: Record<string, unknown> }
+      | { kind: 'failure'; error: { code: string; message: string }; nextRetryAt: Date | null },
+    _now: Date,
+  ): Promise<SyncResolveOutcome> {
+    if (outcome.kind === 'success') {
+      const res = await this.pool.query(
+        `UPDATE public.mikrotik_sync
+         SET state = 'SUCCESS', result = $2::jsonb, locked_by = NULL
+         WHERE id = $1 AND state = 'PROCESSING'
+         RETURNING state, attempts`,
+        [id, JSON.stringify(outcome.result ?? {})],
+      );
+      const row = res.rows[0];
+      return row ? { state: 'SUCCESS', attempts: Number(row['attempts']) } : { state: 'illegal', attempts: 0 };
+    }
+    return this.withTx(async (q) => {
+      const failed = await q(
+        `UPDATE public.mikrotik_sync
+         SET state = 'FAILED', result = jsonb_build_object('error', $2::jsonb), locked_by = NULL
+         WHERE id = $1 AND state = 'PROCESSING'
+         RETURNING attempts`,
+        [id, JSON.stringify(outcome.error)],
+      );
+      const frow = failed.rows[0];
+      if (!frow) return { state: 'illegal' as const, attempts: 0 };
+      const moved = await q(
+        `UPDATE public.mikrotik_sync
+         SET state = CASE WHEN $2::timestamptz IS NULL THEN 'BLOCKED' ELSE 'RETRY' END,
+             next_retry_at = $2
+         WHERE id = $1 AND state = 'FAILED'
+         RETURNING state, attempts`,
+        [id, outcome.nextRetryAt],
+      );
+      const mrow = moved.rows[0];
+      if (!mrow) return { state: 'illegal' as const, attempts: Number(frow['attempts']) };
+      return { state: mrow['state'] as 'RETRY' | 'BLOCKED', attempts: Number(mrow['attempts']) };
+    });
+  }
+
+  async purgeSyncPayloadSecret(id: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE public.mikrotik_sync SET payload = payload - 'password' WHERE id = $1`,
+      [id],
+    );
+  }
+
+  async requeueStuckSyncOps(stuckSince: Date, now: Date): Promise<string[]> {
+    const stuck = await this.pool.query(
+      `SELECT id FROM public.mikrotik_sync
+       WHERE state = 'PROCESSING' AND updated_at <= $1
+       ORDER BY created_at ASC
+       FOR UPDATE SKIP LOCKED`,
+      [stuckSince],
+    );
+    const ids: string[] = [];
+    for (const row of stuck.rows) {
+      const opId = String(row['id']);
+      await this.withTx(async (q) => {
+        await q(
+          `UPDATE public.mikrotik_sync
+           SET state = 'FAILED',
+               result = jsonb_build_object('error', jsonb_build_object('code', 'stuck_lock', 'message', 'verrou perdu, requeue automatique'))
+           WHERE id = $1 AND state = 'PROCESSING'`,
+          [opId],
+        );
+        await q(
+          `UPDATE public.mikrotik_sync SET state = 'RETRY', next_retry_at = $2
+           WHERE id = $1 AND state = 'FAILED'`,
+          [opId, now],
+        );
+      });
+      ids.push(opId);
+    }
+    return ids;
   }
 
   async createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch> {

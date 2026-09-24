@@ -15,6 +15,12 @@
  * Décision signalée D11 : TTL commandes 30 min, RESERVED 15 min ; ordonnanceur
  * setInterval zéro dépendance (le blueprint citait @fastify/cron à titre
  * indicatif — mêmes sémantiques, surface d'approvisionnement réduite).
+ *
+ * IMP-21 — quatrième job : `sync-requeue` (60 s), volet défensif du
+ * sync-dispatcher : les opérations PROCESSING au verrou perdu (Connector
+ * arrêté, crash) repassent en RETRY immédiatement (FAILED->RETRY, transitions
+ * 0009 ; attempts non incrémenté). Le retry/backoff applicatif (claim/result)
+ * vit dans les routes Connector (D12).
  */
 import type { PaymentProvider } from './fedapay.js';
 import type { BackendRepo } from './repo.js';
@@ -26,7 +32,11 @@ export const DEFAULT_INTERVALS = {
   orderExpiryMs: 60_000,   // cron 1 min (blueprint §6)
   sweepMs: 300_000,        // cron 5 min
   reconcileMs: 3_600_000,  // cron 1 h (simulation Phase 1)
+  syncRequeueMs: 60_000,   // IMP-21 : verrous perdus de la file mikrotik_sync
 } as const;
+
+/** IMP-21 — au-delà, un PROCESSING est considéré verrou perdu (D12). */
+export const DEFAULT_SYNC_STUCK_MS = 10 * 60_000;
 
 export interface ExpiryReport {
   ordersExpired: string[];
@@ -112,8 +122,18 @@ export async function runReconciliationSim(repo: BackendRepo): Promise<Reconcili
   return { runId, status, violations };
 }
 
+/** IMP-21 — requeue des opérations PROCESSING au verrou perdu (FAILED->RETRY). */
+export async function runSyncRequeue(
+  repo: BackendRepo,
+  now: Date,
+  stuckMs: number = DEFAULT_SYNC_STUCK_MS,
+): Promise<string[]> {
+  return repo.requeueStuckSyncOps(new Date(now.getTime() - stuckMs), now);
+}
+
 export interface WorkersTickReport extends ExpiryReport {
   swept: number;
+  requeued: number;
   reconciliation: ReconciliationReport | null;
 }
 
@@ -140,27 +160,33 @@ export function startWorkers(repo: BackendRepo, opts: StartWorkersOptions = {}):
   const tickAll = async (when: Date = now()): Promise<WorkersTickReport> => {
     const expiry = await runOrderExpiry(repo, when);
     const swept = await runWebhookSweeper(repo, opts.provider, when);
+    const requeuedOps = await runSyncRequeue(repo, when);
     const reconciliation = await runReconciliationSim(repo);
-    return { ...expiry, swept, reconciliation };
+    return { ...expiry, swept, requeued: requeuedOps.length, reconciliation };
   };
 
   const timers: Array<ReturnType<typeof setInterval>> = [
     setInterval(() => {
       runOrderExpiry(repo, now())
-        .then((r) => opts.onTick?.({ ...r, swept: 0, reconciliation: null }))
+        .then((r) => opts.onTick?.({ ...r, swept: 0, requeued: 0, reconciliation: null }))
         .catch((err: unknown) => report(err, 'order-expiry'));
     }, intervals.orderExpiryMs),
     setInterval(() => {
       runWebhookSweeper(repo, opts.provider, now())
-        .then((swept) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept, reconciliation: null }))
+        .then((swept) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept, requeued: 0, reconciliation: null }))
         .catch((err: unknown) => report(err, 'webhook-sweeper'));
     }, intervals.sweepMs),
     setInterval(() => {
       runReconciliationSim(repo)
         .then((reconciliation) =>
-          opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, reconciliation }))
+          opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, requeued: 0, reconciliation }))
         .catch((err: unknown) => report(err, 'reconciler'));
     }, intervals.reconcileMs),
+    setInterval(() => {
+      runSyncRequeue(repo, now())
+        .then((ids) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, requeued: ids.length, reconciliation: null }))
+        .catch((err: unknown) => report(err, 'sync-requeue'));
+    }, intervals.syncRequeueMs),
   ];
   for (const t of timers) t.unref?.();
 

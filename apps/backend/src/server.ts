@@ -28,6 +28,8 @@ const devMode = ['1', 'true'].includes((process.env['AUTH_DEV_MODE'] ?? '').toLo
 // IMP-14 — FedaPay : clés depuis l'environnement uniquement (jamais au repo).
 const fedapaySecretKey = process.env['FEDAPAY_SECRET_KEY'];
 const fedapayWebhookSecret = process.env['FEDAPAY_WEBHOOK_SECRET'];
+// IMP-21 — auth Connector : token long-lived dédié (blueprint §7).
+const connectorToken = process.env['CONNECTOR_TOKEN'];
 const fedapayEnvironment = process.env['FEDAPAY_ENVIRONMENT'] === 'live' ? 'live' : 'sandbox';
 const provider = fedapaySecretKey
   ? new FedaPayClient({ secretKey: fedapaySecretKey, environment: fedapayEnvironment })
@@ -41,6 +43,8 @@ const app = await buildApp({
     ...(provider ? { provider } : {}),
     ...(fedapayWebhookSecret ? { webhookSecret: fedapayWebhookSecret } : {}),
   },
+  // IMP-21 — contrat Connector : absent => routes /connector 503 (honnête).
+  ...(connectorToken && connectorToken.length > 0 ? { connector: { token: connectorToken } } : {}),
   // IMP-20 — workers in-process : order-expiry (1 min), webhook-sweeper (5 min),
   // reconciler simulé (1 h). Périodes par défaut ; désactivables via WORKERS=off.
   ...((process.env['WORKERS'] ?? '').toLowerCase() === 'off' ? {} : { workers: { enabled: true } }),

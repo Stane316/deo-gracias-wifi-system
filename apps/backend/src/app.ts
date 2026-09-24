@@ -5,8 +5,9 @@
  * Erreurs au format RFC 7807 (application/problem+json).
  * Les routes paiements/tickets/admin/connector arrivent en IMP-13→21.
  */
+import { createHash, timingSafeEqual } from 'node:crypto';
 import rateLimit from '@fastify/rate-limit';
-import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { canOrderTransition, type OrderState } from '@dg/shared';
 import {
   FEDAPAY_SIGNATURE_HEADER,
@@ -25,6 +26,8 @@ import {
 import {
   authPhoneRequestSchema,
   authPhoneVerifySchema,
+  connectorClaimBodySchema,
+  connectorResultBodySchema,
   createBatchBodySchema,
   createOrderBodySchema,
   idempotencyKeySchema,
@@ -34,7 +37,7 @@ import {
   problem,
   type OrderView,
 } from './schemas.js';
-import { buildPlanSnapshot, type BackendRepo, type OrderRecord } from './repo.js';
+import { buildPlanSnapshot, type BackendRepo, type OrderRecord, type SyncOpRecord } from './repo.js';
 import { allocateAndDeliver } from './tickets.js';
 import { buildDashboardPayload, startOfBusinessDay } from './admin.js';
 import { startWorkers, type StartWorkersOptions } from './workers.js';
@@ -64,12 +67,40 @@ export interface BuildAppOptions {
     /** Horloge injectable (tests). */
     nowS?: () => number;
   };
+  /** IMP-21 — contrat Connector (blueprint §5) : token long-lived dédié ;
+   * absent => routes /connector 503 (non configuré). D12 : 3 tentatives,
+   * backoff 1 min / 5 min / 15 min, puis BLOCKED + alerte WARNING. */
+  connector?: {
+    token?: string;
+    maxAttempts?: number;
+    backoffMs?: number[];
+  };
   /** IMP-20 — workers in-process (order-expiry 1 min, webhook-sweeper 5 min,
    * reconciler simulé 1 h ; blueprint §6, D11). Désactivables via WORKERS=off. */
   workers?: {
     enabled?: boolean;
     /** Périodes injectables (tests) ; défauts = DEFAULT_INTERVALS. */
     intervals?: StartWorkersOptions['intervals'];
+  };
+}
+
+/** IMP-21 — politique retry/backoff du Connector (D12, doc 06 §36) :
+ * 3 tentatives au total ; backoff exponentiel 1 min / 5 min / 15 min ;
+ * au-delà => BLOCKED + alerte WARNING `sync_blocked`. */
+export const SYNC_MAX_ATTEMPTS = 3;
+export const SYNC_BACKOFF_MS: number[] = [60_000, 300_000, 900_000];
+
+/** Vue d'une opération de la file pour le Connector. Le payload `create_ticket`
+ * contient le code clair : c'est par construction le rôle de cette file
+ * (IMP-18), jusqu'à la synchro routeur (purge W2). */
+export function toSyncOpView(op: SyncOpRecord): Record<string, unknown> {
+  return {
+    id: op.id,
+    operation: op.operation,
+    payload: op.payload,
+    state: op.state,
+    attempts: op.attempts,
+    created_at: op.createdAt.toISOString(),
   };
 }
 
@@ -788,6 +819,93 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     });
   });
 
+  // IMP-21 — routes Connector (blueprint §5) : claim / result sur la file
+  // mikrotik_sync, auth par token long-lived dédié (CONNECTOR_TOKEN, blueprint §7).
+  const connectorToken = opts.connector?.token;
+  const connectorMaxAttempts = opts.connector?.maxAttempts ?? SYNC_MAX_ATTEMPTS;
+  const connectorBackoff = opts.connector?.backoffMs ?? SYNC_BACKOFF_MS;
+
+  const connectorAuthOk = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
+    if (!connectorToken) {
+      await reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Connector non configuré', 'CONNECTOR_TOKEN absent (blueprint §7).'));
+      return false;
+    }
+    const token = bearerToken(req);
+    const provided = token ? createHash('sha256').update(token).digest() : null;
+    const expected = createHash('sha256').update(connectorToken).digest();
+    if (!provided || !timingSafeEqual(provided, expected)) {
+      await repo.logAudit({ actor: 'connector', action: 'connector_auth_denied', entity: 'auth' });
+      await reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', 'Token Connector invalide.'));
+      return false;
+    }
+    return true;
+  };
+
+  app.post('/connector/sync/claim', async (req, reply) => {
+    if (!(await connectorAuthOk(req, reply))) return;
+    const parsed = connectorClaimBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Body invalide', parsed.error.issues.map((i) => i.message).join(' ; ')));
+    }
+    const op = await repo.claimSyncOp(parsed.data.worker_id, new Date());
+    if (!op) return reply.status(204).send();
+    return reply.status(200).send(toSyncOpView(op));
+  });
+
+  app.post('/connector/sync/:id/result', async (req, reply) => {
+    if (!(await connectorAuthOk(req, reply))) return;
+    const params = orderIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Paramètre invalide', 'id doit être un UUID.'));
+    }
+    const parsed = connectorResultBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Body invalide', parsed.error.issues.map((i) => i.message).join(' ; ')));
+    }
+    const op = await repo.getSyncOpById(params.data.id);
+    if (!op) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Opération introuvable', 'Aucune opération de synchronisation avec cet id.'));
+    }
+    if (op.state !== 'PROCESSING') {
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'État incompatible', `Opération en état ${op.state} ; seul PROCESSING est résoluble.`));
+    }
+    const now = new Date();
+    if (parsed.data.success) {
+      const outcome = await repo.resolveSyncOp(op.id, { kind: 'success', ...(parsed.data.result ? { result: parsed.data.result } : {}) }, now);
+      // INC-04 / engagement IMP-18 : le code clair ne survit pas au succès.
+      if (op.operation === 'create_ticket') await repo.purgeSyncPayloadSecret(op.id);
+      await repo.logAudit({ actor: 'connector', action: 'connector_sync_success', entity: 'mikrotik_sync', entityId: op.id });
+      return reply.status(200).send({ state: outcome.state, attempts: outcome.attempts });
+    }
+    const error = parsed.data.error as { code: string; message: string };
+    const nextRetryAt = op.attempts >= connectorMaxAttempts
+      ? null
+      : new Date(now.getTime() + (connectorBackoff[Math.min(op.attempts - 1, connectorBackoff.length - 1)] ?? SYNC_BACKOFF_MS[0] ?? 60_000));
+    const outcome = await repo.resolveSyncOp(op.id, { kind: 'failure', error, nextRetryAt }, now);
+    if (outcome.state === 'BLOCKED') {
+      await repo.raiseAlert({
+        rule: 'sync_blocked',
+        severity: 'WARNING',
+        payload: { op_id: op.id, operation: op.operation, attempts: op.attempts, error },
+      });
+      await repo.logAudit({ actor: 'connector', action: 'connector_sync_blocked', entity: 'mikrotik_sync', entityId: op.id });
+    } else {
+      await repo.logAudit({ actor: 'connector', action: 'connector_sync_failed', entity: 'mikrotik_sync', entityId: op.id });
+    }
+    return reply.status(200).send({
+      state: outcome.state,
+      attempts: outcome.attempts,
+      ...(nextRetryAt ? { next_retry_at: nextRetryAt.toISOString() } : {}),
+    });
+  });
+
   // IMP-20 — workers in-process (blueprint §6, D11) : order-expiry,
   // webhook-sweeper (si provider FedaPay configuré), reconciler simulé.
   if (opts.workers?.enabled) {
@@ -798,7 +916,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     app.addHook('onClose', async () => {
       handle.stop();
     });
-    app.log.info('IMP-20 workers démarrés : order-expiry(60s) webhook-sweeper(300s) reconciler-sim(3600s)');
+    app.log.info('IMP-20/21 workers démarrés : order-expiry(60s) webhook-sweeper(300s) reconciler-sim(3600s) sync-requeue(60s)');
   }
 
   return app;

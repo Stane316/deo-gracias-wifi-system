@@ -15,6 +15,14 @@ import { PgRepo } from './repo.js';
 import { computeSyncState, startOfBusinessDay } from './admin.js';
 import { allocateAndDeliver } from './tickets.js';
 import { runOrderExpiry, runReconciliationSim } from './workers.js';
+import {
+  DryRunConnector,
+  drainQueue,
+  seedLegacyInventory,
+  type ClaimedOp,
+  type ResultBody,
+  type SyncTransport,
+} from '@dg/connector';
 
 class FakeVerifier implements AuthVerifier {
   identities = new Map<string, AuthIdentity>();
@@ -1252,5 +1260,163 @@ describeDb('IMP-20 — workers (expiry, RESERVED, sweeper, reconciliation) sur P
     expect(rows[0]?.['router_total_seen']).toBeNull();
     expect(rows[0]?.['diff']).toMatchObject({ mode: 'simulation_phase1' });
     await pool20.query('DELETE FROM public.reconciliation_runs WHERE id = $1', [report.runId]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMP-21 — Contrat Connector (blueprint §5, D12) : claim atomique SKIP LOCKED,
+// retry/backoff (RETRY -> BLOCKED), requeue des verrous perdus, purge du code
+// clair après succès (INC-04), et E2E dry-run : un lot digital IMP-18 consommé
+// de bout en bout par le DryRunConnector via les vraies routes HTTP (inject).
+// ---------------------------------------------------------------------------
+describeDb('IMP-21 — contrat Connector sur Postgres réel', () => {
+  const pool21 = new Pool({ connectionString: DATABASE_URL });
+  const repo21 = new PgRepo(pool21);
+  const TOKEN21 = 'itest-imp21-pg-token';
+  let blockStart: Date = new Date();
+
+  const cleanup21 = async (): Promise<void> => {
+    await pool21.query(`DELETE FROM public.mikrotik_sync WHERE created_at >= $1`, [blockStart]);
+    await pool21.query(
+      `DELETE FROM public.tickets WHERE batch_id IN (
+         SELECT id FROM public.ticket_batches WHERE source = 'backend' AND created_at >= $1)`,
+      [blockStart],
+    );
+    await pool21.query(`DELETE FROM public.ticket_batches WHERE source = 'backend' AND created_at >= $1`, [blockStart]);
+  };
+
+  beforeAll(async () => {
+    const res = await pool21.query(`SELECT now() AS t`);
+    blockStart = new Date(res.rows[0]?.['t'] as string);
+    await cleanup21();
+  });
+  afterAll(async () => { await cleanup21(); await pool21.end(); });
+
+  it('claim atomique : deux claims concurrents (SKIP LOCKED) obtiennent deux opérations distinctes', async () => {
+    await pool21.query(`INSERT INTO public.mikrotik_sync (operation, payload) VALUES ('read_status', '{}'), ('read_status', '{}')`);
+    const now = new Date();
+    const [a, b] = await Promise.all([repo21.claimSyncOp('w1', now), repo21.claimSyncOp('w2', now)]);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(a?.id).not.toBe(b?.id);
+    expect([a?.lockedBy, b?.lockedBy].sort()).toEqual(['w1', 'w2']);
+    expect(a?.attempts).toBe(1);
+  });
+
+  it('RETRY futur non réclamable ; RETRY échu réclamable avec attempts incrémenté', async () => {
+    const ins = await pool21.query(
+      `INSERT INTO public.mikrotik_sync (operation, payload, state, attempts, next_retry_at)
+       VALUES ('read_status', '{}', 'RETRY', 1, now() + interval '1 hour') RETURNING id`,
+    );
+    const opId = String(ins.rows[0]?.['id']);
+    expect(await repo21.claimSyncOp('w1', new Date())).toBeNull(); // seul op : futur => rien
+    await pool21.query(`UPDATE public.mikrotik_sync SET next_retry_at = now() - interval '1 minute' WHERE id = $1`, [opId]);
+    const claimed = await repo21.claimSyncOp('w1', new Date());
+    expect(claimed?.id).toBe(opId);
+    expect(claimed?.attempts).toBe(2);
+  });
+
+  it('résolution : échec => RETRY avec échéance ; échec suivant sans échéance => BLOCKED', async () => {
+    const ins = await pool21.query(`INSERT INTO public.mikrotik_sync (operation, payload) VALUES ('create_ticket', '{"name":"dg0a1b2c"}') RETURNING id`);
+    const opId = String(ins.rows[0]?.['id']);
+    const claimed = await repo21.claimSyncOp('w1', new Date());
+    expect(claimed?.id).toBe(opId);
+
+    const retry = await repo21.resolveSyncOp(opId, { kind: 'failure', error: { code: 'router_timeout', message: 'timeout' }, nextRetryAt: new Date(Date.now() + 60_000) }, new Date());
+    expect(retry).toMatchObject({ state: 'RETRY', attempts: 1 });
+    const row1 = await pool21.query(`SELECT state, next_retry_at, result FROM public.mikrotik_sync WHERE id = $1`, [opId]);
+    expect(row1.rows[0]?.['state']).toBe('RETRY');
+    expect(row1.rows[0]?.['next_retry_at']).not.toBeNull();
+    expect(row1.rows[0]?.['result']).toMatchObject({ error: { code: 'router_timeout' } });
+
+    await pool21.query(`UPDATE public.mikrotik_sync SET next_retry_at = now() - interval '1 minute' WHERE id = $1`, [opId]);
+    await repo21.claimSyncOp('w1', new Date());
+    const blocked = await repo21.resolveSyncOp(opId, { kind: 'failure', error: { code: 'router_dead', message: 'ko' }, nextRetryAt: null }, new Date());
+    expect(blocked).toMatchObject({ state: 'BLOCKED', attempts: 2 });
+    const row2 = await pool21.query(`SELECT state FROM public.mikrotik_sync WHERE id = $1`, [opId]);
+    expect(row2.rows[0]?.['state']).toBe('BLOCKED');
+  });
+
+  it('requeueStuckSyncOps : PROCESSING au verrou perdu => RETRY immédiat, attempts intact', async () => {
+    const ins = await pool21.query(`INSERT INTO public.mikrotik_sync (operation, payload) VALUES ('read_status', '{}') RETURNING id`);
+    const opId = String(ins.rows[0]?.['id']);
+    await repo21.claimSyncOp('w1', new Date());
+    // updated_at est géré par trigger (set_updated_at) : bypass superuser local
+    // pour simuler un verrou posé il y a 30 min (précédent : IMP-16).
+    await pool21.query(`ALTER TABLE public.mikrotik_sync DISABLE TRIGGER mikrotik_sync_updated_at`);
+    await pool21.query(`UPDATE public.mikrotik_sync SET updated_at = now() - interval '30 minutes' WHERE id = $1`, [opId]);
+    await pool21.query(`ALTER TABLE public.mikrotik_sync ENABLE TRIGGER mikrotik_sync_updated_at`);
+
+    const requeued = await repo21.requeueStuckSyncOps(new Date(Date.now() - 10 * 60_000), new Date());
+    expect(requeued).toEqual([opId]);
+    const row = await pool21.query(`SELECT state, attempts, next_retry_at, result FROM public.mikrotik_sync WHERE id = $1`, [opId]);
+    expect(row.rows[0]?.['state']).toBe('RETRY');
+    expect(Number(row.rows[0]?.['attempts'])).toBe(1); // NON incrémenté : l'échec n'est pas au Connector
+    expect(new Date(row.rows[0]?.['next_retry_at'] as string).getTime()).toBeLessThan(Date.now() + 1_000);
+    expect(row.rows[0]?.['result']).toMatchObject({ error: { code: 'stuck_lock' } });
+    // La fixture part en RETRY : la retirer pour ne pas polluer l'E2E suivant.
+    await pool21.query(`DELETE FROM public.mikrotik_sync WHERE id = $1`, [opId]);
+  });
+
+  it('E2E dry-run : lot digital IMP-18 consommé par le DryRunConnector via les routes réelles', async () => {
+    const batch = await repo21.createBackendBatch({ offerId: '5-HEURES', quantity: 2 });
+    expect(batch.specs).toHaveLength(2);
+
+    const app21 = await buildApp({ repo: repo21, connector: { token: TOKEN21 } });
+    try {
+      class InjectTransport implements SyncTransport {
+        async claim(workerId: string): Promise<ClaimedOp | null> {
+          const res = await app21.inject({
+            method: 'POST', url: '/connector/sync/claim',
+            headers: { authorization: `Bearer ${TOKEN21}` },
+            payload: { worker_id: workerId },
+          });
+          if (res.statusCode === 204) return null;
+          if (res.statusCode !== 200) throw new Error(`claim HTTP ${res.statusCode}`);
+          const body = res.json() as Record<string, unknown>;
+          return {
+            id: String(body['id']),
+            operation: String(body['operation']),
+            payload: (body['payload'] ?? {}) as Record<string, unknown>,
+            state: String(body['state']),
+            attempts: Number(body['attempts'] ?? 0),
+          };
+        }
+        async reportResult(opId: string, body: ResultBody): Promise<void> {
+          const res = await app21.inject({
+            method: 'POST', url: `/connector/sync/${opId}/result`,
+            headers: { authorization: `Bearer ${TOKEN21}` },
+            payload: body,
+          });
+          if (res.statusCode !== 200) throw new Error(`result HTTP ${res.statusCode}: ${res.body}`);
+        }
+      }
+
+      const router = new DryRunConnector(seedLegacyInventory());
+      const summary = await drainQueue(new InjectTransport(), router, 'dry-run-pg');
+      expect(summary).toEqual({ processed: 2, success: 2, retry: 0 });
+
+      const rows = await pool21.query(
+        `SELECT state, attempts, payload, result FROM public.mikrotik_sync
+         WHERE operation = 'create_ticket' AND (payload->>'batch_seq')::int = $1`,
+        [batch.seq],
+      );
+      expect(rows.rows).toHaveLength(2);
+      for (const row of rows.rows) {
+        expect(row['state']).toBe('SUCCESS');
+        expect(Number(row['attempts'])).toBe(1);
+        expect(row['payload']).not.toHaveProperty('password'); // purge INC-04 après succès
+        expect(row['payload']).toHaveProperty('name');
+        expect(row['result']).toMatchObject({ applied: 'create_ticket', router: 'dry-run' });
+        const appliedName = (row['result'] as Record<string, unknown>)['name'];
+        expect(router.inventory().some((u) => u.name === appliedName)).toBe(true); // bien sur le "routeur"
+      }
+      const audit = await pool21.query(
+        `SELECT count(*)::int AS n FROM public.audit_logs WHERE action = 'connector_sync_success' AND entity = 'mikrotik_sync'`,
+      );
+      expect(Number(audit.rows[0]?.['n'])).toBeGreaterThanOrEqual(2);
+    } finally {
+      await app21.close();
+    }
   });
 });

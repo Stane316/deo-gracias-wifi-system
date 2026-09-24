@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { CONNECTOR_PLACEHOLDER } from './index.js';
+import {
+  consumeOnce,
+  DryRunConnector,
+  drainQueue,
+  extractVoucherComment,
+  HttpSyncTransport,
+  parseHotspotUsers,
+  seedLegacyInventory,
+} from './index.js';
 
-describe('connector skeleton', () => {
-  it('est en attente d IMP-21', () => {
-    expect(CONNECTOR_PLACEHOLDER).toBe('imp-21');
+describe('IMP-21 — surface publique @dg/connector', () => {
+  it('exporte parser, dry-run et client de file', () => {
+    expect(typeof parseHotspotUsers).toBe('function');
+    expect(typeof extractVoucherComment).toBe('function');
+    expect(typeof DryRunConnector).toBe('function');
+    expect(typeof consumeOnce).toBe('function');
+    expect(typeof drainQueue).toBe('function');
+    expect(typeof HttpSyncTransport).toBe('function');
+    expect(seedLegacyInventory()).toHaveLength(5);
   });
 });

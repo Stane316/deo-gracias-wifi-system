@@ -14,6 +14,8 @@ import type {
   CreateOrderInputDb,
   OrderRecord,
   PaymentRecord,
+  SyncOpRecord,
+  SyncResolveOutcome,
   TicketRecord,
 } from './repo.js';
 
@@ -332,7 +334,8 @@ export class FakeRepo implements BackendRepo {
   // IMP-18 — génération de lots digitaux en mémoire.
   backendBatchSeq = FIRST_BACKEND_BATCH_SEQ;
   createdBatches: CreatedBackendBatch[] = [];
-  syncOps: Array<{ operation: string; payload: Record<string, unknown> }> = [];
+  /** IMP-21 — file mikrotik_sync en mémoire (état complet, comme en base). */
+  syncOps: SyncOpRecord[] = [];
   async createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch> {
     const plan = await this.getActivePlanByOffer(input.offerId);
     if (!plan) throw new Error(`offre sans plan actif : ${input.offerId}`);
@@ -345,14 +348,81 @@ export class FakeRepo implements BackendRepo {
     this.createdBatches.push(batch);
     for (const spec of specs) {
       this.syncOps.push({
+        id: randomUUID(),
         operation: 'create_ticket',
         payload: {
           batch_seq: seq, name: spec.routerName, password: spec.clientCode,
           profile: plan.mikrotikProfile, limit_uptime: plan.limitUptime, comment: spec.mikrotikComment,
         },
+        state: 'PENDING',
+        attempts: 0,
+        nextRetryAt: null,
+        lockedBy: null,
+        result: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
     }
     return batch;
+  }
+
+  // IMP-21 — claim / résolution / requeue de la file (miroir mémoire du PgRepo).
+  async claimSyncOp(workerId: string, now: Date): Promise<SyncOpRecord | null> {
+    const candidates = this.syncOps.filter(
+      (op) => op.state === 'PENDING' || (op.state === 'RETRY' && op.nextRetryAt != null && op.nextRetryAt.getTime() <= now.getTime()),
+    );
+    candidates.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const op = candidates[0];
+    if (!op) return null;
+    op.state = 'PROCESSING';
+    op.lockedBy = workerId;
+    op.attempts += 1;
+    op.updatedAt = new Date();
+    return op;
+  }
+  async getSyncOpById(id: string): Promise<SyncOpRecord | null> {
+    return this.syncOps.find((op) => op.id === id) ?? null;
+  }
+  async resolveSyncOp(
+    id: string,
+    outcome:
+      | { kind: 'success'; result?: Record<string, unknown> }
+      | { kind: 'failure'; error: { code: string; message: string }; nextRetryAt: Date | null },
+    _now: Date,
+  ): Promise<SyncResolveOutcome> {
+    const op = this.syncOps.find((o) => o.id === id);
+    if (!op || op.state !== 'PROCESSING') return { state: 'illegal', attempts: op?.attempts ?? 0 };
+    if (outcome.kind === 'success') {
+      op.state = 'SUCCESS';
+      op.result = outcome.result ?? {};
+      op.lockedBy = null;
+      op.updatedAt = new Date();
+      return { state: 'SUCCESS', attempts: op.attempts };
+    }
+    op.state = outcome.nextRetryAt == null ? 'BLOCKED' : 'RETRY';
+    op.result = { error: outcome.error };
+    op.nextRetryAt = outcome.nextRetryAt;
+    op.lockedBy = null;
+    op.updatedAt = new Date();
+    return { state: outcome.nextRetryAt == null ? 'BLOCKED' : 'RETRY', attempts: op.attempts };
+  }
+  async purgeSyncPayloadSecret(id: string): Promise<void> {
+    const op = this.syncOps.find((o) => o.id === id);
+    if (op) delete op.payload['password'];
+  }
+  async requeueStuckSyncOps(stuckSince: Date, now: Date): Promise<string[]> {
+    const ids: string[] = [];
+    for (const op of this.syncOps) {
+      if (op.state === 'PROCESSING' && op.updatedAt.getTime() <= stuckSince.getTime()) {
+        op.state = 'RETRY';
+        op.result = { error: { code: 'stuck_lock', message: 'verrou perdu, requeue automatique' } };
+        op.nextRetryAt = now;
+        op.lockedBy = null;
+        op.updatedAt = new Date();
+        ids.push(op.id);
+      }
+    }
+    return ids;
   }
 
   // IMP-17 — stats admin pilotables par les tests unitaires (doc 09 §12-13).
