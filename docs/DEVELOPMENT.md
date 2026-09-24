@@ -156,7 +156,7 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 172/172 avec base (backend 125 dont 29 d'intégration, shared 45,
+- Attendu : 188/188 avec base (backend 141 dont 34 d'intégration, shared 45,
   connector 1, frontend 1). Sans base : les intégrations pg skippent proprement.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
@@ -211,6 +211,36 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   IMP-38 (décision D10).
 - `/tickets/mine` : n'expose que les vouchers utilisables (SOLD/USED) +
   `activation_deadline` pour transparence.
+
+## Workers in-process : order-expiry, webhook-sweeper, reconciler simulé (IMP-20)
+
+- Trois jobs `setInterval` (ordonnanceur zéro dépendance — le blueprint citait
+  `@fastify/cron` à titre indicatif ; mêmes sémantiques, surface réduite),
+  démarrés par `buildApp({ workers: { enabled: true } })` depuis `server.ts`,
+  arrêtés par le hook Fastify `onClose`. Désactivables : `WORKERS=off`.
+- **order-expiry (1 min)** : commandes `PAYMENT_PENDING` au-delà de 30 min =>
+  `EXPIRED`, avec leurs paiements `PENDING` => `EXPIRED` (transitions 0009,
+  audit automatique) ; tickets `RESERVED` bloqués au-delà de 15 min =>
+  `RELEASED` puis `AVAILABLE` (libère le stock). Les paiements `INITIATED`
+  orphelins ne sont PAS expirés (transition interdite 0009) : ils seront
+  refusés naturellement par `confirmPayment` (commande déjà EXPIRED).
+  Le même tick appelle `expireOverdueTickets` (IMP-19) : tickets SOLD à
+  échéance dépassée => EXPIRED (contrat Mikmon §3.6).
+- **webhook-sweeper (5 min, doc 06 §22)** : pour tout paiement ouvert
+  (`INITIATED`/`PENDING` avec `provider_ref`, âge >= 5 min), interroge
+  `GET /v1/transactions/{ref}` FedaPay ; `approved` => `confirmPayment`,
+  `declined` => `failPayment(FAILED)`, `canceled` => `failPayment(CANCELLED)` ;
+  `pending`/`unknown`/erreur réseau => on attend le passage suivant.
+  Sans clés FedaPay configurées : honnêtement inactif (retourne 0).
+- **reconciler (1 h, simulation Phase 1)** : cohérence interne plateforme
+  (tickets SOLD sans commande, commandes DELIVERED sans ticket) => insère un
+  run dans `reconciliation_runs` (`router_total_seen` NULL : le volet routeur
+  réel arrive en IMP-24) ; en cas de MISMATCH, alerte `reconciliation_mismatch`
+  CRITICAL (garde-fou INC-03).
+- Décision D11 : TTL commandes 30 min, RESERVED 15 min, sweep min-age 5 min.
+- Tests : `workers.test.ts` (10 unitaires, FakeRepo + fake provider) + bloc
+  IMP-20 de `repo.pg.test.ts` (4 intégrations réelles : expiry, libération
+  RESERVED, candidats sweeper, run reconciliation sur base réelle).
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

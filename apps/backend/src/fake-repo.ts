@@ -259,6 +259,65 @@ export class FakeRepo implements BackendRepo {
     this.linked.push([customerId, authUserId]);
   }
 
+  // IMP-20 — workers.
+  async expireStaleOrders(olderThan: Date): Promise<{ orderIds: string[]; paymentsExpired: number }> {
+    const orderIds: string[] = [];
+    for (const o of this.orders.values()) {
+      if (o.state === 'PAYMENT_PENDING' && o.createdAt.getTime() <= olderThan.getTime()) {
+        o.state = 'EXPIRED';
+        orderIds.push(o.id);
+      }
+    }
+    let paymentsExpired = 0;
+    for (const p of this.payments.values()) {
+      if (p.state === 'PENDING' && orderIds.includes(p.orderId)) {
+        p.state = 'EXPIRED';
+        paymentsExpired += 1;
+      }
+    }
+    return { orderIds, paymentsExpired };
+  }
+  async releaseStaleReservedTickets(olderThan: Date): Promise<string[]> {
+    const ids: string[] = [];
+    for (const [id, at] of this.reservedAt) {
+      const t = this.tickets.get(id);
+      if (t && t.dbState === 'RESERVED' && at.getTime() <= olderThan.getTime()) {
+        t.dbState = 'AVAILABLE';
+        ids.push(id);
+        this.reservedAt.delete(id);
+      }
+    }
+    return ids;
+  }
+  reservedAt = new Map<string, Date>();
+  async getOpenPaymentsWithRefOlderThan(olderThan: Date): Promise<PaymentRecord[]> {
+    return [...this.payments.values()].filter(
+      (p) => (p.state === 'INITIATED' || p.state === 'PENDING') && p.providerRef != null && p.createdAt.getTime() <= olderThan.getTime(),
+    );
+  }
+  reconciliationRuns: Array<Record<string, unknown>> = [];
+  alertsRaised: Array<{ rule: string; severity: string; payload: Record<string, unknown> }> = [];
+  violationFixtures = { soldWithoutOrder: 0, deliveredWithoutTicket: 0 };
+  async getReconciliationSnapshot(): Promise<{ soldWithoutOrder: number; deliveredWithoutTicket: number; totalTickets: number; byState: Record<string, number> }> {
+    const byState: Record<string, number> = {};
+    for (const t of this.tickets.values()) byState[t.dbState] = (byState[t.dbState] ?? 0) + 1;
+    return {
+      soldWithoutOrder: this.violationFixtures.soldWithoutOrder,
+      deliveredWithoutTicket: this.violationFixtures.deliveredWithoutTicket,
+      totalTickets: this.tickets.size,
+      byState,
+    };
+  }
+  async insertReconciliationRun(run: { routerTotalExpected: number; routerTotalSeen: number | null; diff: Record<string, unknown>; status: 'OK' | 'MISMATCH' }): Promise<string> {
+    const id = randomUUID();
+    this.reconciliationRuns.push({ id, ...run });
+    return id;
+  }
+  async raiseAlert(alert: { rule: string; severity: 'INFO' | 'WARNING' | 'CRITICAL'; payload: Record<string, unknown> }): Promise<string> {
+    this.alertsRaised.push(alert);
+    return randomUUID();
+  }
+
   async expireOverdueTickets(now: Date): Promise<string[]> {
     const out: string[] = [];
     for (const t of this.tickets.values()) {

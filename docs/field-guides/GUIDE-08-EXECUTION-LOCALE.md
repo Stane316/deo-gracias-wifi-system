@@ -114,7 +114,12 @@ npm run dev -w @dg/backend        # mode watch (recharge à chaque sauvegarde)
 npm run start -w @dg/backend
 ```
 
-Attendu dans la console : log pino `Server listening at http://127.0.0.1:3000`.
+Attendu dans la console : log pino `Server listening at http://127.0.0.1:3000`
++ (IMP-20) `IMP-20 workers démarrés : order-expiry(60s) webhook-sweeper(300s)
+reconciler-sim(3600s)` — trois jobs d'entretien in-process (expiration des
+commandes impayées > 30 min, libération des réservations bloquées > 15 min,
+rattrapage FedaPay, cohérence interne). Pour les couper en local :
+`WORKERS=off npm run dev -w @dg/backend`.
 Arrêt : `Ctrl+C`.
 
 Tester (nouveau terminal, ou navigateur pour les GET) :
@@ -171,11 +176,11 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **172/172** avec DATABASE_URL
-(backend 125 dont 29 d'intégration réelle — y compris concurrence d'allocation
+Attendu actuellement : typecheck 4/4 ; tests **188/188** avec DATABASE_URL
+(backend 141 dont 34 d'intégration réelle — y compris concurrence d'allocation
 de tickets, vérification du stock seedé 0010, statistiques admin, génération de
-lots digitaux et échéance d'activation sur base réelle, shared 45, frontend 1,
-connector 1), 143 + 29 skippés sans.
+lots digitaux, échéance d'activation et workers IMP-20 sur base réelle,
+shared 45, frontend 1, connector 1), 154 + 34 skippés sans.
 C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo

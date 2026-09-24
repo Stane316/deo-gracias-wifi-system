@@ -37,6 +37,7 @@ import {
 import { buildPlanSnapshot, type BackendRepo, type OrderRecord } from './repo.js';
 import { allocateAndDeliver } from './tickets.js';
 import { buildDashboardPayload, startOfBusinessDay } from './admin.js';
+import { startWorkers, type StartWorkersOptions } from './workers.js';
 
 export interface BuildAppOptions {
   repo: BackendRepo;
@@ -62,6 +63,13 @@ export interface BuildAppOptions {
     toleranceS?: number;
     /** Horloge injectable (tests). */
     nowS?: () => number;
+  };
+  /** IMP-20 — workers in-process (order-expiry 1 min, webhook-sweeper 5 min,
+   * reconciler simulé 1 h ; blueprint §6, D11). Désactivables via WORKERS=off. */
+  workers?: {
+    enabled?: boolean;
+    /** Périodes injectables (tests) ; défauts = DEFAULT_INTERVALS. */
+    intervals?: StartWorkersOptions['intervals'];
   };
 }
 
@@ -779,6 +787,19 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       export_warning: 'Codes en clair : affichage UNIQUE. Archiver immédiatement au coffre (PDF/chiffré) ; la base ne conserve que les empreintes sha256.',
     });
   });
+
+  // IMP-20 — workers in-process (blueprint §6, D11) : order-expiry,
+  // webhook-sweeper (si provider FedaPay configuré), reconciler simulé.
+  if (opts.workers?.enabled) {
+    const handle = startWorkers(opts.repo, {
+      ...(opts.payment?.provider ? { provider: opts.payment.provider } : {}),
+      ...(opts.workers.intervals ? { intervals: opts.workers.intervals } : {}),
+    });
+    app.addHook('onClose', async () => {
+      handle.stop();
+    });
+    app.log.info('IMP-20 workers démarrés : order-expiry(60s) webhook-sweeper(300s) reconciler-sim(3600s)');
+  }
 
   return app;
 }

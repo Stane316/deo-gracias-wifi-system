@@ -75,3 +75,20 @@
 - **Ticket vierge** : AUCUNE échéance pré-vente — le contrat ne fixe pas de fenêtre numérique
   avant 1er login et le stock Mikmon du 17/09 est un inventaire réel en circulation ; toute
   fenêtre courte le gelerait. Fermeture de la fenêtre de vente = bascule IMP-38.
+
+## D11 — Paramètres des workers (IMP-20, 24/09/2026) : APPLIQUÉ
+
+- **TTL commande** : 30 minutes en `PAYMENT_PENDING` => `EXPIRED` (paiements
+  `PENDING` associés expirés dans le même tick). Au-delà, le paiement FedaPay
+  éventuel est refusé naturellement (`confirmPayment` exige `PAYMENT_PENDING`).
+- **TTL réservation** : 15 minutes en `RESERVED` sans vente => `RELEASED` puis
+  `AVAILABLE` (le stock redevient vendable ; défensif, la réservation n'étant
+  pas encore exposée côté client en phase 1).
+- **Webhook-sweeper** : min-age 5 min (un paiement ouvert de moins de 5 min
+  attend son webhook normal ; au-delà, interrogation FedaPay par `provider_ref`).
+- **Ordonnanceur** : `setInterval` in-process (zéro dépendance). Le blueprint
+  citait `@fastify/cron` à titre indicatif — mêmes sémantiques pour 3 crons
+  fixes, surface d'approvisionnement et de sécurité réduite (budget nul).
+- **Reconciler** : simulation Phase 1 (cohérence interne plateforme, runs dans
+  `reconciliation_runs`, alerte CRITICAL en cas de MISMATCH — garde-fou INC-03) ;
+  le volet routeur réel est reporté à IMP-24 (pas de Connector avant W2).

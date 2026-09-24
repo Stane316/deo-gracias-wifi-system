@@ -245,6 +245,22 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > mise à jour (36 arêtes), smoke étendu, bloc intégration IMP-19 (3 tests) — le stock seedé
 > y est protégé par parking.
 
+> **LIVRAISON IMP-20 (24/09/2026)** : workers in-process (blueprint §6, décision D11) —
+> `apps/backend/src/workers.ts` : **order-expiry** (60 s) expire les commandes
+> `PAYMENT_PENDING` > 30 min (+ paiements `PENDING`, transitions 0009 auditées), libère les
+> tickets `RESERVED` bloqués > 15 min (`RELEASED` puis `AVAILABLE`) et appelle
+> `expireOverdueTickets` (IMP-19, double garde-fou §3.6) ; **webhook-sweeper** (300 s)
+> rattrape les webhooks FedaPay perdus via `GET /v1/transactions/{ref}` pour tout paiement
+> ouvert porteur d'un `provider_ref` âgé >= 5 min (approved => confirm, declined => FAILED,
+> canceled => CANCELLED, pending/unknown => attente ; inactif sans clés FedaPay) ;
+> **reconciler simulé** (3600 s) : cohérence interne (SOLD sans commande, DELIVERED sans
+> ticket) => run `reconciliation_runs` avec `router_total_seen` NULL (volet routeur réel =
+> IMP-24) + alerte `reconciliation_mismatch` CRITICAL si écart (garde-fou INC-03).
+> Ordonnanceur `setInterval` zéro dépendance (`@fastify/cron` n'était qu'indicatif),
+> démarré par `buildApp({ workers: { enabled: true } })` (server.ts), coupable via
+> `WORKERS=off`, stoppé proprement au hook `onClose`. Aucune migration. Tests :
+> `workers.test.ts` (11 unitaires) + bloc intégration IMP-20 (5) sur Postgres réel.
+
 ## 6. Workers / jobs
 
 | Job | Déclencheur | Rôle |

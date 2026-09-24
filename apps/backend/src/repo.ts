@@ -108,6 +108,29 @@ export interface BackendRepo {
   /** Lie un compte Supabase Auth au client (RLS « own rows » via auth_user_id, 0007). */
   linkCustomerAuth(customerId: string, authUserId: string): Promise<void>;
 
+  /** IMP-20 — commandes PAYMENT_PENDING trop anciennes => EXPIRED (+ paiements PENDING). */
+  expireStaleOrders(olderThan: Date): Promise<{ orderIds: string[]; paymentsExpired: number }>;
+  /** IMP-20 — tickets RESERVED bloqués trop anciens => RELEASED puis AVAILABLE. */
+  releaseStaleReservedTickets(olderThan: Date): Promise<string[]>;
+  /** IMP-20 — paiements ouverts avec provider_ref, plus anciens que la date donnée. */
+  getOpenPaymentsWithRefOlderThan(olderThan: Date): Promise<PaymentRecord[]>;
+  /** IMP-20 — instantané de cohérence interne (reconciler Phase 1). */
+  getReconciliationSnapshot(): Promise<{
+    soldWithoutOrder: number;
+    deliveredWithoutTicket: number;
+    totalTickets: number;
+    byState: Record<string, number>;
+  }>;
+  /** IMP-20 — trace de réconciliation (garde-fou INC-03). */
+  insertReconciliationRun(run: {
+    routerTotalExpected: number;
+    routerTotalSeen: number | null;
+    diff: Record<string, unknown>;
+    status: 'OK' | 'MISMATCH';
+  }): Promise<string>;
+  /** IMP-20 — lève une alerte (règle, sévérité, payload). */
+  raiseAlert(alert: { rule: string; severity: 'INFO' | 'WARNING' | 'CRITICAL'; payload: Record<string, unknown> }): Promise<string>;
+
   /** IMP-19 — expire les tickets SOLD dont l'échéance d'activation est dépassée
    * (double garde-fou, contrat §3.6). Transition légale SOLD→EXPIRED (0011),
    * auditée par la garde 0009. Retourne les ids expirés. */
@@ -705,6 +728,106 @@ export class PgRepo implements BackendRepo {
 
       return { batchId, seq, offerId: input.offerId, quantity: input.quantity, generatedAt, specs };
     });
+  }
+
+  async expireStaleOrders(olderThan: Date): Promise<{ orderIds: string[]; paymentsExpired: number }> {
+    const expired = await this.pool.query(
+      `UPDATE public.orders SET state = 'EXPIRED'
+       WHERE state = 'PAYMENT_PENDING' AND created_at <= $1
+       RETURNING id`,
+      [olderThan],
+    );
+    const orderIds = expired.rows.map((r) => String(r['id']));
+    if (orderIds.length === 0) return { orderIds, paymentsExpired: 0 };
+    const pays = await this.pool.query(
+      `UPDATE public.payments SET state = 'EXPIRED'
+       WHERE state = 'PENDING' AND order_id = ANY($1::uuid[])`,
+      [orderIds],
+    );
+    return { orderIds, paymentsExpired: pays.rowCount ?? 0 };
+  }
+
+  async releaseStaleReservedTickets(olderThan: Date): Promise<string[]> {
+    const rel = await this.pool.query(
+      `UPDATE public.tickets SET db_state = 'RELEASED'
+       WHERE db_state = 'RESERVED' AND reserved_at <= $1
+       RETURNING id`,
+      [olderThan],
+    );
+    const ids = rel.rows.map((r) => String(r['id']));
+    if (ids.length > 0) {
+      await this.pool.query(
+        `UPDATE public.tickets SET db_state = 'AVAILABLE', reserved_at = NULL
+         WHERE id = ANY($1::uuid[])`,
+        [ids],
+      );
+    }
+    return ids;
+  }
+
+  async getOpenPaymentsWithRefOlderThan(olderThan: Date): Promise<PaymentRecord[]> {
+    const res = await this.pool.query<PaymentRow>(
+      `SELECT * FROM public.payments
+       WHERE state IN ('INITIATED', 'PENDING')
+         AND provider_ref IS NOT NULL
+         AND created_at <= $1
+       ORDER BY created_at`,
+      [olderThan],
+    );
+    return res.rows.map(mapPayment);
+  }
+
+  async getReconciliationSnapshot(): Promise<{
+    soldWithoutOrder: number;
+    deliveredWithoutTicket: number;
+    totalTickets: number;
+    byState: Record<string, number>;
+  }> {
+    const res = await this.pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM public.tickets
+          WHERE db_state IN ('SOLD', 'USED') AND order_id IS NULL) AS sold_without_order,
+         (SELECT count(*)::int FROM public.orders o
+          WHERE o.state = 'DELIVERED' AND NOT EXISTS (
+            SELECT 1 FROM public.tickets t
+            WHERE t.order_id = o.id AND t.db_state IN ('SOLD', 'USED'))) AS delivered_without_ticket,
+         (SELECT count(*)::int FROM public.tickets) AS total_tickets`,
+    );
+    const states = await this.pool.query(
+      `SELECT db_state, count(*)::int AS n FROM public.tickets GROUP BY db_state`,
+    );
+    const byState: Record<string, number> = {};
+    for (const row of states.rows) byState[String(row['db_state'])] = Number(row['n']);
+    return {
+      soldWithoutOrder: Number(res.rows[0]?.['sold_without_order'] ?? 0),
+      deliveredWithoutTicket: Number(res.rows[0]?.['delivered_without_ticket'] ?? 0),
+      totalTickets: Number(res.rows[0]?.['total_tickets'] ?? 0),
+      byState,
+    };
+  }
+
+  async insertReconciliationRun(run: {
+    routerTotalExpected: number;
+    routerTotalSeen: number | null;
+    diff: Record<string, unknown>;
+    status: 'OK' | 'MISMATCH';
+  }): Promise<string> {
+    const res = await this.pool.query(
+      `INSERT INTO public.reconciliation_runs
+         (router_total_expected, router_total_seen, diff, status, finished_at)
+       VALUES ($1, $2, $3, $4, now())
+       RETURNING id`,
+      [run.routerTotalExpected, run.routerTotalSeen, JSON.stringify(run.diff), run.status],
+    );
+    return String(res.rows[0]?.['id']);
+  }
+
+  async raiseAlert(alert: { rule: string; severity: 'INFO' | 'WARNING' | 'CRITICAL'; payload: Record<string, unknown> }): Promise<string> {
+    const res = await this.pool.query(
+      `INSERT INTO public.alerts (rule, severity, payload) VALUES ($1, $2, $3) RETURNING id`,
+      [alert.rule, alert.severity, JSON.stringify(alert.payload)],
+    );
+    return String(res.rows[0]?.['id']);
   }
 
   async expireOverdueTickets(now: Date): Promise<string[]> {

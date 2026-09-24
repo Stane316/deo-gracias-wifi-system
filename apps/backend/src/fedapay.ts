@@ -160,8 +160,12 @@ export interface CheckoutResult {
 }
 
 /** Abstraction du prestataire : le réel (FedaPayClient) et les fakes de test. */
+export type ProviderTransactionStatus = 'approved' | 'declined' | 'canceled' | 'pending' | 'unknown';
+
 export interface PaymentProvider {
   createCheckout(input: CheckoutInput): Promise<CheckoutResult>;
+  /** IMP-20 — rattrapage (webhook-sweeper) : état courant côté provider. */
+  getTransactionStatus?(providerRef: string): Promise<ProviderTransactionStatus>;
 }
 
 export interface FedaPayClientOptions {
@@ -234,6 +238,27 @@ export class FedaPayClient implements PaymentProvider {
       // la seule preuve de paiement (doc 06 §17).
     }
     return { providerRef: reference, redirectUrl };
+  }
+
+  /** IMP-20 — GET /v1/transactions/{ref} pour le webhook-sweeper (blueprint §6). */
+  async getTransactionStatus(providerRef: string): Promise<ProviderTransactionStatus> {
+    try {
+      const res = await this.doFetch(`${this.baseUrl}/transactions/${encodeURIComponent(providerRef)}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.opts.secretKey}` },
+      });
+      if (!res.ok) return 'unknown';
+      const body = (await res.json()) as Record<string, unknown>;
+      const tx = this.extractTransaction(body) ?? body;
+      const status = tx['status'];
+      if (status === 'approved') return 'approved';
+      if (status === 'declined') return 'declined';
+      if (status === 'canceled' || status === 'cancelled') return 'canceled';
+      if (status === 'pending') return 'pending';
+      return 'unknown';
+    } catch {
+      return 'unknown'; // réseau/parse : on attend le prochain passage du cron
+    }
   }
 
   /** Accepte la réponse plate (OpenAPI actuel) et l'ancienne forme {data:{transaction}}. */

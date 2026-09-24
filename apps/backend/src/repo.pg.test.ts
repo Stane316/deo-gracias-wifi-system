@@ -14,6 +14,7 @@ import { generateTestHeaderString, type CheckoutInput, type CheckoutResult, type
 import { PgRepo } from './repo.js';
 import { computeSyncState, startOfBusinessDay } from './admin.js';
 import { allocateAndDeliver } from './tickets.js';
+import { runOrderExpiry, runReconciliationSim } from './workers.js';
 
 class FakeVerifier implements AuthVerifier {
   identities = new Map<string, AuthIdentity>();
@@ -1105,5 +1106,151 @@ describeDb("IMP-19 — échéance d\u0027activation sur Postgres réel", () => {
        WHERE b.source = 'mikmon-manual' AND t.activation_deadline IS NULL`,
     );
     expect(Number(res.rows[0]?.['n'])).toBe(660);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMP-20 — Workers (blueprint §6, D11) : order-expiry (TTL 30 min) + paiement
+// PENDING associé ; libération des tickets RESERVED bloqués (15 min) ;
+// candidate-query du webhook-sweeper ; reconciler simulé sur base réelle
+// (reconciliation_runs, garde-fou INC-03). Fixtures : itest-imp20-pg, tél 019720%.
+// ---------------------------------------------------------------------------
+describeDb('IMP-20 — workers (expiry, RESERVED, sweeper, reconciliation) sur Postgres réel', () => {
+  const pool20 = new Pool({ connectionString: DATABASE_URL });
+  const repo20 = new PgRepo(pool20);
+  let fixtureOrderId = '';
+  let fixtureTicketId = '';
+
+  const cleanup20 = async (): Promise<void> => {
+    await pool20.query(
+      `DELETE FROM public.payments WHERE order_id IN (
+         SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp20-pg-%')`,
+    );
+    // Tickets AVANT orders (FK tickets.order_id -> orders).
+    await pool20.query(
+      `DELETE FROM public.tickets WHERE batch_id IN (
+         SELECT id FROM public.ticket_batches WHERE notes = 'itest-imp20-pg')`,
+    );
+    await pool20.query(`DELETE FROM public.orders WHERE idempotency_key LIKE 'itest-imp20-pg-%'`);
+    await pool20.query(`DELETE FROM public.ticket_batches WHERE notes = 'itest-imp20-pg'`);
+    await pool20.query(`DELETE FROM public.customers WHERE phone LIKE '019720%'`);
+  };
+
+  beforeAll(async () => { await cleanup20(); });
+  afterAll(async () => { await cleanup20(); await pool20.end(); });
+
+  it('expireStaleOrders : commande PAYMENT_PENDING + paiement PENDING => EXPIRED (TTL 30 min)', async () => {
+    const cust = await pool20.query(`INSERT INTO public.customers (phone) VALUES ('0197201111') RETURNING id`);
+    const plan = await pool20.query(`SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`);
+    const ord = await pool20.query(
+      `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
+       VALUES ($1, $2, '{"offer_id":"24-HEURES","price_snapshot":300,"validity_duration_snapshot":48}'::jsonb,
+               'itest-imp20-pg-expire1') RETURNING id`,
+      [String(cust.rows[0]?.['id']), String(plan.rows[0]?.['id'])],
+    );
+    fixtureOrderId = String(ord.rows[0]?.['id']);
+    await pool20.query(`UPDATE public.orders SET state = 'PAYMENT_PENDING' WHERE id = $1`, [fixtureOrderId]);
+    const payment = await repo20.createPayment(fixtureOrderId, 300);
+    await repo20.markPaymentAwaitingResult(payment.id, 'fedapay:itest-imp20-pg-expire1');
+    // INITIATED -> PENDING (transition légale 0009) puis vieillissement 40 min.
+    await pool20.query(`UPDATE public.payments SET state = 'PENDING' WHERE id = $1`, [payment.id]);
+    await pool20.query(`UPDATE public.orders SET created_at = now() - interval '40 minutes' WHERE id = $1`, [fixtureOrderId]);
+    await pool20.query(`UPDATE public.payments SET created_at = now() - interval '40 minutes' WHERE id = $1`, [payment.id]);
+
+    const cutoff = new Date(Date.now() - 30 * 60_000);
+    const result = await repo20.expireStaleOrders(cutoff);
+    expect(result.orderIds).toEqual([fixtureOrderId]);
+    expect(result.paymentsExpired).toBe(1);
+    const o2 = await pool20.query('SELECT state FROM public.orders WHERE id = $1', [fixtureOrderId]);
+    const p2 = await pool20.query('SELECT state FROM public.payments WHERE id = $1', [payment.id]);
+    expect(o2.rows[0]?.['state']).toBe('EXPIRED');
+    expect(p2.rows[0]?.['state']).toBe('EXPIRED');
+    // Second passage : rien d'autre à expirer (idempotence de fait).
+    expect(await repo20.expireStaleOrders(cutoff)).toEqual({ orderIds: [], paymentsExpired: 0 });
+  });
+
+  it('releaseStaleReservedTickets : RESERVED bloqué 20 min => libéré vers AVAILABLE', async () => {
+    const batch = await pool20.query(
+      `INSERT INTO public.ticket_batches (source, quantity, notes)
+       VALUES ('backend', 1, 'itest-imp20-pg') RETURNING id`,
+    );
+    const plan = await pool20.query(`SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`);
+    const tick = await pool20.query(
+      `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id)
+       VALUES ($1, $2, 'zz', $3) RETURNING id`,
+      [String(batch.rows[0]?.['id']), createHash('sha256').update('itest-imp20-rsv').digest('hex'), String(plan.rows[0]?.['id'])],
+    );
+    fixtureTicketId = String(tick.rows[0]?.['id']);
+    await pool20.query(
+      `UPDATE public.tickets SET db_state = 'RESERVED', reserved_at = now() - interval '20 minutes' WHERE id = $1`,
+      [fixtureTicketId],
+    );
+
+    const released = await repo20.releaseStaleReservedTickets(new Date(Date.now() - 15 * 60_000));
+    expect(released).toEqual([fixtureTicketId]);
+    const t = await pool20.query('SELECT db_state, reserved_at FROM public.tickets WHERE id = $1', [fixtureTicketId]);
+    expect(t.rows[0]?.['db_state']).toBe('AVAILABLE');
+    expect(t.rows[0]?.['reserved_at']).toBeNull();
+    // (pas de restauration d'état : cleanup20 supprime le ticket avec son lot itest-imp20-pg)
+  });
+
+  it('getOpenPaymentsWithRefOlderThan : candidats du webhook-sweeper (INITIATED + ref, min-age)', async () => {
+    const cust = await pool20.query(`INSERT INTO public.customers (phone) VALUES ('0197202222') RETURNING id`);
+    const plan = await pool20.query(`SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`);
+    const ord = await pool20.query(
+      `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
+       VALUES ($1, $2, '{"offer_id":"24-HEURES","price_snapshot":300,"validity_duration_snapshot":48}'::jsonb,
+               'itest-imp20-pg-sweep1') RETURNING id`,
+      [String(cust.rows[0]?.['id']), String(plan.rows[0]?.['id'])],
+    );
+    const orderId = String(ord.rows[0]?.['id']);
+    const payment = await repo20.createPayment(orderId, 300);
+    await repo20.markPaymentAwaitingResult(payment.id, 'fedapay:itest-imp20-pg-sweep1');
+    await pool20.query(`UPDATE public.payments SET created_at = now() - interval '10 minutes' WHERE id = $1`, [payment.id]);
+
+    const candidates = await repo20.getOpenPaymentsWithRefOlderThan(new Date(Date.now() - 5 * 60_000));
+    expect(candidates.map((c) => c.providerRef)).toContain('fedapay:itest-imp20-pg-sweep1');
+    // min-age respecté : seuil de 30 min => ce paiement de 10 min n'est PAS candidat.
+    const tooSoon = await repo20.getOpenPaymentsWithRefOlderThan(new Date(Date.now() - 30 * 60_000));
+    expect(tooSoon.map((c) => c.providerRef)).not.toContain('fedapay:itest-imp20-pg-sweep1');
+  });
+
+  it('runOrderExpiry sur base réelle : ticket SOLD à échéance dépassée => EXPIRED', async () => {
+    const batch = await pool20.query(
+      `INSERT INTO public.ticket_batches (source, quantity, notes)
+       VALUES ('backend', 1, 'itest-imp20-pg') RETURNING id`,
+    );
+    const plan = await pool20.query(`SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`);
+    const tick = await pool20.query(
+      `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id, sold_at, activation_deadline)
+       VALUES ($1, $2, 'zz', $3, now() - interval '3 days', now() - interval '1 hour') RETURNING id`,
+      [String(batch.rows[0]?.['id']), createHash('sha256').update('itest-imp20-dl').digest('hex'), String(plan.rows[0]?.['id'])],
+    );
+    const ticketId = String(tick.rows[0]?.['id']);
+    // Chaîne légale 0009 : AVAILABLE -> RESERVED -> SOLD.
+    await pool20.query(`UPDATE public.tickets SET db_state = 'RESERVED', reserved_at = now() WHERE id = $1`, [ticketId]);
+    await pool20.query(
+      `UPDATE public.tickets SET db_state = 'SOLD', sold_at = now() - interval '3 days', order_id = $2 WHERE id = $1`,
+      [ticketId, fixtureOrderId],
+    );
+
+    const report = await runOrderExpiry(repo20, new Date());
+    expect(report.ticketsExpired).toContain(ticketId);
+    const t = await pool20.query('SELECT db_state FROM public.tickets WHERE id = $1', [ticketId]);
+    expect(t.rows[0]?.['db_state']).toBe('EXPIRED');
+  });
+
+  it('reconciler simulé sur base réelle : run OK + reconciliation_runs (routeur null, IMP-24)', async () => {
+    const report = await runReconciliationSim(repo20);
+    expect(report.violations).toEqual([]);
+    expect(report.status).toBe('OK');
+    const { rows } = await pool20.query(
+      'SELECT status, router_total_seen, diff FROM public.reconciliation_runs WHERE id = $1',
+      [report.runId],
+    );
+    expect(rows[0]?.['status']).toBe('OK');
+    expect(rows[0]?.['router_total_seen']).toBeNull();
+    expect(rows[0]?.['diff']).toMatchObject({ mode: 'simulation_phase1' });
+    await pool20.query('DELETE FROM public.reconciliation_runs WHERE id = $1', [report.runId]);
   });
 });

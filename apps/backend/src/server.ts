@@ -41,6 +41,9 @@ const app = await buildApp({
     ...(provider ? { provider } : {}),
     ...(fedapayWebhookSecret ? { webhookSecret: fedapayWebhookSecret } : {}),
   },
+  // IMP-20 — workers in-process : order-expiry (1 min), webhook-sweeper (5 min),
+  // reconciler simulé (1 h). Périodes par défaut ; désactivables via WORKERS=off.
+  ...((process.env['WORKERS'] ?? '').toLowerCase() === 'off' ? {} : { workers: { enabled: true } }),
 });
 const host = process.env['HOST'] ?? '0.0.0.0';
 const port = Number(process.env['PORT'] ?? 3000);
