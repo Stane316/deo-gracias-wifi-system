@@ -53,7 +53,7 @@
   reste en TypeScript (19 tests d'intégration réels). Bascule vers une fonction DEFINER à
   revisiter au déploiement Supabase hébergé (Phase 2), via migration dédiée.
 
-## D8/D9 — Génération digitale des tickets (IMP-18, 24/09/2026) : APPLIQUÉ
+## D8/D9 — Génération digitale des tickets (IMP-18, 24/09/2026) : APPLIQUÉ, **CONFIRMÉ par le propriétaire (24/09)**
 
 - **D8 — Préfixe `vc` conservé (contrat Mikmon §3.3)** : les lots digitaux réutilisent le
   comment `vc-<seq>-<mm.dd.yy>-` sans AUCUNE écriture routeur (profils/On-Login/moniteurs
@@ -65,3 +65,13 @@
   succès de la synchro routeur, où il devra être purgé (IMP-21/24). La séquence digitale
   (`settings.backend_batch_seq`, à partir de 100) est lisible par anon (catalogue public
   0007) : information de sensibilité mineure, acceptée en phase 1.
+
+## D10 — Fenêtres de validité des tickets (IMP-19, 24/09/2026) : APPLIQUÉ
+
+- **Ticket vendu** : échéance d'activation = `sold_at` + `validity_hours` de l'offre (Grille A) ;
+  dépassée ⇒ `EXPIRED` via `expireOverdueTickets` (transition 0011, auditée). Empêche qu'un
+  ticket payé « dorme » des mois puis obtienne une période complète gratuite au 1er login
+  (le routeur seul ne l'applique qu'après conversion du comment, contrat §3.6).
+- **Ticket vierge** : AUCUNE échéance pré-vente — le contrat ne fixe pas de fenêtre numérique
+  avant 1er login et le stock Mikmon du 17/09 est un inventaire réel en circulation ; toute
+  fenêtre courte le gelerait. Fermeture de la fenêtre de vente = bascule IMP-38.

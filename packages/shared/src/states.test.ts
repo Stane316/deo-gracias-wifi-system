@@ -69,6 +69,7 @@ describe("IMP-11 — machines d'états (docs 06)", () => {
     expect(canTicketDbTransition('AVAILABLE', 'EXPIRED')).toBe(true);
     expect(canTicketDbTransition('RESERVED', 'RELEASED')).toBe(true);
     expect(canTicketDbTransition('SOLD', 'REFUNDED')).toBe(true);
+    expect(canTicketDbTransition('SOLD', 'EXPIRED')).toBe(true); // IMP-19 (0011)
     expect(canTicketDbTransition('AVAILABLE', 'USED')).toBe(false);
     expect(canTicketDbTransition('AVAILABLE', 'SOLD')).toBe(false);
   });
@@ -109,6 +110,6 @@ describe("IMP-11 — machines d'états (docs 06)", () => {
   });
 
   it('comptage des arêtes (miroir migration 0009)', () => {
-    expect(ALL_TRANSITION_EDGES).toHaveLength(35);
+    expect(ALL_TRANSITION_EDGES).toHaveLength(36); // + SOLD→EXPIRED (IMP-19, 0011)
   });
 });

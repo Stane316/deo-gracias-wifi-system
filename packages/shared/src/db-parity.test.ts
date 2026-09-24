@@ -3,6 +3,7 @@ import m0003 from '../../../supabase/migrations/0003_orders_payments.sql?raw';
 import m0004 from '../../../supabase/migrations/0004_tickets_batches.sql?raw';
 import m0005 from '../../../supabase/migrations/0005_mikrotik_sync_sessions.sql?raw';
 import m0009 from '../../../supabase/migrations/0009_state_guards.sql?raw';
+import m0011 from '../../../supabase/migrations/0011_activation_deadline.sql?raw';
 import {
   ALL_TRANSITION_EDGES,
   ORDER_STATES,
@@ -56,13 +57,13 @@ describe('IMP-11 — parité états TS ↔ CHECK SQL', () => {
   });
 });
 
-describe('IMP-11 — parité arêtes TS ↔ state_transitions (0009)', () => {
-  const sqlEdges: [string, string, string][] = [...m0009.matchAll(/\('([a-z_]+)', '([A-Z_]+)', '([A-Z_]+)'\)/g)].map(
-    (x) => [x[1] as string, x[2] as string, x[3] as string],
-  );
+describe('IMP-11 — parité arêtes TS ↔ state_transitions (0009 + 0011)', () => {
+  const sqlEdges: [string, string, string][] = [...`${m0009}\n${m0011}`.matchAll(
+    /\('([a-z_]+)', '([A-Z_]+)', '([A-Z_]+)'\)/g,
+  )].map((x) => [x[1] as string, x[2] as string, x[3] as string]);
 
-  it('35 arêtes insérées en base', () => {
-    expect(sqlEdges).toHaveLength(35);
+  it('36 arêtes insérées en base (0009 + transition SOLD→EXPIRED de 0011)', () => {
+    expect(sqlEdges).toHaveLength(36);
   });
 
   it('chaque arête TS existe en base et réciproquement', () => {

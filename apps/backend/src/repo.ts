@@ -108,6 +108,11 @@ export interface BackendRepo {
   /** Lie un compte Supabase Auth au client (RLS « own rows » via auth_user_id, 0007). */
   linkCustomerAuth(customerId: string, authUserId: string): Promise<void>;
 
+  /** IMP-19 — expire les tickets SOLD dont l'échéance d'activation est dépassée
+   * (double garde-fou, contrat §3.6). Transition légale SOLD→EXPIRED (0011),
+   * auditée par la garde 0009. Retourne les ids expirés. */
+  expireOverdueTickets(now: Date): Promise<string[]>;
+
   /** IMP-18 — génération d'un lot de tickets digitaux (contrat Mikmon §3) :
    * batch + tickets hashés + ordres `create_ticket` en file `mikrotik_sync`,
    * le tout en UNE transaction. Retourne les codes clairs UNE seule fois. */
@@ -168,6 +173,7 @@ interface TicketRow {
   code_prefix_hint: string | null;
   sold_at: Date | null;
   mikrotik_comment: string | null;
+  activation_deadline: Date | null;
 }
 
 export interface TicketRecord {
@@ -180,6 +186,8 @@ export interface TicketRecord {
   codePrefixHint: string | null;
   soldAt: Date | null;
   mikrotikComment: string | null;
+  /** IMP-19 (contrat §3.6) : échéance du premier login ; null = stock vierge. */
+  activationDeadline: Date | null;
 }
 
 export type AllocateResult =
@@ -236,6 +244,7 @@ function mapTicket(row: TicketRow): TicketRecord {
     codePrefixHint: row.code_prefix_hint,
     soldAt: row.sold_at,
     mikrotikComment: row.mikrotik_comment,
+    activationDeadline: row.activation_deadline,
   };
 }
 
@@ -402,9 +411,18 @@ export class PgRepo implements BackendRepo {
       );
       const res = reserved.rows[0];
       if (!res) return { status: 'no-stock' } as const; // re-vérification post-verrou (doc 06 §30)
-      await q(`UPDATE public.tickets SET db_state = 'SOLD', sold_at = now() WHERE id = $1 AND db_state = 'RESERVED'`, [
-        String(candidate['id']),
-      ]);
+      // IMP-19 (contrat §3.6) : échéance d'activation figée à la vente =
+      // sold_at + validité de l'offre (snapshot §09 de la commande).
+      await q(
+        `UPDATE public.tickets t
+         SET db_state = 'SOLD',
+             sold_at = now(),
+             activation_deadline = now() + make_interval(
+               hours => coalesce((o.plan_snapshot->>'validity_duration_snapshot')::int, 0))
+         FROM public.orders o
+         WHERE o.id = $2 AND t.id = $1 AND t.db_state = 'RESERVED'`,
+        [String(candidate['id']), orderId],
+      );
       const upd = await q(
         `UPDATE public.orders SET state = 'TICKET_ALLOCATED' WHERE id = $1 AND state = 'PAID' RETURNING id`,
         [orderId],
@@ -438,7 +456,7 @@ export class PgRepo implements BackendRepo {
   ): Promise<Array<TicketRecord & { offerId: string | null }>> {
     const res = await this.pool.query<TicketRow & { offer_id: string | null }>(
       `SELECT t.id, t.batch_id, t.plan_id, t.db_state, t.router_state, t.order_id,
-              t.code_prefix_hint, t.sold_at, t.mikrotik_comment,
+              t.code_prefix_hint, t.sold_at, t.mikrotik_comment, t.activation_deadline,
               o.plan_snapshot->>'offer_id' AS offer_id
        FROM public.tickets t
        JOIN public.orders o ON o.id = t.order_id
@@ -687,6 +705,18 @@ export class PgRepo implements BackendRepo {
 
       return { batchId, seq, offerId: input.offerId, quantity: input.quantity, generatedAt, specs };
     });
+  }
+
+  async expireOverdueTickets(now: Date): Promise<string[]> {
+    const res = await this.pool.query(
+      `UPDATE public.tickets SET db_state = 'EXPIRED'
+       WHERE db_state = 'SOLD'
+         AND activation_deadline IS NOT NULL
+         AND activation_deadline <= $1
+       RETURNING id`,
+      [now],
+    );
+    return res.rows.map((r) => String(r['id']));
   }
 
   async getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats> {

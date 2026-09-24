@@ -156,7 +156,7 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 169/169 avec base (backend 122 dont 26 d'intégration, shared 45,
+- Attendu : 172/172 avec base (backend 125 dont 29 d'intégration, shared 45,
   connector 1, frontend 1). Sans base : les intégrations pg skippent proprement.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
@@ -196,6 +196,21 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
 - Logique pure : `apps/backend/src/ticketgen.ts` (RNG injectable, seedable).
 - Aucune migration : schéma 0001→0010 suffisant ; le test RLS utilise une
   baseline dynamique pour `settings` (catalogue public, 0007).
+
+## Échéance d'activation des tickets vendus (IMP-19)
+
+- Migration `0011` : colonne `tickets.activation_deadline` + transition légale
+  `SOLD→EXPIRED` (double garde-fou, contrat Mikmon §3.6).
+- À la vente (`allocateTicketForOrder`) : `activation_deadline = sold_at +
+  validité de l'offre` (issue du snapshot §09 de la commande, jamais déduite
+  du nom de profil). `make_interval` SQL, figé dans la même transaction.
+- `repo.expireOverdueTickets(now)` : expire les SOLD dont la fenêtre est
+  close (gardes 0009 : transition légale + audit `state_change` automatique).
+  Sera appelé par le worker expiry (IMP-20).
+- Le stock VIERGE ne porte aucune échéance : vendable jusqu'à la bascule
+  IMP-38 (décision D10).
+- `/tickets/mine` : n'expose que les vouchers utilisables (SOLD/USED) +
+  `activation_deadline` pour transparence.
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

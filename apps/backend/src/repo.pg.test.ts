@@ -740,7 +740,8 @@ describeDb('IMP-16 — stock Mikmon seedé (0010) sur Postgres réel', () => {
     await pool16.query(`ALTER TABLE public.tickets DISABLE TRIGGER tickets_state_guard`);
     try {
       await pool16.query(
-        `UPDATE public.tickets SET db_state = 'AVAILABLE', order_id = NULL, sold_at = NULL, reserved_at = NULL
+        `UPDATE public.tickets SET db_state = 'AVAILABLE', order_id = NULL, sold_at = NULL,
+                reserved_at = NULL, activation_deadline = NULL
          WHERE order_id = $1`,
         [orderId],
       );
@@ -973,5 +974,136 @@ describeDb('IMP-18 — génération de lots digitaux sur Postgres réel', () => 
     const rest = await pool18.query(`SELECT count(*)::int AS n FROM public.ticket_batches WHERE source = 'backend'`);
     // Seuls les lots des tests précédents existent (5-HEURES ×2 ici + lot 24-HEURES).
     expect(Number(rest.rows[0]?.['n'])).toBeLessThanOrEqual(3);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// IMP-19 — Double garde-fou de validité (contrat Mikmon §3.6) : à la vente,
+// activation_deadline = sold_at + validité offre ; au-delà, SOLD→EXPIRED (0011)
+// via expireOverdueTickets, audité par la garde 0009. Stock vierge = sans
+// échéance (vendable jusqu'à la bascule IMP-38, décision D10).
+// Fixtures : clés itest-imp19-pg-%, téléphones 019719%.
+// ---------------------------------------------------------------------------
+describeDb("IMP-19 — échéance d\u0027activation sur Postgres réel", () => {
+  const pool19 = new Pool({ connectionString: DATABASE_URL });
+  const repo19 = new PgRepo(pool19);
+  let fixtureTicketId = '';
+  let fixtureOrderId = '';
+  let fixtureCustomerId = '';
+
+  const cleanup19 = async (): Promise<void> => {
+    await pool19.query(
+      `DELETE FROM public.tickets WHERE order_id IN (
+         SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp19-pg-%')`,
+    );
+    await pool19.query(
+      `DELETE FROM public.tickets WHERE batch_id IN (
+         SELECT id FROM public.ticket_batches WHERE notes = 'itest-imp19-pg')`,
+    );
+    await pool19.query(`DELETE FROM public.ticket_batches WHERE notes = 'itest-imp19-pg'`);
+    await pool19.query(`DELETE FROM public.orders WHERE idempotency_key LIKE 'itest-imp19-pg-%'`);
+    await pool19.query(`DELETE FROM public.customers WHERE phone LIKE '019719%'`);
+  };
+
+  beforeAll(async () => {
+    await cleanup19();
+    await parkMikmonStock(pool19); // le stock réel n'est pas consommé par ce test
+  });
+  afterAll(async () => {
+    await unParkMikmonStock(pool19);
+    await cleanup19();
+    await pool19.end();
+  });
+
+  it("vente : activation_deadline = sold_at + validité de l\u0027offre (24-HEURES = 48 h)", async () => {
+    // Fixture : petit lot backend frais (FIFO l'aurait sinon pris dans le stock seedé).
+    const batch = await pool19.query(
+      `INSERT INTO public.ticket_batches (source, quantity, notes)
+       VALUES ('backend', 2, 'itest-imp19-pg') RETURNING id`,
+    );
+    const plan = await pool19.query(`SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`);
+    await pool19.query(
+      `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id)
+       VALUES ($1, $2, 'zz', $3), ($1, $4, 'zz', $3)`,
+      [String(batch.rows[0]?.['id']),
+       createHash('sha256').update('itest-imp19-a').digest('hex'),
+       String(plan.rows[0]?.['id']),
+       createHash('sha256').update('itest-imp19-b').digest('hex')],
+    );
+    const cust = await pool19.query(`INSERT INTO public.customers (phone) VALUES ('0197190001') RETURNING id`);
+    fixtureCustomerId = String(cust.rows[0]?.['id']);
+    const ord = await pool19.query(
+      `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
+       VALUES ($1, $2, '{"offer_id":"24-HEURES","price_snapshot":300,"validity_duration_snapshot":48}'::jsonb,
+               'itest-imp19-pg-alloc1') RETURNING id`,
+      [fixtureCustomerId, String(plan.rows[0]?.['id'])],
+    );
+    fixtureOrderId = String(ord.rows[0]?.['id']);
+    await pool19.query(`UPDATE public.orders SET state = 'PAYMENT_PENDING' WHERE id = $1`, [fixtureOrderId]);
+    await pool19.query(`UPDATE public.orders SET state = 'PAID' WHERE id = $1`, [fixtureOrderId]);
+
+    const outcome = await allocateAndDeliver(repo19, fixtureOrderId);
+    expect(outcome.status).toBe('delivered');
+
+    const sold = await pool19.query(
+      `SELECT sold_at, activation_deadline FROM public.tickets WHERE order_id = $1`,
+      [fixtureOrderId],
+    );
+    expect(sold.rows).toHaveLength(1);
+    const soldAt = new Date(sold.rows[0]?.['sold_at'] as string);
+    const deadline = new Date(sold.rows[0]?.['activation_deadline'] as string);
+    const hours = (deadline.getTime() - soldAt.getTime()) / 3600_000;
+    expect(hours).toBeGreaterThan(47.9);
+    expect(hours).toBeLessThan(48.1); // validité 48 h de la Grille A (24-HEURES)
+  });
+
+  it('expireOverdueTickets : fenêtre ouverte = rien ; fenêtre close = EXPIRED + audit 0009', async () => {
+    const tid = await pool19.query(`SELECT id FROM public.tickets WHERE order_id = $1`, [fixtureOrderId]);
+    fixtureTicketId = String(tid.rows[0]?.['id']);
+
+    // Fenêtre ouverte : aucun ticket expiré par la méthode.
+    expect(await repo19.expireOverdueTickets(new Date())).toEqual([]);
+
+    // Simule un ticket vendu dont la fenêtre est close (écriture de la colonne seule :
+    // la garde 0009 ne surveille que db_state).
+    await pool19.query(
+      `UPDATE public.tickets SET activation_deadline = now() - interval '1 hour' WHERE id = $1`,
+      [fixtureTicketId],
+    );
+    const expired = await repo19.expireOverdueTickets(new Date());
+    expect(expired).toEqual([fixtureTicketId]);
+
+    const row = await pool19.query(`SELECT db_state FROM public.tickets WHERE id = $1`, [fixtureTicketId]);
+    expect(row.rows[0]?.['db_state']).toBe('EXPIRED');
+
+    // Audit automatique de la garde 0009 (actor system, before/after jsonb).
+    const audit = await pool19.query(
+      `SELECT actor, action, entity, before, after FROM public.audit_logs
+       WHERE entity = 'tickets' AND entity_id = $1 AND action = 'state_change'
+       ORDER BY at DESC LIMIT 1`,
+      [fixtureTicketId],
+    );
+    expect(audit.rows[0]).toMatchObject({
+      actor: 'system',
+      action: 'state_change',
+      entity: 'tickets',
+      before: { db_state: 'SOLD' },
+      after: { db_state: 'EXPIRED' },
+    });
+
+    // /tickets/mine ne liste que les vouchers utilisables (SOLD/USED) : le ticket
+    // expiré disparaît de la vue client, mais son échéance reste en base (admin).
+    const mine = await repo19.getSoldTicketsForCustomer(fixtureCustomerId);
+    expect(mine.find((x) => x.id === fixtureTicketId)).toBeUndefined();
+  });
+
+  it("stock vierge : 660 tickets Mikmon SANS échéance (vendables jusqu\u0027à IMP-38)", async () => {
+    const res = await pool19.query(
+      `SELECT count(*)::int AS n FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE b.source = 'mikmon-manual' AND t.activation_deadline IS NULL`,
+    );
+    expect(Number(res.rows[0]?.['n'])).toBe(660);
   });
 });

@@ -140,3 +140,16 @@ BEGIN
   RAISE NOTICE 'smoke stock OK : 6 batches, 660 tickets hashés, distribution Grille A';
 END;
 $$;
+
+-- ── IMP-19 (0011) : échéance d'activation + transition SOLD→EXPIRED ─────────
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'tickets' AND column_name = 'activation_deadline'
+  ) THEN RAISE EXCEPTION 'smoke: tickets.activation_deadline absent (0011)'; END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.state_transitions
+    WHERE entity = 'tickets' AND from_state = 'SOLD' AND to_state = 'EXPIRED'
+  ) THEN RAISE EXCEPTION 'smoke: transition tickets SOLD->EXPIRED absente (0011)'; END IF;
+END $$;

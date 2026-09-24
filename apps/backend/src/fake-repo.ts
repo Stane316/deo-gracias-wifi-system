@@ -102,6 +102,7 @@ export class FakeRepo implements BackendRepo {
       codePrefixHint: prefix,
       soldAt: null,
       mikrotikComment: null,
+      activationDeadline: null,
     };
     this.tickets.set(ticket.id, ticket);
     return ticket;
@@ -126,6 +127,9 @@ export class FakeRepo implements BackendRepo {
     candidate.dbState = 'SOLD';
     candidate.orderId = orderId;
     candidate.soldAt = new Date();
+    // IMP-19 : échéance = sold_at + validité de l'offre (snapshot §09).
+    const validityHours = Number(order.planSnapshot['validity_duration_snapshot'] ?? 0);
+    candidate.activationDeadline = new Date(candidate.soldAt.getTime() + validityHours * 3600_000);
     order.state = 'TICKET_ALLOCATED';
     return { status: 'allocated', ticketId: candidate.id, codePrefixHint: candidate.codePrefixHint };
   }
@@ -253,6 +257,17 @@ export class FakeRepo implements BackendRepo {
   linked: Array<[string, string]> = [];
   async linkCustomerAuth(customerId: string, authUserId: string): Promise<void> {
     this.linked.push([customerId, authUserId]);
+  }
+
+  async expireOverdueTickets(now: Date): Promise<string[]> {
+    const out: string[] = [];
+    for (const t of this.tickets.values()) {
+      if (t.dbState === 'SOLD' && t.activationDeadline != null && t.activationDeadline.getTime() <= now.getTime()) {
+        t.dbState = 'EXPIRED';
+        out.push(t.id);
+      }
+    }
+    return out;
   }
 
   // IMP-18 — génération de lots digitaux en mémoire.

@@ -231,9 +231,19 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > que `sha256(code)` (0004) ; le clair ne vit ensuite que dans `mikrotik_sync.payload` jusqu'à
 > la synchro routeur (purge au succès — IMP-21/24). Aucune migration. Tests : `ticketgen.test.ts`
 > (8), `batches.test.ts` (9), bloc intégration IMP-18 (3) sur Postgres réel.
-> **DÉCISION PROPRIÉTAIRE à confirmer (contrat §3.3)** : préfixe `vc` réutilisé tel quel
-> (zéro écriture routeur — l'alternative « étendre l'On-Login » est exclue par le contrat §3.5
-> en phase 1). À valider avant la première synchro réelle (IMP-24).
+> **DÉCISION PROPRIÉTAIRE confirmée (24/09/2026, contrat §3.3)** : préfixe `vc` réutilisé tel
+> quel (zéro écriture routeur — l'alternative « étendre l'On-Login » est exclue par le contrat
+> §3.5 en phase 1). D8/D9 confirmés par le propriétaire.
+
+> **LIVRAISON IMP-19 (24/09/2026)** : double garde-fou de validité (contrat §3.6) — migration
+> `0011_activation_deadline` : colonne `tickets.activation_deadline` + transition légale
+> `SOLD→EXPIRED`. À la vente : échéance = `sold_at` + validité de l'offre (snapshot §09,
+> `make_interval` dans la transaction d'allocation). `repo.expireOverdueTickets(now)` expire
+> les tickets dont la fenêtre est close (audit `state_change` automatique, garde 0009) ; le
+> worker expiry (IMP-20) l'appellera en cron. Stock vierge sans échéance (vendable jusqu'à la
+> bascule IMP-38, décision D10). `/tickets/mine` expose l'échéance. Tests : parité shared
+> mise à jour (36 arêtes), smoke étendu, bloc intégration IMP-19 (3 tests) — le stock seedé
+> y est protégé par parking.
 
 ## 6. Workers / jobs
 

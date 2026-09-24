@@ -76,7 +76,7 @@ export const TICKET_DB_TRANSITIONS: Record<TicketDbState, readonly TicketDbState
   // INTERPRÉTATION signalée (IMP-11) : RELEASED = remise en stock opérationnelle
   // (doc 06 §27 liste la branche RESERVED → RELEASED sans préciser la suite).
   RELEASED: ['AVAILABLE'],
-  SOLD: ['USED', 'REFUNDED'],
+  SOLD: ['USED', 'REFUNDED', 'EXPIRED'], // IMP-19 : double garde-fou validité (contrat §3.6)
   USED: [],
   EXPIRED: [],
   REFUNDED: [],

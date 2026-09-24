@@ -83,13 +83,13 @@ Toujours dans Git Bash, à la racine du repo :
 
 ```bash
 export DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias"
-bash tools/db-migrate.sh up       # applique 0001→0010 (idempotent : déjà jouées = no-op)
+bash tools/db-migrate.sh up       # applique 0001→0011 (idempotent : déjà jouées = no-op)
 bash tools/db-migrate.sh smoke    # contrat de schéma (15 tables…)
 bash tools/db-migrate.sh rls      # matrice RLS anon/authenticated/service_role
 bash tools/db-migrate.sh states   # gardes de transitions + audit (IMP-11)
 ```
 
-Attendu : `OK: up (10 migrations appliquées)`, `OK: smoke`, `OK: rls`,
+Attendu : `OK: up (11 migrations appliquées)`, `OK: smoke`, `OK: rls`,
 `OK: states` (NOTICE « transitions interdites refusées, chaînes valides acceptées,
 audit alimenté (14) »). En cas d'échec : `bash tools/db-migrate.sh reset` (down+up
 complets) puis relancer smoke/rls/states.
@@ -171,11 +171,11 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **169/169** avec DATABASE_URL
-(backend 122 dont 26 d'intégration réelle — y compris concurrence d'allocation
-de tickets, vérification du stock seedé 0010, statistiques admin et génération
-de lots digitaux sur base réelle, shared 45, frontend 1, connector 1),
-143 + 26 skippés sans.
+Attendu actuellement : typecheck 4/4 ; tests **172/172** avec DATABASE_URL
+(backend 125 dont 29 d'intégration réelle — y compris concurrence d'allocation
+de tickets, vérification du stock seedé 0010, statistiques admin, génération de
+lots digitaux et échéance d'activation sur base réelle, shared 45, frontend 1,
+connector 1), 143 + 29 skippés sans.
 C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo
