@@ -156,8 +156,8 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 188/188 avec base (backend 141 dont 34 d'intégration, shared 45,
-  connector 1, frontend 1). Sans base : les intégrations pg skippent proprement.
+- Attendu : 237/237 avec base (backend 162 dont 41 d'intégration, shared 45,
+  connector 29, frontend 1). Sans base : les intégrations pg skippent proprement.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
 
@@ -241,6 +241,61 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
 - Tests : `workers.test.ts` (10 unitaires, FakeRepo + fake provider) + bloc
   IMP-20 de `repo.pg.test.ts` (4 intégrations réelles : expiry, libération
   RESERVED, candidats sweeper, run reconciliation sur base réelle).
+
+## Contrat Connector : file mikrotik_sync + dry-run sur fixtures (IMP-21)
+
+- **Routes** (blueprint §5) : `POST /connector/sync/claim` (réclamation
+  atomique `SKIP LOCKED` de la prochaine opération PENDING ou RETRY échue =>
+  PROCESSING + `locked_by` + `attempts+1` ; 204 si file vide) et
+  `POST /connector/sync/:id/result` (succès => SUCCESS ; échec => RETRY avec
+  backoff, ou BLOCKED). Auth : token long-lived dédié `CONNECTOR_TOKEN`
+  (blueprint §7) ; absent => 503 honnête ; comparaison sha256 + timing-safe.
+- **Politique retry (D12, doc 06 §36)** : 3 tentatives au total ; backoff
+  1 min / 5 min / 15 min ; au-delà => `BLOCKED` + alerte WARNING
+  `sync_blocked` + audit. Constantes exportées : `SYNC_MAX_ATTEMPTS`,
+  `SYNC_BACKOFF_MS`.
+- **Purge INC-04** : après succès d'un `create_ticket`, le champ `password`
+  (code clair) est retiré du payload (`payload - 'password'`) — engagement
+  IMP-18 tenu : le clair ne survit pas à la synchro.
+- **Verrous perdus** : job `sync-requeue` (60 s, workers.ts) — les PROCESSING
+  de plus de 10 min (`DEFAULT_SYNC_STUCK_MS`) repassent en RETRY immédiatement
+  via FAILED->RETRY (la transition PROCESSING->PENDING n'existe pas en 0009 ;
+  `attempts` n'est PAS incrémenté : l'échec n'est pas au Connector).
+- **`@dg/connector`** (paquet) : `parseHotspotUsers` (sorties `/ip hotspot
+  user` RouterOS 6.49, formats tabulaire et detail, contrat Mikmon §4),
+  `DryRunConnector` (routeur simulé en mémoire : validations contrat §3 —
+  name `dg`+6 [a-z0-9], comment `vc-…`, profils Grille A + legacy §5),
+  `consumeOnce`/`drainQueue` + `HttpSyncTransport` (client de la file).
+  Fixtures SYNTHÉTIQUES documentées (les captures réelles sont masquées,
+  EVIDENCE-IMP01). Aucune écriture routeur réelle avant W2 (contrat §4.5).
+- E2E réel : un lot digital IMP-18 est consommé de bout en bout par le
+  DryRunConnector via les vraies routes (bloc intégration IMP-21).
+
+## Connector v0 strictement read-only : lectures routeur + réconciliation (IMP-22)
+
+- Contrat Mikmon §4.5 : aucune écriture routeur avant IMP-24 ; le Connector v0
+  est **strictement read-only** — le type `ReadOnlyConnectorV0` n'expose QUE
+  `collect()` (vérifié par test).
+- **Parsers read-only** (`@dg/connector`) : `/ip hotspot active print detail`
+  (sessions live : uptime/session-time-left en secondes, comment `;;;` = `vc-…`
+  ou échéance après login) ; journal Mikhmon `/system script` comment=mikhmon
+  (séparateur `-|-`, deux formats de date `mon/DD/YYYY` et `YYYY-MM-DD`, §4.3) ;
+  helpers `parseRouterOsDuration`, `parseLimitUptime`, `normalizeRouterOsDate`.
+- **`reconcileReadOnly`** (§4.4) : 5 familles d'anomalies — `comment_vide`,
+  `session_vc_active` (conversion On-Login ratée), `ticket_paye_absent`
+  (voucher digital attendu absent/désactivé), `ticket_inconnu` (comment `vc-…`
+  inconnu : ni digital attendu ni `sha256(name)` legacy — association par
+  username = code, note 0010), `uptime_incoherent` (uptime+left vs
+  limit-uptime, tolérance 60 s, §4.2).
+- **Routes** (blueprint §5) : `GET /connector/inventory/expected` (vouchers
+  digitaux synchronisés + 660 empreintes legacy — JAMAIS de code clair, D13)
+  et `POST /connector/inventory/report` (trace `reconciliation_runs` avec
+  `router_total_seen` rempli, `diff.mode='readonly_v0'` ; MISMATCH => alerte
+  WARNING `router_readonly_mismatch`, garde-fou INC-03).
+- Admin-free : compté à part (`admin_free_seen`), pas une anomalie en v0
+  (inventaire à figer en IMP-35, décision D13).
+- E2E réel : expected sur base réelle + lectures fixtures => rapport MISMATCH
+  tracé + alerte ; rapport cohérent => run OK sans alerte.
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

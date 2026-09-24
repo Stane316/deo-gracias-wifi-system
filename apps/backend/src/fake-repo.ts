@@ -406,6 +406,23 @@ export class FakeRepo implements BackendRepo {
     op.updatedAt = new Date();
     return { state: outcome.nextRetryAt == null ? 'BLOCKED' : 'RETRY', attempts: op.attempts };
   }
+  /** IMP-22 — empreintes legacy injectables par les tests (le fake n'a pas de lots Mikmon). */
+  legacyCodeHashes: string[] = [];
+  async getConnectorExpectedInventory(): Promise<{
+    digitalVouchers: Array<{ name: string; profile: string; comment: string }>;
+    legacyCodeHashes: string[];
+  }> {
+    return {
+      digitalVouchers: this.syncOps
+        .filter((op) => op.operation === 'create_ticket' && op.state === 'SUCCESS')
+        .map((op) => ({
+          name: String(op.payload['name'] ?? ''),
+          profile: String(op.payload['profile'] ?? ''),
+          comment: String(op.payload['comment'] ?? ''),
+        })),
+      legacyCodeHashes: [...this.legacyCodeHashes],
+    };
+  }
   async purgeSyncPayloadSecret(id: string): Promise<void> {
     const op = this.syncOps.find((o) => o.id === id);
     if (op) delete op.payload['password'];

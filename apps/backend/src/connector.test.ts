@@ -113,6 +113,67 @@ describe('IMP-21 — POST /connector/sync/claim', () => {
   });
 });
 
+describe('IMP-22 — inventaire attendu + rapport read-only', () => {
+  const validReport = {
+    router_total_seen: 5,
+    status: 'OK',
+    violations: [],
+    anomalies: [],
+    by_profile: { '5-HEURES': 1 },
+    admin_free_seen: 1,
+    journal_sales: 3,
+  };
+
+  it('GET expected : 503 sans token, 401 faux token, 200 avec (jamais de clair)', async () => {
+    const noTok = await setup(null);
+    const r503 = await noTok.app.inject({ method: 'GET', url: '/connector/inventory/expected' });
+    expect(r503.statusCode).toBe(503);
+    const { repo, app } = await setup();
+    const r401 = await app.inject({ method: 'GET', url: '/connector/inventory/expected', headers: { authorization: 'Bearer faux' } });
+    expect(r401.statusCode).toBe(401);
+
+    const op = makeOp();
+    repo.syncOps.push(op);
+    await repo.claimSyncOp('w1', new Date());
+    await repo.resolveSyncOp(op.id, { kind: 'success', result: {} }, new Date());
+    const r200 = await app.inject({ method: 'GET', url: '/connector/inventory/expected', headers: auth });
+    expect(r200.statusCode).toBe(200);
+    const body = r200.json() as Record<string, unknown>;
+    const vouchers = body['digital_vouchers'] as Array<Record<string, unknown>>;
+    expect(vouchers).toHaveLength(1);
+    expect(vouchers[0]).toMatchObject({ name: 'dg1a2b3c', profile: '24-HEURES', comment: 'vc-100-09.24.26-' });
+    expect(JSON.stringify(body)).not.toContain('abcd1234'); // jamais de code clair
+    expect(Array.isArray(body['legacy_code_hashes'])).toBe(true);
+  });
+
+  it('POST report : 400 body invalide ; 201 OK sans alerte ; 201 MISMATCH + alerte WARNING', async () => {
+    const { repo, app } = await setup();
+    const bad = await app.inject({ method: 'POST', url: '/connector/inventory/report', headers: auth, payload: { router_total_seen: -1 } });
+    expect(bad.statusCode).toBe(400);
+
+    const ok = await app.inject({ method: 'POST', url: '/connector/inventory/report', headers: auth, payload: validReport });
+    expect(ok.statusCode).toBe(201);
+    expect(ok.json()).toMatchObject({ status: 'OK' });
+    expect(repo.reconciliationRuns).toHaveLength(1);
+    expect(repo.alertsRaised).toHaveLength(0);
+
+    const mismatch = await app.inject({
+      method: 'POST', url: '/connector/inventory/report', headers: auth,
+      payload: {
+        ...validReport,
+        status: 'MISMATCH',
+        violations: ['ticket_inconnu:2'],
+        anomalies: [{ kind: 'ticket_inconnu', detail: 'user=dg9qqqqq' }],
+      },
+    });
+    expect(mismatch.statusCode).toBe(201);
+    expect(repo.alertsRaised).toHaveLength(1);
+    expect(repo.alertsRaised[0]).toMatchObject({ rule: 'router_readonly_mismatch', severity: 'WARNING' });
+    expect(repo.reconciliationRuns[1]).toMatchObject({ status: 'MISMATCH', routerTotalSeen: 5 });
+    expect(repo.audits.some((e) => e.action === 'connector_inventory_report')).toBe(true);
+  });
+});
+
 describe('IMP-21 — POST /connector/sync/:id/result', () => {
   async function claimedSetup() {
     const ctx = await setup();

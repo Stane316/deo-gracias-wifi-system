@@ -18,8 +18,14 @@ import { runOrderExpiry, runReconciliationSim } from './workers.js';
 import {
   DryRunConnector,
   drainQueue,
+  HOTSPOT_ACTIVE_FIXTURE,
+  HOTSPOT_USERS_TABULAR_FIXTURE,
+  MIKHMON_JOURNAL_FIXTURE,
+  ReadOnlyConnectorV0,
+  reconcileReadOnly,
   seedLegacyInventory,
   type ClaimedOp,
+  type PlatformExpected,
   type ResultBody,
   type SyncTransport,
 } from '@dg/connector';
@@ -1417,6 +1423,131 @@ describeDb('IMP-21 — contrat Connector sur Postgres réel', () => {
       expect(Number(audit.rows[0]?.['n'])).toBeGreaterThanOrEqual(2);
     } finally {
       await app21.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMP-22 — Connector v0 STRICTEMENT READ-ONLY (contrat §4) : inventaire attendu
+// (660 empreintes legacy + vouchers digitaux, jamais de clair) et rapport de
+// lecture => reconciliation_runs (router_total_seen) + alerte si MISMATCH.
+// E2E : expected réel + lectures fixtures => reconcileReadOnly => report.
+// ---------------------------------------------------------------------------
+describeDb('IMP-22 — inventaire read-only sur Postgres réel', () => {
+  const pool22 = new Pool({ connectionString: DATABASE_URL });
+  const repo22 = new PgRepo(pool22);
+  const TOKEN22 = 'itest-imp22-pg-token';
+  let blockStart: Date = new Date();
+
+  const cleanup22 = async (): Promise<void> => {
+    await pool22.query(`DELETE FROM public.mikrotik_sync WHERE created_at >= $1`, [blockStart]);
+    await pool22.query(
+      `DELETE FROM public.tickets WHERE batch_id IN (
+         SELECT id FROM public.ticket_batches WHERE source = 'backend' AND created_at >= $1)`,
+      [blockStart],
+    );
+    await pool22.query(`DELETE FROM public.ticket_batches WHERE source = 'backend' AND created_at >= $1`, [blockStart]);
+    await pool22.query(`DELETE FROM public.reconciliation_runs WHERE diff->>'mode' IN ('readonly_v0') AND started_at >= $1`, [blockStart]);
+  };
+
+  beforeAll(async () => {
+    const res = await pool22.query(`SELECT now() AS t`);
+    blockStart = new Date(res.rows[0]?.['t'] as string);
+    await cleanup22();
+  });
+  afterAll(async () => { await cleanup22(); await pool22.end(); });
+
+  it('GET expected réel : 660 empreintes legacy + vouchers digitaux SUCCESS, zéro clair', async () => {
+    const app22 = await buildApp({ repo: repo22, connector: { token: TOKEN22 } });
+    try {
+      // Un lot digital synchronisé en succès pour alimenter le volet digital.
+      const batch = await repo22.createBackendBatch({ offerId: '12-HEURES', quantity: 1 });
+      const claimed = await repo22.claimSyncOp('w-imp22', new Date());
+      expect(claimed).not.toBeNull();
+      await repo22.resolveSyncOp(claimed?.id ?? '', { kind: 'success', result: { applied: 'create_ticket' } }, new Date());
+
+      const res = await app22.inject({ method: 'GET', url: '/connector/inventory/expected', headers: { authorization: `Bearer ${TOKEN22}` } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as Record<string, unknown>;
+      const hashes = body['legacy_code_hashes'] as string[];
+      expect(hashes).toHaveLength(660); // stock Mikmon 0010, empreintes seulement
+      const vouchers = body['digital_vouchers'] as Array<Record<string, unknown>>;
+      expect(vouchers.some((v) => v['name'] === batch.specs[0]?.routerName)).toBe(true);
+      expect(JSON.stringify(body)).not.toContain(batch.specs[0]?.clientCode ?? '____'); // clair absent
+      void batch;
+    } finally {
+      await app22.close();
+    }
+  });
+
+  it('E2E read-only : lectures fixtures vs attendu réel => MISMATCH tracé + alerte WARNING', async () => {
+    const app22 = await buildApp({ repo: repo22, connector: { token: TOKEN22 } });
+    try {
+      const expectedRes = await app22.inject({ method: 'GET', url: '/connector/inventory/expected', headers: { authorization: `Bearer ${TOKEN22}` } });
+      const rawExpected = expectedRes.json() as Record<string, unknown>;
+      const expected: PlatformExpected = {
+        digitalVouchers: (rawExpected['digital_vouchers'] as Array<Record<string, unknown>>).map((v) => ({
+          name: String(v['name']), profile: String(v['profile']), comment: String(v['comment']),
+        })),
+        legacyCodeHashes: (rawExpected['legacy_code_hashes'] as string[]).slice(0, 0), // E2E : seul le volet digital compte ici
+      };
+      const observed = new ReadOnlyConnectorV0({
+        usersText: HOTSPOT_USERS_TABULAR_FIXTURE,
+        activeText: HOTSPOT_ACTIVE_FIXTURE,
+        journalText: MIKHMON_JOURNAL_FIXTURE,
+      }).collect();
+      const report = reconcileReadOnly(expected, observed);
+      // Users fixtures synthétiques inconnus de la vraie base => ticket_inconnu.
+      expect(report.status).toBe('MISMATCH');
+      expect(report.violations.join(',')).toContain('ticket_inconnu');
+
+      const post = await app22.inject({
+        method: 'POST', url: '/connector/inventory/report',
+        headers: { authorization: `Bearer ${TOKEN22}` },
+        payload: {
+          router_total_seen: report.routerTotalSeen,
+          status: report.status,
+          violations: report.violations,
+          anomalies: report.anomalies,
+          by_profile: report.byProfile,
+          admin_free_seen: report.adminFreeSeen,
+          journal_sales: report.journalSales,
+        },
+      });
+      expect(post.statusCode).toBe(201);
+      const runId = (post.json() as Record<string, unknown>)['run_id'] as string;
+      const run = await pool22.query(`SELECT status, router_total_seen, diff FROM public.reconciliation_runs WHERE id = $1`, [runId]);
+      expect(run.rows[0]?.['status']).toBe('MISMATCH');
+      expect(Number(run.rows[0]?.['router_total_seen'])).toBe(5);
+      expect(run.rows[0]?.['diff']).toMatchObject({ mode: 'readonly_v0' });
+      const alerts = await pool22.query(`SELECT rule, severity FROM public.alerts WHERE payload->>'run_id' = $1`, [runId]);
+      expect(alerts.rows[0]).toMatchObject({ rule: 'router_readonly_mismatch', severity: 'WARNING' });
+
+      // Volet cohérent : attendu digital vide + observé sans legacy => rapport OK sans alerte.
+      const okReport = reconcileReadOnly({ digitalVouchers: [], legacyCodeHashes: [] }, {
+        users: [{ name: 'admin-free-1', profile: 'Admin-free', comment: null, limitUptime: null, disabled: false }],
+        active: [],
+        journal: [],
+      });
+      expect(okReport.status).toBe('OK');
+      const okPost = await app22.inject({
+        method: 'POST', url: '/connector/inventory/report',
+        headers: { authorization: `Bearer ${TOKEN22}` },
+        payload: {
+          router_total_seen: okReport.routerTotalSeen,
+          status: okReport.status,
+          violations: okReport.violations,
+          anomalies: okReport.anomalies,
+          by_profile: okReport.byProfile,
+          admin_free_seen: okReport.adminFreeSeen,
+          journal_sales: okReport.journalSales,
+        },
+      });
+      expect(okPost.statusCode).toBe(201);
+      const okAlerts = await pool22.query(`SELECT count(*)::int AS n FROM public.alerts WHERE payload->>'run_id' = $1`, [(okPost.json() as Record<string, unknown>)['run_id']]);
+      expect(Number(okAlerts.rows[0]?.['n'])).toBe(0);
+    } finally {
+      await app22.close();
     }
   });
 });

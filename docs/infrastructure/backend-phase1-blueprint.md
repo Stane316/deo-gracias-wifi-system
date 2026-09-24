@@ -261,6 +261,35 @@ aucun secret dans les logs (gitleaks déjà en CI).
 > `WORKERS=off`, stoppé proprement au hook `onClose`. Aucune migration. Tests :
 > `workers.test.ts` (11 unitaires) + bloc intégration IMP-20 (5) sur Postgres réel.
 
+> **LIVRAISON IMP-22 (24/09/2026)** : Connector v0 STRICTEMENT READ-ONLY (contrat §4.5) —
+> `@dg/connector` : parsers `/ip hotspot active` (sessions live, comment `;;;` = `vc-…` ou
+> échéance) et journal Mikhmon (`/system script` comment=mikhmon, `-|-`, deux formats de date
+> §4.3) ; `reconcileReadOnly` avec les 5 détections §4.4 (comment vide, session vc active,
+> ticket payé absent, ticket inconnu via sha256(username)=code_hash, uptime incohérent ±60 s) ;
+> `ReadOnlyConnectorV0` sans aucune méthode d'écriture (vérifié par test). Routes backend
+> `GET /connector/inventory/expected` (vouchers digitaux synchronisés + 660 empreintes legacy,
+> jamais de clair — D13) et `POST /connector/inventory/report` (run `reconciliation_runs` avec
+> `router_total_seen`, alerte WARNING `router_readonly_mismatch` si MISMATCH, INC-03).
+> Admin-free compté à part, gel IMP-35 (D13). E2E réel : attendu base réelle vs fixtures lues
+> => rapport tracé. Aucune migration, aucune écriture routeur. Tests : connector +11, backend
+> +4 (2 unitaires, 2 intégration E2E).
+
+> **LIVRAISON IMP-21 (24/09/2026)** : contrat Connector (blueprint §5, D12) — routes
+> `POST /connector/sync/claim` (claim atomique `SKIP LOCKED` : PENDING ou RETRY échue =>
+> PROCESSING + verrou + tentative ; 204 si vide) et `POST /connector/sync/:id/result`
+> (succès => SUCCESS ; échec => RETRY backoff 1/5/15 min ou BLOCKED après 3 tentatives +
+> alerte WARNING `sync_blocked`), auth par token long-lived `CONNECTOR_TOKEN` (sha256 +
+> timing-safe ; absent => 503). Job `sync-requeue` (60 s) : PROCESSING bloqués > 10 min =>
+> RETRY immédiat (FAILED->RETRY, attempts intact). Purge INC-04 : après succès d'un
+> `create_ticket`, `payload - 'password'` (le clair ne survit pas à la synchro, engagement
+> IMP-18). Paquet `@dg/connector` livré : `parseHotspotUsers` (sorties `/ip hotspot user`
+> RouterOS 6.49 — formats tabulaire et detail, contrat Mikmon §4), `DryRunConnector`
+> (routeur simulé en mémoire avec validations contrat §3/§5 et injection d'échecs),
+> `consumeOnce`/`drainQueue`/`HttpSyncTransport` ; fixtures synthétiques documentées (les
+> captures réelles sont masquées). AUCUNE écriture routeur réelle avant W2 (contrat §4.5).
+> E2E réel : lot digital IMP-18 consommé de bout en bout par le dry-run via les routes.
+> Aucune migration. Tests : connector 18, backend unitaires +12, bloc intégration IMP-21 (5).
+
 ## 6. Workers / jobs
 
 | Job | Déclencheur | Rôle |

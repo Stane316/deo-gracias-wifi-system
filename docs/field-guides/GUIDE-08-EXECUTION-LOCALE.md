@@ -72,7 +72,39 @@ AUTH_DEV_MODE=1
 (`AUTH_DEV_MODE=1` active le mode développement de l'OTP client : le code à 6 chiffres
 est renvoyé dans la réponse — pratique pour tester sans SMS. Ne jamais l'activer sur un
 déploiement réel. `SUPABASE_URL`/`SUPABASE_ANON_KEY` ne sont nécessaires que pour
-l'auth admin/jetons Supabase ; laissez-les vides en local pour l'instant.)
+l'auth admin/jetons Supabase ; laissez-les vides en local pour l'instant.
+`CONNECTOR_TOKEN` (IMP-21, optionnel) : token d'auth du Connector ; vide => les routes
+`/connector/sync/*` répondent 503 « non configuré » — voir §4bis ci-dessous.)
+
+## 4bis. Tester la file du routeur sans routeur : dry-run Connector (IMP-21)
+
+Le contrat Connector (blueprint §5) est testable localement SANS MikroTik : un
+routeur simulé en mémoire (`DryRunConnector`) consomme la file `mikrotik_sync`
+via les vraies routes HTTP.
+
+```bash
+# Terminal 1 — serveur avec token Connector :
+export DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias"
+export CONNECTOR_TOKEN="local-imp21-token"
+npm run dev -w @dg/backend
+
+# Terminal 2 — une opération dans la file, puis le dry-run la consomme :
+psql "$DATABASE_URL" -c "INSERT INTO public.mikrotik_sync (operation, payload) VALUES ('read_status','{}');"
+npx tsx -e "import { DryRunConnector, drainQueue, HttpSyncTransport, seedLegacyInventory } from '@dg/connector';
+const t = new HttpSyncTransport('http://127.0.0.1:3000', 'local-imp21-token');
+console.log(await drainQueue(t, new DryRunConnector(seedLegacyInventory()), 'dry-run-local'));"
+# => { processed: 1, success: 1, retry: 0 }
+psql "$DATABASE_URL" -c "SELECT state, result FROM public.mikrotik_sync ORDER BY created_at DESC LIMIT 1;"
+# => SUCCESS avec le détail {user_count, voucher_count, anomalies}
+```
+
+Les écritures routeur RÉELLES n'arrivent qu'en W2 (contrat Mikmon §4.5) ; les
+captures de fixtures sont synthétiques (les vraies sont masquées, EVIDENCE-IMP01).
+
+IMP-22 ajoute le volet **lecture** : `GET /connector/inventory/expected` puis
+`POST /connector/inventory/report` (traces dans `reconciliation_runs`, alerte
+WARNING si MISMATCH). Le Connector v0 (`ReadOnlyConnectorV0`) n'a AUCUNE méthode
+d'écriture vers le routeur.
 
 Les autres variables (FedaPay, Supabase cloud, connector) restent **vides** en local :
 inutiles avant IMP-14+ et interdites de saisie ici (règle INC-01).
@@ -176,11 +208,12 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **188/188** avec DATABASE_URL
-(backend 141 dont 34 d'intégration réelle — y compris concurrence d'allocation
+Attendu actuellement : typecheck 4/4 ; tests **237/237** avec DATABASE_URL
+(backend 162 dont 41 d'intégration réelle — y compris concurrence d'allocation
 de tickets, vérification du stock seedé 0010, statistiques admin, génération de
-lots digitaux, échéance d'activation et workers IMP-20 sur base réelle,
-shared 45, frontend 1, connector 1), 154 + 34 skippés sans.
+lots digitaux, échéance d'activation, workers IMP-20, contrat Connector IMP-21
+(dont E2E dry-run) et Connector v0 read-only IMP-22 sur base réelle,
+shared 45, frontend 1, connector 29), 196 + 41 skippés sans.
 C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo

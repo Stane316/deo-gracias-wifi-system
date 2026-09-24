@@ -92,3 +92,39 @@
 - **Reconciler** : simulation Phase 1 (cohérence interne plateforme, runs dans
   `reconciliation_runs`, alerte CRITICAL en cas de MISMATCH — garde-fou INC-03) ;
   le volet routeur réel est reporté à IMP-24 (pas de Connector avant W2).
+
+## D12 — Retry/backoff du Connector + purge du code clair (IMP-21, 24/09/2026) : APPLIQUÉ
+
+- **Tentatives** : 3 au total par opération de la file `mikrotik_sync`
+  (incrémentées au claim). Doc 06 §36 laissait le dimensionnement à
+  l'implémentation : 3 tentatives couvrent les pannes transitoires courtes
+  sans masquer une panne durable.
+- **Backoff** : 1 min / 5 min / 15 min entre tentatives (progression simple,
+  lisible en ops) ; au-delà de la 3e => `BLOCKED` + alerte WARNING
+  `sync_blocked` + audit `connector_sync_blocked` (intervention humaine,
+  principe doc 06 §36 : « intervention humaine pour les erreurs persistantes »).
+- **Verrous perdus** : PROCESSING depuis plus de 10 min => RETRY immédiat via
+  FAILED->RETRY (zéro migration : PROCESSING->PENDING n'existe pas en 0009),
+  sans incrémenter `attempts` (l'échec est au verrou, pas au Connector).
+- **Purge du code clair** : après SUCCÈS d'un `create_ticket`, le champ
+  `password` est retiré du payload en base (INC-04, engagement IMP-18). Le
+  clair n'existe plus ensuite nulle part hors coffre physique.
+- **Auth Connector** : token long-lived dédié (`CONNECTOR_TOKEN`), comparaison
+  par sha256 + timing-safe ; sans token configuré => 503 (les routes existent
+  mais se déclarent non configurées). L'IP allowlist reste future (blueprint).
+
+## D13 — Réconciliation read-only v0 : périmètre et exposition (IMP-22, 24/09/2026) : APPLIQUÉ
+
+- **Exposition `legacy_code_hashes`** au Connector authentifié : les empreintes
+  sha256 ne révèlent pas les codes (alphabet 32 caractères, 8 positions ≈ 10^12
+  — brute-force hors de portée) et sont indispensables à l'association
+  username=code (note 0010). Réservé au token Connector, jamais au frontend.
+- **Admin-free** : compté (`admin_free_seen`) mais PAS traité comme anomalie en
+  v0 — l'inventaire légitime sera figé en IMP-35 ; alerter avant produirait du
+  bruit systématique.
+- **Tolérance uptime** : 60 s sur `uptime + session-time-left = limit-uptime`
+  (arrondis d'affichage RouterOS observés en D4).
+- **Écritures plateforme uniquement** : le v0 écrit dans `reconciliation_runs`
+  et `alerts` (côté backend, sur rapport du Connector) ; AUCUNE méthode
+  d'écriture vers le routeur dans `ReadOnlyConnectorV0` (impératif contrat §4.5,
+  vérifié par test de surface).

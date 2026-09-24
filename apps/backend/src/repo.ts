@@ -161,6 +161,15 @@ export interface BackendRepo {
    * synchro (INC-04 ; engagement IMP-18 : le clair ne survit pas au succès). */
   purgeSyncPayloadSecret(id: string): Promise<void>;
 
+  /** IMP-22 — attendu plateforme pour la réconciliation read-only (contrat §4) :
+   * vouchers digitaux synchronisés (file SUCCESS, code clair purgé mais
+   * name/comment/profile conservés) + empreintes legacy (association par
+   * username = code, note 0010). Jamais de code clair ici. */
+  getConnectorExpectedInventory(): Promise<{
+    digitalVouchers: Array<{ name: string; profile: string; comment: string }>;
+    legacyCodeHashes: string[];
+  }>;
+
   /** IMP-18 — génération d'un lot de tickets digitaux (contrat Mikmon §3) :
    * batch + tickets hashés + ordres `create_ticket` en file `mikrotik_sync`,
    * le tout en UNE transaction. Retourne les codes clairs UNE seule fois. */
@@ -786,6 +795,31 @@ export class PgRepo implements BackendRepo {
       if (!mrow) return { state: 'illegal' as const, attempts: Number(frow['attempts']) };
       return { state: mrow['state'] as 'RETRY' | 'BLOCKED', attempts: Number(mrow['attempts']) };
     });
+  }
+
+  async getConnectorExpectedInventory(): Promise<{
+    digitalVouchers: Array<{ name: string; profile: string; comment: string }>;
+    legacyCodeHashes: string[];
+  }> {
+    const digital = await this.pool.query(
+      `SELECT DISTINCT payload->>'name' AS name, payload->>'profile' AS profile, payload->>'comment' AS comment
+       FROM public.mikrotik_sync
+       WHERE operation = 'create_ticket' AND state = 'SUCCESS'
+         AND payload ? 'name'`,
+    );
+    const legacy = await this.pool.query(
+      `SELECT t.code_hash FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE b.source = 'mikmon-manual'`,
+    );
+    return {
+      digitalVouchers: digital.rows.map((r) => ({
+        name: String(r['name']),
+        profile: String(r['profile']),
+        comment: String(r['comment']),
+      })),
+      legacyCodeHashes: legacy.rows.map((r) => String(r['code_hash'])),
+    };
   }
 
   async purgeSyncPayloadSecret(id: string): Promise<void> {

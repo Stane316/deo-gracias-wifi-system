@@ -27,6 +27,7 @@ import {
   authPhoneRequestSchema,
   authPhoneVerifySchema,
   connectorClaimBodySchema,
+  connectorInventoryReportSchema,
   connectorResultBodySchema,
   createBatchBodySchema,
   createOrderBodySchema,
@@ -904,6 +905,53 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       attempts: outcome.attempts,
       ...(nextRetryAt ? { next_retry_at: nextRetryAt.toISOString() } : {}),
     });
+  });
+
+  // IMP-22 — inventaire attendu plateforme (contrat §4) : vouchers digitaux
+  // synchronisés + empreintes legacy (jamais de code clair, D13).
+  app.get('/connector/inventory/expected', async (req, reply) => {
+    if (!(await connectorAuthOk(req, reply))) return;
+    const expected = await repo.getConnectorExpectedInventory();
+    return reply.status(200).send({
+      digital_vouchers: expected.digitalVouchers,
+      legacy_code_hashes: expected.legacyCodeHashes,
+    });
+  });
+
+  // IMP-22 — rapport de lecture read-only : trace dans reconciliation_runs
+  // (router_total_seen rempli) + alerte WARNING si MISMATCH (garde-fou INC-03).
+  app.post('/connector/inventory/report', async (req, reply) => {
+    if (!(await connectorAuthOk(req, reply))) return;
+    const parsed = connectorInventoryReportSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Body invalide', parsed.error.issues.map((i) => i.message).join(' ; ')));
+    }
+    const body = parsed.data;
+    const expected = await repo.getConnectorExpectedInventory();
+    const runId = await repo.insertReconciliationRun({
+      routerTotalExpected: expected.digitalVouchers.length + expected.legacyCodeHashes.length,
+      routerTotalSeen: body.router_total_seen,
+      diff: {
+        mode: 'readonly_v0',
+        status_source: 'connector',
+        violations: body.violations,
+        anomalies: body.anomalies,
+        by_profile: body.by_profile,
+        admin_free_seen: body.admin_free_seen,
+        journal_sales: body.journal_sales,
+      },
+      status: body.status,
+    });
+    if (body.status === 'MISMATCH') {
+      await repo.raiseAlert({
+        rule: 'router_readonly_mismatch',
+        severity: 'WARNING',
+        payload: { run_id: runId, violations: body.violations, anomalies: body.anomalies.length },
+      });
+    }
+    await repo.logAudit({ actor: 'connector', action: 'connector_inventory_report', entity: 'reconciliation_runs', entityId: runId });
+    return reply.status(201).send({ run_id: runId, status: body.status });
   });
 
   // IMP-20 — workers in-process (blueprint §6, D11) : order-expiry,

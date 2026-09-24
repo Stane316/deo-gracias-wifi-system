@@ -73,6 +73,30 @@ export const connectorResultBodySchema = z
     message: 'en succès, le champ error doit être absent',
   });
 
+/** IMP-22 — rapport de lecture read-only posté par le Connector v0 : alimente
+ * `reconciliation_runs` (routeur vu, §4) ; jamais de code clair, jamais
+ * d'écriture routeur. */
+export const connectorInventoryReportSchema = z
+  .object({
+    router_total_seen: z.number().int().min(0),
+    status: z.enum(['OK', 'MISMATCH']),
+    violations: z.array(z.string().max(200)).max(50),
+    anomalies: z
+      .array(
+        z
+          .object({
+            kind: z.enum(['comment_vide', 'session_vc_active', 'ticket_paye_absent', 'ticket_inconnu', 'uptime_incoherent']),
+            detail: z.string().max(500),
+          })
+          .strict(),
+      )
+      .max(200),
+    by_profile: z.record(z.number().int().min(0)),
+    admin_free_seen: z.number().int().min(0),
+    journal_sales: z.number().int().min(0),
+  })
+  .strict();
+
 /** Idempotency-Key (doc 06 §21, blueprint §5) : obligatoire sur POST /orders. */
 export const idempotencyKeySchema = z.string().trim().min(8).max(200);
 
