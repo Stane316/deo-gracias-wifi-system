@@ -43,6 +43,7 @@ import { buildPlanSnapshot, type BackendRepo, type OrderRecord, type SyncOpRecor
 import { allocateAndDeliver } from './tickets.js';
 import { buildDashboardPayload, startOfBusinessDay } from './admin.js';
 import { startWorkers, type StartWorkersOptions } from './workers.js';
+import { explainPgConnectionError } from './pg-diag.js';
 
 export interface BuildAppOptions {
   repo: BackendRepo;
@@ -160,11 +161,13 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
             `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 11 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
       }
       return { status: 'ready', schema_migrated: true };
-    } catch {
+    } catch (err) {
+      // IMP-25.5 — panne de connexion traduite en consigne actionnable.
       return reply
         .status(503)
         .type('application/problem+json')
-        .send(problem(503, 'Base indisponible', 'La base de données ne répond pas.'));
+        .send(problem(503, 'Base indisponible',
+          explainPgConnectionError(err) ?? 'La base de données ne répond pas.'));
     }
   });
 
@@ -173,15 +176,25 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   app.get('/offers', async (_req, reply) => {
     // IMP-25.3 — message actionnable au lieu d'une erreur SQL brute si la base
     // pointée par DATABASE_URL n'a pas reçu les migrations.
-    const health = await repo.getSchemaHealth();
-    if (health.missing.length > 0) {
+    let plans;
+    try {
+      const health = await repo.getSchemaHealth();
+      if (health.missing.length > 0) {
+        return reply
+          .status(503)
+          .type('application/problem+json')
+          .send(problem(503, 'Base non migrée',
+            `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0011 sur CETTE base, ou corrigez DATABASE_URL.`));
+      }
+      plans = await repo.listActivePlans();
+    } catch (err) {
+      // IMP-25.5 — jamais d'erreur brute (ENOTFOUND etc.) exposée au portail.
       return reply
         .status(503)
         .type('application/problem+json')
-        .send(problem(503, 'Base non migrée',
-          `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0011 sur CETTE base, ou corrigez DATABASE_URL.`));
+        .send(problem(503, 'Base injoignable',
+          explainPgConnectionError(err) ?? 'La base de données ne répond pas (GUIDE-10 §11).'));
     }
-    const plans = await repo.listActivePlans();
     return plans.map((p) => ({
       id: p.offerId,
       priceFcfa: p.priceFcfa,

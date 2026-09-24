@@ -7,6 +7,7 @@ import { config as loadDotenv } from 'dotenv';
 import { Pool } from 'pg';
 import { buildApp } from './app.js';
 import { explainDatabaseUrlProblem } from './env-check.js';
+import { explainPgConnectionError } from './pg-diag.js';
 import { DevStaticAuthVerifier, SupabaseAuthVerifier } from './auth.js';
 import { DevPaymentProvider } from './dev-payment.js';
 import { FedaPayClient } from './fedapay.js';
@@ -94,7 +95,7 @@ const port = Number(process.env['PORT'] ?? 3000);
       app.log.info({ tables: health.present }, 'Schéma complet détecté');
     }
   } catch (err) {
-    app.log.warn({ err }, 'Diagnostic schéma impossible (base injoignable ?)');
+    app.log.warn({ err }, `Diagnostic schéma impossible : ${explainPgConnectionError(err) ?? 'base injoignable (GUIDE-10 §11)'}`);
   }
 }
 

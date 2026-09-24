@@ -128,6 +128,16 @@ de passe s'affiche une fois : copiez-le dans votre `.env`, jamais au repo).
 (montre le début seulement) ou tester la connexion :
 `psql "$DATABASE_URL" -c "select 1"`.
 
+**Projets Supabase récents — pooler Supavisor (erreur observée en réel :
+`getaddrinfo ENOTFOUND db.<ref>.supabase.co`)** : l'hôte « Direct connection »
+`db.<ref>.supabase.co` n'existe plus en DNS pour les projets créés sur la
+nouvelle plateforme. Dans **Settings → Database → Connection string → URI**,
+copiez l'URI du **pooler** (hôte du type `aws-0-….pooler.supabase.com`) :
+- mode **Session** (port **5432**) : recommandé pour ce backend ;
+- mode **Transaction** (port **6543**) : fonctionne aussi.
+Le backend traduit désormais chaque panne de connexion (DNS, refus, timeout,
+mot de passe, TLS) en message actionnable au lieu d'une erreur brute (IMP-25.5).
+
 ---
 
 ## Étape 4 — Appliquer les 11 migrations (au choix)

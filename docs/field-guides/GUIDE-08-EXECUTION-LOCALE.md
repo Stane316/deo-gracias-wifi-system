@@ -207,14 +207,14 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **272/272** avec DATABASE_URL
+Attendu actuellement : typecheck 4/4 ; tests **279/279** avec DATABASE_URL
 (backend 169 — dont 43 d'intégration réelle : concurrence d'allocation,
 stock seedé 0010, statistiques admin, lots digitaux, échéance d'activation,
 workers IMP-20, contrat Connector IMP-21 (dont E2E dry-run), Connector v0
 read-only IMP-22, réconciliation v0 IMP-24 bout en bout, et 5 tests des modes
 démo IMP-25 ; le client RouterOS API IMP-23 est testé contre un stub
 protocolaire sans routeur ; shared 45, frontend 5, connector 46),
-227 + 45 skippés sans.
+234 + 45 skippés sans.
 C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo
