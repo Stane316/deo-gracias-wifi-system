@@ -19,7 +19,7 @@ export function App() {
     <div className="page">
       <header className="topbar">
         <a className="brand" href="#/">
-          <span className="brand-dot" aria-hidden="true" />
+          <img className="brand-logo" src="/logo.png" alt="Logo Déo Gracias Wi-Fi" />
           Déo Gracias Wi-Fi
         </a>
         <nav className="nav">
@@ -30,9 +30,7 @@ export function App() {
       <main className="content">
         {route === 'admin' ? <Admin /> : <Accueil />}
       </main>
-      <footer className="footer">
-        Démo locale IMP-25 — backend réel (Postgres), paiements et auth admin en mode DEV.
-      </footer>
+      <footer className="footer">Merci pour votre confiance — Déo Gracias Wi-Fi</footer>
     </div>
   );
 }

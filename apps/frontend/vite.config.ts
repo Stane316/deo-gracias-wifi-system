@@ -7,8 +7,9 @@ import { defineConfig } from 'vite';
  * host: true => écoute 0.0.0.0 (préversions distantes) ; allowedHosts ouvert
  * pour les hôtes de préversion.
  */
-// Port du backend configurable (BACKEND_PORT) si PORT du backend est changé.
-const backendPort = Number(process.env['BACKEND_PORT'] ?? 3001);
+// Port du backend configurable (BACKEND_PORT) ; défaut = port par défaut du
+// backend (server.ts : PORT ?? 3000).
+const backendPort = Number(process.env['BACKEND_PORT'] ?? 3000);
 
 export default defineConfig({
   plugins: [react()],

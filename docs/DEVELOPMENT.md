@@ -360,6 +360,12 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   + 4 frontend (formatage). Démo validée de bout en bout sur Postgres réel
   (OTP→commande→paiement DEV→approbation→DELIVERED→ticket ; runs OK/MISMATCH
   + alerte dans la vue admin).
+- IMP-25.2 : continuité de direction artistique avec le portail public legacy
+  (fond clair #f3f4f5, cartes blanches, bleu #20a8d8, jaune #ffc107, vert
+  #4dbd74, cyan #63c2de, typo système, logo « WIFI ZONE » régénéré proprement
+  dans `apps/frontend/public/logo.png`, pied « Merci pour votre confiance »).
+  Port par défaut aligné : backend 3000, proxy Vite 3000 (`BACKEND_PORT`).
+  Guide d'intégration environnement complet : GUIDE-10.
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

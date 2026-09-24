@@ -128,7 +128,7 @@ Entrez le `DEV_ADMIN_TOKEN` :
 Pour alimenter la vue depuis le « routeur » (dry-run) :
 
 ```bash
-curl -X POST http://localhost:3001/connector/inventory/report \
+curl -X POST http://localhost:3000/connector/inventory/report \
   -H "Authorization: Bearer $CONNECTOR_TOKEN" -H 'content-type: application/json' \
   -d '{"router_total_seen":2,"status":"MISMATCH","violations":["ticket_paye_absent:1"],
        "anomalies":[{"kind":"ticket_paye_absent","detail":"name=dgxxxxxx comment=vc-001-09.24.26-"}],
@@ -139,9 +139,9 @@ curl -X POST http://localhost:3001/connector/inventory/report \
 
 | Vérification | Commande | Attendu |
 |---|---|---|
-| API prête | `curl localhost:3001/readyz` | `{"status":"ready"}` |
-| Offres | `curl localhost:3001/offers` | 6 offres Grille A |
-| Jeton admin | `curl -H "Authorization: Bearer $DEV_ADMIN_TOKEN" localhost:3001/admin/me` | `role: ADMIN` |
+| API prête | `curl localhost:3000/readyz` | `{"status":"ready"}` |
+| Offres | `curl localhost:3000/offers` | 6 offres Grille A |
+| Jeton admin | `curl -H "Authorization: Bearer $DEV_ADMIN_TOKEN" localhost:3000/admin/me` | `role: ADMIN` |
 | Tests complets | `npm test` (avec `DATABASE_URL`) | 265/265 |
 
 ## 7. Limites connues de la démo
