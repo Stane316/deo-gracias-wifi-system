@@ -23,13 +23,25 @@ function asPgLike(err: unknown): PgLikeError | null {
   return null;
 }
 
-/** Retourne un message actionnable, ou null si l'erreur n'est pas une panne de connexion reconnue. */
-export function explainPgConnectionError(err: unknown): string | null {
+/** Extrait l'hôte d'une URL postgres (sans identifiants). */
+function hostOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Retourne un message actionnable, ou null si l'erreur n'est pas une panne de connexion reconnue.
+ *  `databaseUrl` (optionnel) permet de nommer l'hôte visé même quand node ne
+ *  peuple pas `hostname` (ex. ENETUNREACH après résolution IPv6). */
+export function explainPgConnectionError(err: unknown, databaseUrl?: string): string | null {
   const e = asPgLike(err);
   if (!e) return null;
   const code = typeof e.code === 'string' ? e.code : '';
   const msg = typeof e.message === 'string' ? e.message : '';
-  const host = typeof e.hostname === 'string' && e.hostname.length > 0 ? e.hostname : null;
+  const host = (typeof e.hostname === 'string' && e.hostname.length > 0 ? e.hostname : null) ?? hostOf(databaseUrl);
   const hostLabel = host ?? 'de la base';
 
   // 1) DNS / réseau : hôte introuvable (cas db.<ref>.supabase.co sur projets
@@ -43,11 +55,13 @@ export function explainPgConnectionError(err: unknown): string | null {
   ) {
     const supabaseHint =
       host !== null && host.endsWith('.supabase.co')
-        ? ' Pour Supabase : l’hôte « db.<ref>.supabase.co » (Direct connection) n’existe en DNS ' +
-          'que pour les anciens projets ; les projets récents passent par le pooler Supavisor. ' +
-          'Copiez l’URI complète dans Settings → Database → Connection string → onglet URI ' +
-          '(mode Session, port 5432) — hôte du type aws-0-….pooler.supabase.com — et collez-la ' +
-          'dans DATABASE_URL (GUIDE-10 §3).'
+        ? ' Pour Supabase : cet hôte « Direct connection » est déployé IPv6-SEUL sur les projets ' +
+          'récents (vérifié en DNS public : aucun enregistrement IPv4) ; sans IPv6 sur votre ' +
+          'réseau, la résolution/connexion échoue. Solution : l’URI du pooler Supavisor, qui a ' +
+          'de l’IPv4 — Supabase → Settings → Database → section « Connection pooling » (PAS ' +
+          'l’onglet URI) → copiez l’URI Session (5432) ou Transaction (6543), forme ' +
+          'postgresql://postgres.<ref>:MOT_DE_PASSE@aws-0-<region>.pooler.supabase.com:…/postgres, ' +
+          'et collez-la dans DATABASE_URL (GUIDE-10 §3).'
         : ' Vérifiez le nom d’hôte de DATABASE_URL (GUIDE-10 §3).';
     const cause = code === 'ENOTFOUND' || code === 'EAI_AGAIN' || msg.includes('getaddrinfo') ? 'DNS' : 'réseau';
     return `Hôte Postgres injoignable (${cause}) : ${hostLabel}.${supabaseHint}`;

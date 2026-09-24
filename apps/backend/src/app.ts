@@ -50,6 +50,8 @@ export interface BuildAppOptions {
   logger?: boolean;
   /** Rate-limit par IP (règle transverse blueprint §5). Défaut : 100 req/min. */
   rateLimit?: { max: number; timeWindow?: string };
+  /** IMP-25.6 — URL visée, pour des messages de panne qui nomment l'hôte exact. */
+  databaseUrl?: string | undefined;
   /** IMP-13 — auth clients (phone OTP) + admin (Supabase Auth + rôle). */
   auth?: {
     /** Vérificateur de JWT Supabase ; absent => routes admin 503 (non configuré). */
@@ -167,7 +169,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         .status(503)
         .type('application/problem+json')
         .send(problem(503, 'Base indisponible',
-          explainPgConnectionError(err) ?? 'La base de données ne répond pas.'));
+          explainPgConnectionError(err, opts.databaseUrl) ?? 'La base de données ne répond pas.'));
     }
   });
 
@@ -193,7 +195,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         .status(503)
         .type('application/problem+json')
         .send(problem(503, 'Base injoignable',
-          explainPgConnectionError(err) ?? 'La base de données ne répond pas (GUIDE-10 §11).'));
+          explainPgConnectionError(err, opts.databaseUrl) ?? 'La base de données ne répond pas (GUIDE-10 §11).'));
     }
     return plans.map((p) => ({
       id: p.offerId,

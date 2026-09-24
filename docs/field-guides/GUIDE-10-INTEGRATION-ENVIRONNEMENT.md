@@ -128,15 +128,28 @@ de passe s'affiche une fois : copiez-le dans votre `.env`, jamais au repo).
 (montre le début seulement) ou tester la connexion :
 `psql "$DATABASE_URL" -c "select 1"`.
 
-**Projets Supabase récents — pooler Supavisor (erreur observée en réel :
-`getaddrinfo ENOTFOUND db.<ref>.supabase.co`)** : l'hôte « Direct connection »
-`db.<ref>.supabase.co` n'existe plus en DNS pour les projets créés sur la
-nouvelle plateforme. Dans **Settings → Database → Connection string → URI**,
-copiez l'URI du **pooler** (hôte du type `aws-0-….pooler.supabase.com`) :
+**Projets Supabase récents — hôte Direct IPv6-seul, pooler Supavisor requis
+(cause prouvée en réel le 25/09 par interrogation DNS publique 1.1.1.1/8.8.8.8 :
+`db.<ref>.supabase.co` ne publie AUCUN enregistrement IPv4, seulement un AAAA
+IPv6 ; le pooler `aws-0-<region>.pooler.supabase.com` publie bien de l'IPv4)**.
+
+Conséquence : sans IPv6 sur votre réseau (cas général à domicile), Windows/Node
+échoue en `ENOTFOUND`/`ENETUNREACH` sur l'URI de l'onglet **URI** (Direct).
+L'onglet URI du Dashboard montre bien `db.<ref>…` : c'est normal, mais ce n'est
+**pas** la bonne URL pour vous.
+
+**La bonne URL** : Settings → Database → section **« Connection pooling »**
+(Supavisor) → copier l'URI :
 - mode **Session** (port **5432**) : recommandé pour ce backend ;
 - mode **Transaction** (port **6543**) : fonctionne aussi.
-Le backend traduit désormais chaque panne de connexion (DNS, refus, timeout,
-mot de passe, TLS) en message actionnable au lieu d'une erreur brute (IMP-25.5).
+Forme : `postgresql://postgres.<ref>:MOT_DE_PASSE@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+Collez-la dans `DATABASE_URL`, redémarrez le backend.
+
+Alternatives si vous tenez au Direct : activer l'IPv6 de bout en bout, ou
+l'add-on IPv4 Supabase (payant) — non recommandé.
+
+Le backend traduit chaque panne de connexion (DNS/IPv6, refus, timeout,
+mot de passe, TLS) en message actionnable au lieu d'une erreur brute (IMP-25.5/25.6).
 
 ---
 

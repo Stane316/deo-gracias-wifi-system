@@ -2,14 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { explainPgConnectionError } from './pg-diag.js';
 
 describe('IMP-25.5 — traduction des erreurs de connexion Postgres', () => {
-  it('ENOTFOUND sur hôte supabase.co => piste pooler Supavisor', () => {
+  it('ENOTFOUND sur hôte supabase.co => explication IPv6-seul + onglet Connection pooling', () => {
     const err = {
       code: 'ENOTFOUND',
       hostname: 'db.otyogdttfxtaiixbthbb.supabase.co',
       message: 'getaddrinfo ENOTFOUND db.otyogdttfxtaiixbthbb.supabase.co',
     };
     const msg = explainPgConnectionError(err);
-    expect(msg).toContain('pooler');
+    expect(msg).toContain('IPv6');
+    expect(msg).toContain('Connection pooling');
+    expect(msg).toContain('pooler.supabase.com');
     expect(msg).toContain('GUIDE-10');
   });
   it('ENOTFOUND hôte quelconque => vérifier le nom d’hôte', () => {
@@ -19,6 +21,13 @@ describe('IMP-25.5 — traduction des erreurs de connexion Postgres', () => {
   it('ENETUNREACH (IPv6 sans route) => même branche actionnable', () => {
     expect(explainPgConnectionError({ code: 'ENETUNREACH', message: 'connect ENETUNREACH 2a05::5432' }))
       .toContain('injoignable');
+  });
+  it('ENETUNREACH sans hostname + DATABASE_URL fournie => piste pooler quand même', () => {
+    const msg = explainPgConnectionError(
+      { code: 'ENETUNREACH', message: 'connect ENETUNREACH 2a05::5432' },
+      'postgres://postgres.ref:x@db.ref.supabase.co:5432/postgres',
+    );
+    expect(msg).toContain('Connection pooling');
   });
   it('ECONNREFUSED => port / Postgres local', () => {
     expect(explainPgConnectionError({ code: 'ECONNREFUSED', hostname: '127.0.0.1', port: 5432 }))

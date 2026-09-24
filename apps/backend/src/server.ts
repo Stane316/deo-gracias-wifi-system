@@ -62,6 +62,7 @@ const provider = fedapaySecretKey
 
 const app = await buildApp({
   repo,
+  databaseUrl,
   logger: true,
   auth: { devMode, ...(verifier ? { verifier } : {}) },
   payment: {
