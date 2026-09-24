@@ -231,13 +231,13 @@ C'est exactement ce que joue la CI GitHub à chaque push.
 
 | Symptôme | Cause probable | Solution |
 |---|---|---|
-| `DATABASE_URL requise` | variable non exportée dans CE terminal | `export DATABASE_URL=...` (Git Bash) ou `$env:DATABASE_URL=...` (PowerShell) ; chaque nouveau terminal repart à zéro |
+| `DATABASE_URL manquante` | pas de `.env` à la racine (ou vide) | depuis IMP-25.1 le backend lit `.env` (racine ou `apps/backend`) : copier `.env.example` → `.env` et remplir ; sinon `export`/`$env:` dans le terminal |
 | `psql: command not found` | binaires Postgres hors PATH | `export PATH="$PATH:/c/Program Files/PostgreSQL/17/bin"` ou réinstaller en cochant « Command Line Tools » |
 | `ECONNREFUSED 127.0.0.1:5432` | service Postgres arrêté | services Windows → démarrer `postgresql-x64-17` ; ou `pg_ctl` |
 | `port 3000 already in use` | ancien serveur encore lancé | fermer l'ancien terminal ; ou `PORT=3001 npm run dev -w @dg/backend` |
 | Erreurs VSCode `ts(2591)`/`ts(2339)` | node_modules désynchronisé du lockfile | `npm ci` + palette « TypeScript: Restart TS Server » (cf. DEVELOPMENT.md) |
 | Tests d'intégration « skipped » | `DATABASE_URL` absente au moment de `npm test` | normal sans base ; les exécuter : préfixer la commande (§6) |
-| `npm run dev` s'arrête immédiatement | `.env` vide et variable non exportée | vérifier §2/§4 ; le serveur exige DATABASE_URL |
+| `Cannot find package '@vitejs/plugin-react'` | `npm install` non relancé après récupération | `npm install` (ou `npm ci`) à la racine, puis relancer `npm run dev -w @dg/frontend` |
 | Échec après `git pull` | dépendances/migrations pas rejouées | `npm ci` (lockfile) + `bash tools/db-migrate.sh up` |
 
 ## 9. Rappels de sécurité (non négociables)

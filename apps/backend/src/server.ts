@@ -3,12 +3,18 @@
  * ou `npm run dev -w @dg/backend` (watch). Nécessite DATABASE_URL et une base
  * migrée (tools/db-migrate.sh up). Aucun secret dans les logs (blueprint §7).
  */
+import { config as loadDotenv } from 'dotenv';
 import { Pool } from 'pg';
 import { buildApp } from './app.js';
 import { DevStaticAuthVerifier, SupabaseAuthVerifier } from './auth.js';
 import { DevPaymentProvider } from './dev-payment.js';
 import { FedaPayClient } from './fedapay.js';
 import { PgRepo } from './repo.js';
+
+// FIX IMP-25.1 — le backend lit désormais `.env` (dossier backend OU racine du
+// monorepo) ; les variables d'environnement réelles gardent priorité (dotenv
+// n'écrase jamais une variable déjà définie). GUIDE-09 §2 documente chaque variable.
+for (const envPath of ['.env', '../../.env']) loadDotenv({ path: envPath });
 
 const databaseUrl = process.env['DATABASE_URL'];
 if (!databaseUrl) {

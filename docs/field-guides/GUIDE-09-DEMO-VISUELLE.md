@@ -11,32 +11,80 @@
 
 ---
 
-## 1. Prérequis
+## 1. Prérequis & mise à jour des dépendances
 
 | Prérequis | Vérification |
 |---|---|
 | Node.js ≥ 20 | `node --version` |
-| PostgreSQL local migré | `bash tools/db-migrate.sh up` (11 migrations) |
-| Dépendances installées | `npm install` à la racine |
+| Dépendances à jour | `npm install` à la racine |
+| Une base Postgres migrée | locale (§2-A) **ou** projet Supabase (§2-B) |
 
-## 2. Variables d'environnement (mode démo)
+> **Après CHAQUE récupération de fichiers** : exécutez `npm install` à la racine
+> AVANT toute commande `dev`/`start`. Les nouvelles dépendances (React, Vite,
+> dotenv…) sont déclarées dans les `package.json`/`package-lock.json` du repo ;
+> sans `npm install`, Vite échoue avec `Cannot find package '@vitejs/plugin-react'`.
 
-Créez/copiez `.env` à la racine (jamais dans Git) :
+## 2. Le fichier `.env` — toutes les variables, où les trouver
+
+Le backend lit `.env` **à la racine du monorepo** (ou dans `apps/backend`) ;
+une variable déjà présente dans l'environnement garde priorité. Le fichier est
+exclu de Git (`.gitignore`). Copiez `.env.example` vers `.env` puis remplissez.
+
+### 2-A. Configuration « 100 % locale » (recommandée pour tester)
 
 ```env
-DATABASE_URL=postgres://postgres:VOTRE_MOT_DE_PASSE@127.0.0.1:5432/postgres
+DATABASE_URL=postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/postgres
 AUTH_DEV_MODE=1
 DEV_ADMIN_TOKEN=choisissez-un-jeton-long-aleatoire
 PAYMENT_DEV_MODE=1
 CONNECTOR_TOKEN=choisissez-un-autre-jeton
 ```
 
-| Variable | Rôle en démo | En production |
+Base locale : PostgreSQL installé selon GUIDE-08, puis `bash tools/db-migrate.sh up`
+(11 migrations + seed). `DATABASE_URL` = votre utilisateur/mot de passe local.
+
+### 2-B. Configuration « tout sur Supabase » (votre choix)
+
+Supabase **EST** votre base Postgres hébergée : le backend s'y connecte
+directement avec la chaîne de connexion — `DATABASE_URL` reste donc
+**indispensable**, c'est simplement l'URL Supabase au lieu de l'URL locale.
+
+| Variable | Où la trouver (GUI Supabase) | Rôle |
 |---|---|---|
-| `AUTH_DEV_MODE=1` | le code OTP client est affiché (pas de SMS) | absent (SMS ou OTP Supabase) |
-| `DEV_ADMIN_TOKEN` | connexion admin par jeton statique | absent — Supabase Auth (rôle ADMIN) |
-| `PAYMENT_DEV_MODE=1` | paiement simulé approuvable d'un clic | absent — FedaPay réel (webhook signé) |
-| `CONNECTOR_TOKEN` | routes `/connector` actives | idem (valeur forte) |
+| `DATABASE_URL` | Dashboard projet → **Settings (roue) → Database → Connection string → URI**, mode **Direct connection** (port 5432) ; remplacez `[YOUR-PASSWORD]` par le mot de passe du projet (Settings → Database → *Reset database password* si perdu) | connexion backend ↔ Postgres Supabase |
+| `SUPABASE_URL` | **Settings → API → Project URL** | vérification des JWT admin (facultatif en démo) |
+| `SUPABASE_ANON_KEY` | **Settings → API → anon public key** (clé publique par conception) | idem (facultatif en démo) |
+| `AUTH_DEV_MODE=1` | — (valeur fixe) | affiche le code OTP au lieu d'un SMS |
+| `DEV_ADMIN_TOKEN` | — (valeur libre longue) | connexion admin de la démo (ignoré si SUPABASE_URL est défini) |
+| `PAYMENT_DEV_MODE=1` | — (valeur fixe) | paiement simulé (ignoré si clé FedaPay définie) |
+| `CONNECTOR_TOKEN` | — (valeur libre longue) | active les routes `/connector` |
+| `FEDAPAY_SECRET_KEY`, `FEDAPAY_WEBHOOK_SECRET`, `FEDAPAY_ENVIRONMENT` | Dashboard FedaPay → paramètres API/webhooks (GUIDE-03) | paiements réels (absents en démo) |
+
+Migrations vers Supabase (une seule fois) :
+
+```bash
+DATABASE_URL='postgres://postgres:[VOTRE-PASSWORD]@db.<ref>.supabase.co:5432/postgres' bash tools/db-migrate.sh up
+```
+
+(ou `supabase db push` selon GUIDE-07). Après cela, la démo lit/écrit DANS
+votre projet Supabase : les données de test (téléphones `019725…`, commandes
+de démo) y seront visibles — nettoyez-les ou utilisez la config 2-A pour
+essayer sans toucher au cloud.
+
+### 2-C. Exemple `.env` complet « Supabase + démo »
+
+```env
+DATABASE_URL=postgres://postgres:VOTRE-PASSWORD@db.VOTRE-REF.supabase.co:5432/postgres
+SUPABASE_URL=https://VOTRE-REF.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOi...
+AUTH_DEV_MODE=1
+PAYMENT_DEV_MODE=1
+CONNECTOR_TOKEN=choisissez-un-jeton-long
+```
+
+> Avec `SUPABASE_URL` défini, l'admin se connecte par compte Supabase (rôle
+> ADMIN) ; retirez `SUPABASE_URL`/`SUPABASE_ANON_KEY` pour utiliser
+> `DEV_ADMIN_TOKEN` à la place.
 
 Garde-fous codés en dur : le jeton admin DEV n'est actif **que si Supabase
 n'est PAS configuré** ; le paiement DEV n'est actif **que si aucune clé
@@ -45,21 +93,13 @@ paiements au préfixe `DEV-`.
 
 ## 3. Lancer la démo
 
-Deux terminaux :
-
 ```bash
-# Terminal 1 — API (port 3001 par défaut ; PORT/HOST modifiables)
-npm run start -w @dg/backend
-
-# Terminal 2 — Interface (Vite, port 5173)
-npm run dev -w @dg/frontend
+npm install            # après chaque récupération de fichiers
+npm run start -w @dg/backend    # lit .env ; port 3000 par défaut (PORT=…)
+npm run dev -w @dg/frontend     # port 5173 ; BACKEND_PORT=… si PORT changé
 ```
 
 Ouvrez **http://localhost:5173**.
-
-> Variante production locale : `npm run build -w @dg/frontend` puis servir le
-> dossier `apps/frontend/dist` derrière n'importe quel reverse proxy qui relaie
-> `/api` vers le backend (le frontend n'appelle que des chemins relatifs).
 
 ## 4. Parcours client (onglet « Espace client »)
 

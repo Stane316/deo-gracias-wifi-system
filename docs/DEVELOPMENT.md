@@ -351,8 +351,11 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   (actif seulement sans clé FedaPay et avec PAYMENT_DEV_MODE=1 ; n'approuve
   que les paiements `DEV-…` ; réutilise le chemin réel
   confirmPayment → allocateAndDeliver).
+- Le backend lit désormais `.env` (dotenv, racine du monorepo ou dossier
+  backend ; les variables d'environnement réelles gardent priorité).
 - Production = mêmes routes, variables Supabase/FedaPay réelles : aucun
-  changement de code nécessaire.
+  changement de code nécessaire. DATABASE_URL peut pointer vers le Postgres
+  hébergé Supabase (Settings → Database → URI directe) : GUIDE-09 §2-B.
 - Tests : 5 backend (verifieur, E2E mémoire commande→livraison, garde-fous)
   + 4 frontend (formatage). Démo validée de bout en bout sur Postgres réel
   (OTP→commande→paiement DEV→approbation→DELIVERED→ticket ; runs OK/MISMATCH
