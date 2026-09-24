@@ -130,6 +130,8 @@ export interface BackendRepo {
   }): Promise<string>;
   /** IMP-20 — lève une alerte (règle, sévérité, payload). */
   raiseAlert(alert: { rule: string; severity: 'INFO' | 'WARNING' | 'CRITICAL'; payload: Record<string, unknown> }): Promise<string>;
+  /** IMP-25.3 — santé du schéma : tables attendues présentes/manquantes. */
+  getSchemaHealth(): Promise<{ present: number; missing: string[] }>;
   /** IMP-24 — historique des runs de réconciliation (vue admin). */
   listReconciliationRuns(limit?: number): Promise<Array<{
     id: string;
@@ -1039,6 +1041,26 @@ export class PgRepo implements BackendRepo {
       [run.routerTotalExpected, run.routerTotalSeen, JSON.stringify(run.diff), run.status],
     );
     return String(res.rows[0]?.['id']);
+  }
+
+  /** IMP-25.3 — vérifie la présence des tables attendues (diagnostic base non migrée). */
+  async getSchemaHealth(): Promise<{ present: number; missing: string[] }> {
+    const expected = [
+      'customers', 'plans', 'orders', 'payments', 'payment_events',
+      'ticket_batches', 'tickets', 'mikrotik_sync', 'access_sessions',
+      'reconciliation_runs', 'audit_logs', 'incidents', 'alerts', 'settings',
+      'state_transitions',
+    ];
+    const res = await this.pool.query(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = ANY($1)`,
+      [expected],
+    );
+    const presentSet = new Set(res.rows.map((r) => String(r['table_name'])));
+    return {
+      present: presentSet.size,
+      missing: expected.filter((t) => !presentSet.has(t)),
+    };
   }
 
   /** IMP-24 — Historique des runs de réconciliation (vue admin, plus récents d'abord). */

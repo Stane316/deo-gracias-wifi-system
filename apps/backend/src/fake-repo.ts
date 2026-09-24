@@ -319,6 +319,9 @@ export class FakeRepo implements BackendRepo {
     this.alertsRaised.push(alert);
     return randomUUID();
   }
+  async getSchemaHealth(): Promise<{ present: number; missing: string[] }> {
+    return { present: 15, missing: [] };
+  }
   async listReconciliationRuns(limit = 20): Promise<Array<{
     id: string; startedAt: string; finishedAt: string | null; routerTotalExpected: number | null;
     routerTotalSeen: number | null; status: 'RUNNING' | 'OK' | 'MISMATCH'; diff: Record<string, unknown> | null;

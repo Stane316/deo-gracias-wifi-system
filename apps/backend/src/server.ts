@@ -73,6 +73,27 @@ const app = await buildApp({
 const host = process.env['HOST'] ?? '0.0.0.0';
 const port = Number(process.env['PORT'] ?? 3000);
 
+// IMP-25.3 — diagnostic de démarrage : où suis-je branché ? (masqué, jamais de
+// secret) + état du schéma, pour repérer immédiatement une base non migrée ou
+// une mauvaise URL (cas « public.plans n'existe pas »).
+{
+  const masked = (databaseUrl ?? '').replace(/(:\/\/[^:@/]+:)[^@]+(@)/, '$1***$2');
+  app.log.info({ database: masked }, 'DATABASE_URL cible (mot de passe masqué)');
+  try {
+    const health = await repo.getSchemaHealth();
+    if (health.missing.length > 0) {
+      app.log.warn(
+        { missing: health.missing },
+        'BASE NON MIGRÉE : appliquez les 11 migrations sur cette base (GUIDE-10 §4) ou corrigez DATABASE_URL.',
+      );
+    } else {
+      app.log.info({ tables: health.present }, 'Schéma complet détecté');
+    }
+  } catch (err) {
+    app.log.warn({ err }, 'Diagnostic schéma impossible (base injoignable ?)');
+  }
+}
+
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     app.close().then(() => process.exit(0), () => process.exit(1));

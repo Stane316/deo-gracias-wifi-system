@@ -366,6 +366,9 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   dans `apps/frontend/public/logo.png`, pied « Merci pour votre confiance »).
   Port par défaut aligné : backend 3000, proxy Vite 3000 (`BACKEND_PORT`).
   Guide d'intégration environnement complet : GUIDE-10.
+- IMP-25.3 — diagnostic schéma : `getSchemaHealth()` (repo), `/readyz` et
+  `/offers` répondent 503 « Base non migrée » actionnable, log de démarrage
+  avec DATABASE_URL masquée. Testé sur base vide dédiée (2 tests pg).
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 

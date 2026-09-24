@@ -1752,3 +1752,54 @@ describeDb('IMP-24 — réconciliation v0 bout en bout sur Postgres réel', () =
   });
 });
 
+// ---------------------------------------------------------------------------
+// IMP-25.3 — diagnostic « base non migrée » : sur une base VIDE dédiée, le
+// backend répond 503 actionnable (au lieu d'une erreur SQL brute).
+// ---------------------------------------------------------------------------
+describeDb('IMP-25.3 — diagnostic base non migrée (base vide dédiée)', () => {
+  const adminPool = new Pool({ connectionString: DATABASE_URL });
+
+  it('getSchemaHealth + readyz + offers explicites sur base vide', async () => {
+    await adminPool.query(`DROP DATABASE IF EXISTS itest_empty_schema`);
+    await adminPool.query(`CREATE DATABASE itest_empty_schema`);
+    const emptyUrl = (DATABASE_URL ?? '').replace(/\/postgres(\?.*)?$/, '/itest_empty_schema');
+    const emptyPool = new Pool({ connectionString: emptyUrl });
+    const repoEmpty = new PgRepo(emptyPool);
+    const appEmpty = await buildApp({ repo: repoEmpty });
+    try {
+      const health = await repoEmpty.getSchemaHealth();
+      expect(health.present).toBe(0);
+      expect(health.missing).toContain('plans');
+      expect(health.missing).toHaveLength(15);
+
+      const ready = await appEmpty.inject({ method: 'GET', url: '/readyz' });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json()).toMatchObject({ title: 'Base non migrée' });
+
+      const offers = await appEmpty.inject({ method: 'GET', url: '/offers' });
+      expect(offers.statusCode).toBe(503);
+      expect(String((offers.json() as Record<string, unknown>)['detail'])).toContain('GUIDE-10');
+    } finally {
+      await appEmpty.close();
+      await emptyPool.end();
+      await adminPool.query(`DROP DATABASE IF EXISTS itest_empty_schema`);
+    }
+  });
+
+  afterAll(async () => { await adminPool.end(); });
+
+  it('base migrée => readyz 200 schema_migrated + offers 200', async () => {
+    const repoFull = new PgRepo(new Pool({ connectionString: DATABASE_URL }));
+    const appFull = await buildApp({ repo: repoFull });
+    try {
+      const ready = await appFull.inject({ method: 'GET', url: '/readyz' });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json()).toMatchObject({ status: 'ready', schema_migrated: true });
+      const offers = await appFull.inject({ method: 'GET', url: '/offers' });
+      expect(offers.statusCode).toBe(200);
+    } finally {
+      await appFull.close();
+    }
+  });
+});
+

@@ -150,7 +150,16 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   app.get('/readyz', async (_req, reply) => {
     try {
       await repo.ping();
-      return { status: 'ready' };
+      // IMP-25.3 — diagnostic schéma : base joignable mais non migrée = pas prêt.
+      const health = await repo.getSchemaHealth();
+      if (health.missing.length > 0) {
+        return reply
+          .status(503)
+          .type('application/problem+json')
+          .send(problem(503, 'Base non migrée',
+            `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 11 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
+      }
+      return { status: 'ready', schema_migrated: true };
     } catch {
       return reply
         .status(503)
@@ -161,7 +170,17 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
 
   // Catalogue : servi depuis `plans` actifs (blueprint §5) — la parité avec la
   // Grille A (packages/shared OFFERS) est verrouillée par test d'intégration + seed-sync.
-  app.get('/offers', async () => {
+  app.get('/offers', async (_req, reply) => {
+    // IMP-25.3 — message actionnable au lieu d'une erreur SQL brute si la base
+    // pointée par DATABASE_URL n'a pas reçu les migrations.
+    const health = await repo.getSchemaHealth();
+    if (health.missing.length > 0) {
+      return reply
+        .status(503)
+        .type('application/problem+json')
+        .send(problem(503, 'Base non migrée',
+          `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0011 sur CETTE base, ou corrigez DATABASE_URL.`));
+    }
     const plans = await repo.listActivePlans();
     return plans.map((p) => ({
       id: p.offerId,

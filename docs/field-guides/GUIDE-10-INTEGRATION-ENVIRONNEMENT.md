@@ -268,6 +268,36 @@ Sur la base Supabase, après migrations : les 3 SELECT de l'étape 4
 
 ---
 
+## Étape 11 — Diagnostic « la relation public.plans n'existe pas »
+
+Symptôme : l'interface s'affiche mais la carte Offres montre cette erreur.
+Signification : le backend est **connecté** à une base, mais cette base n'a
+**pas le schéma**. Depuis IMP-25.3, `/readyz` et `/offers` répondent 503
+« Base non migrée » avec la liste des tables manquantes, et le log de
+démarrage affiche la cible masquée (`postgres://user:***@hote/db`).
+
+Procédure structurée (PowerShell) :
+
+```powershell
+# 1. Quelle base le backend vise-t-il ? (mot de passe masqué)
+$env:DATABASE_URL -replace ':[^:@/]+@', ':***@'
+
+# 2. Cette base a-t-elle le schéma ? (psql ou SQL Editor)
+psql $env:DATABASE_URL -c "select count(*) from information_schema.tables where table_schema='public'"
+```
+
+- Résultat **0 ou < 15** → la base visée n'est pas migrée : appliquez l'étape 4
+  sur CETTE base (ou corrigez DATABASE_URL vers la bonne base).
+- Résultat **15** mais l'erreur persiste → le backend lit un autre `.env` ou
+  une variable exportée ailleurs : redémarrez le backend dans le terminal où
+  `.env` est à la racine du repo ; le log de démarrage montre la cible.
+
+Côté Supabase (vérité visuelle) : SQL Editor →
+`select count(*) from public.plans;` → 6 si vos migrations y sont bien
+passées. Si 6 côté Supabase et 0 côté DATABASE_URL : votre `.env` pointe une
+autre base (souvent un Postgres local resté par défaut) → remplacez
+DATABASE_URL par l'URI Supabase (étape 3) et redémarrez le backend.
+
 ## Ordre résumé
 
 ```text
