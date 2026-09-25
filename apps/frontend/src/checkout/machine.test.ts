@@ -118,6 +118,23 @@ describe('UX 1 — machine à états du parcours d’achat', () => {
     expect(checkoutReducer(s, { type: 'TICKET_READY' }).step).toBe('TICKET_SUCCESS');
   });
 
+  it('BACK : retour d’une étape sans perte de données (§26)', () => {
+    const s = run([
+      { type: 'START_PURCHASE' },
+      { type: 'SELECT_PLAN', offer: OFFER, idempotencyKey: 'k' },
+      { type: 'CONFIRM_PLAN' },
+      { type: 'CHOOSE_METHOD', method: 'MTN' },
+    ]);
+    expect(s.step).toBe('PHONE_INPUT');
+    const b1 = checkoutReducer(s, { type: 'BACK' });
+    expect(b1.step).toBe('PAYMENT_METHOD');
+    expect(b1.offer?.id).toBe(OFFER.id);
+    const b2 = checkoutReducer(b1, { type: 'BACK' });
+    expect(b2.step).toBe('PLAN_CONFIRMATION');
+    // BACK ignoré aux bornes du parcours
+    expect(checkoutReducer(initialCheckoutState, { type: 'BACK' }).step).toBe('ENTRY');
+  });
+
   it('erreur technique => ERROR + message humain ; RESTART conserve le numéro', () => {
     const s = run([
       { type: 'START_PURCHASE' },

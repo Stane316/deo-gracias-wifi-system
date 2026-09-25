@@ -80,6 +80,8 @@ export type CheckoutEvent =
   | { type: 'TICKET_PREPARING' }
   | { type: 'TICKET_READY' }
   | { type: 'RETRY_PAYMENT' }
+  /** §26 — retours arrière d'une étape, sans perte de données. */
+  | { type: 'BACK' }
   | { type: 'RESTART' };
 
 /** Garde-fou central : pendant le traitement, aucun événement déclencheur n'est accepté (§24/25). */
@@ -175,6 +177,13 @@ export function checkoutReducer(state: CheckoutState, event: CheckoutEvent): Che
     case 'RETRY_PAYMENT':
       if (state.step !== 'PAYMENT_FAILED' && state.step !== 'ERROR') return state;
       return { ...state, step: 'PAYMENT_CONFIRMATION', message: null };
+
+    case 'BACK': {
+      if (state.step === 'PAYMENT_METHOD') return { ...state, step: 'PLAN_CONFIRMATION' };
+      if (state.step === 'PHONE_INPUT') return { ...state, step: 'PAYMENT_METHOD' };
+      if (state.step === 'PAYMENT_CONFIRMATION') return { ...state, step: 'PHONE_INPUT' };
+      return state;
+    }
 
     case 'RESTART':
       return { ...initialCheckoutState, phone: state.phone };

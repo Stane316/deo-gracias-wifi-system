@@ -8,6 +8,7 @@ import {
 } from '../format.js';
 import { checkoutReducer, initialCheckoutState } from './machine.js';
 import { MyTickets } from './MyTickets.js';
+import { PlanRecap } from './PlanRecap.js';
 
 /**
  * UX 2 — Entrée du parcours + sélection du forfait, branchés sur la machine
@@ -138,22 +139,19 @@ export function Checkout() {
             </p>
           </div>
         </section>
-      ) : state.step === 'PLAN_CONFIRMATION' ? (
+      ) : state.step === 'PLAN_CONFIRMATION' && state.offer ? (
         <section className="card journey-card">
           <h2>Votre accès</h2>
           <div className="card-body stack">
-            <div className="recap">
-              <span className="offer-price">{state.offer ? `${state.offer.priceFcfa} FCFA` : ''}</span>
-              <span className="offer-hours">{state.offer ? formatHours(state.offer.accessHours) : ''}</span>
-            </div>
-            <p>
-              Vous allez payer <strong>{state.offer ? `${state.offer.priceFcfa} FCFA` : ''}</strong> pour obtenir{' '}
-              <strong>{state.offer ? formatHours(state.offer.accessHours) : ''}</strong> d’accès Wi-Fi.
+            <PlanRecap offer={state.offer} />
+            <p className="confirm-line">
+              Vous allez payer <strong>{state.offer.priceFcfa} FCFA</strong> pour obtenir{' '}
+              <strong>{formatHours(state.offer.accessHours)}</strong> d’accès Wi-Fi.
             </p>
-            <button className="btn big" disabled title="Étape suivante (UX 3)">
+            <p className="hint" role="note">Paiement sécurisé via votre opérateur mobile.</p>
+            <button className="btn big" onClick={() => dispatch({ type: 'CONFIRM_PLAN' })}>
               Continuer vers le paiement
             </button>
-            <p className="hint">La confirmation complète (paiement) arrive à l’étape UX 3.</p>
             <button className="btn ghost" onClick={() => dispatch({ type: 'MODIFY_PLAN' })}>
               Modifier mon choix
             </button>
@@ -161,10 +159,25 @@ export function Checkout() {
         </section>
       ) : (
         <section className="card journey-card">
-          <h2>Étape suivante</h2>
+          <h2>{state.step === 'PAYMENT_METHOD' ? 'Comment souhaitez-vous payer ?' : 'Étape suivante'}</h2>
           <div className="card-body stack">
-            <p className="hint">Cette étape sera livrée dans l’itération suivante.</p>
-            <button className="btn ghost" onClick={() => dispatch({ type: 'RESTART' })}>Recommencer</button>
+            {state.step === 'PAYMENT_METHOD' ? (
+              <>
+                <div className="offer-card" aria-disabled="true">
+                  <span className="offer-hours">Mobile Money</span>
+                  <span className="offer-meta">MTN · Moov · Celtiis — opérateur choisi sur la page sécurisée</span>
+                  <span className="badge sev-WARNING">Étape suivante (UX 4)</span>
+                </div>
+                <button className="btn ghost" onClick={() => dispatch({ type: 'BACK' })}>
+                  Revenir à mon forfait
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="hint">Cette étape sera livrée dans l’itération suivante.</p>
+                <button className="btn ghost" onClick={() => dispatch({ type: 'BACK' })}>Retour</button>
+              </>
+            )}
           </div>
         </section>
       )}

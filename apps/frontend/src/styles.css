@@ -195,6 +195,7 @@ pre {
   background: var(--panel-2); border-radius: 5px; padding: 12px 14px;
 }
 .recap .offer-price { font-size: 26px; }
+.confirm-line { font-size: 15px; margin: 2px 0; }
 @media (min-width: 720px) {
   .offer-list { display: grid; grid-template-columns: repeat(3, 1fr); }
 }
