@@ -9,6 +9,7 @@ import {
 import { checkoutReducer, initialCheckoutState } from './machine.js';
 import { MyTickets } from './MyTickets.js';
 import { PlanRecap } from './PlanRecap.js';
+import { validateCustomerPhone } from './phone.js';
 
 /**
  * UX 2 — Entrée du parcours + sélection du forfait, branchés sur la machine
@@ -28,6 +29,73 @@ function navIndex(step: string): number {
   if (step === 'ENTRY') return 0;
   if (step === 'PLAN_SELECTION' || step === 'PLAN_CONFIRMATION') return 1;
   return 2;
+}
+
+/** UX 4 — §12 : un seul moyen configuré (Mobile Money via FedaPay, D-UX4) ;
+ *  les opérateurs se choisissent sur la page sécurisée du provider. */
+function PaymentMethodScreen({ onChoose, onBack }: { onChoose: () => void; onBack: () => void }) {
+  return (
+    <section className="card journey-card">
+      <h2>Comment souhaitez-vous payer ?</h2>
+      <div className="card-body stack">
+        <button className="method-card" onClick={onChoose}>
+          <span className="offer-hours">Mobile Money</span>
+          <span className="offer-meta">Paiement sécurisé via votre opérateur mobile</span>
+          <span className="method-ops" aria-hidden="true">
+            <span className="badge op-mtn">MTN</span>
+            <span className="badge op-moov">Moov</span>
+            <span className="badge op-celtiis">Celtiis</span>
+          </span>
+          <span className="btn big">Payer avec Mobile Money</span>
+        </button>
+        <p className="hint" role="note">Votre opérateur exact se choisit sur la page sécurisée du paiement.</p>
+        <button className="btn ghost" onClick={onBack}>Revenir à mon forfait</button>
+      </div>
+    </section>
+  );
+}
+
+/** UX 4 — §13/14 : format attendu, validation immédiate, messages humains. */
+function PhoneScreen({ onSubmit, onBack }: { onSubmit: (phone: string) => void; onBack: () => void }) {
+  const [value, setValue] = useState('');
+  const check = validateCustomerPhone(value);
+  const touched = value.length > 0;
+  return (
+    <section className="card journey-card">
+      <h2>Entrez votre numéro</h2>
+      <div className="card-body stack">
+        <p className="hint">Paiement : Mobile Money — le numéro servira à recevoir votre accès.</p>
+        <label className="field-label" htmlFor="phone">Numéro</label>
+        <input
+          id="phone"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="01 XX XX XX XX"
+          inputMode="tel"
+          autoComplete="tel"
+          aria-describedby="phone-help"
+          aria-invalid={touched && !check.ok}
+        />
+        <p id="phone-help" className={touched && check.ok ? 'ok' : 'hint'} role="status">
+          {touched
+            ? check.ok
+              ? '✓ Numéro valide'
+              : check.message
+            : 'Format attendu : 01 XX XX XX XX (10 chiffres).'}
+        </p>
+        <button
+          className="btn big"
+          disabled={!check.ok}
+          onClick={() => {
+            if (check.ok) onSubmit(check.normalized);
+          }}
+        >
+          Vérifier mon numéro
+        </button>
+        <button className="btn ghost" onClick={onBack}>Changer de moyen de paiement</button>
+      </div>
+    </section>
+  );
 }
 
 export function Checkout() {
@@ -157,27 +225,22 @@ export function Checkout() {
             </button>
           </div>
         </section>
+      ) : state.step === 'PAYMENT_METHOD' ? (
+        <PaymentMethodScreen
+          onChoose={() => dispatch({ type: 'CHOOSE_METHOD', method: 'Mobile Money' })}
+          onBack={() => dispatch({ type: 'BACK' })}
+        />
+      ) : state.step === 'PHONE_INPUT' ? (
+        <PhoneScreen
+          onBack={() => dispatch({ type: 'BACK' })}
+          onSubmit={(phone) => dispatch({ type: 'SUBMIT_PHONE', phone })}
+        />
       ) : (
         <section className="card journey-card">
-          <h2>{state.step === 'PAYMENT_METHOD' ? 'Comment souhaitez-vous payer ?' : 'Étape suivante'}</h2>
+          <h2>Étape suivante</h2>
           <div className="card-body stack">
-            {state.step === 'PAYMENT_METHOD' ? (
-              <>
-                <div className="offer-card" aria-disabled="true">
-                  <span className="offer-hours">Mobile Money</span>
-                  <span className="offer-meta">MTN · Moov · Celtiis — opérateur choisi sur la page sécurisée</span>
-                  <span className="badge sev-WARNING">Étape suivante (UX 4)</span>
-                </div>
-                <button className="btn ghost" onClick={() => dispatch({ type: 'BACK' })}>
-                  Revenir à mon forfait
-                </button>
-              </>
-            ) : (
-              <>
-                <p className="hint">Cette étape sera livrée dans l’itération suivante.</p>
-                <button className="btn ghost" onClick={() => dispatch({ type: 'BACK' })}>Retour</button>
-              </>
-            )}
+            <p className="hint">Cette étape sera livrée dans l’itération suivante.</p>
+            <button className="btn ghost" onClick={() => dispatch({ type: 'BACK' })}>Retour</button>
           </div>
         </section>
       )}

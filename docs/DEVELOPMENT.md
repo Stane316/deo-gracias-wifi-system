@@ -156,9 +156,10 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 292/292 avec base (backend 183 dont 45 d'intégration + 5 modes démo
-  + 4 validation env + 8 diagnostic pg, shared 45, connector 46, frontend 18 dont
-  10 machine à états + 2 helpers UX). Sans base : les intégrations pg skippent.
+- Attendu : 298/298 avec base (backend 183 dont 45 d'intégration + 5 modes démo
+  + 4 validation env + 8 diagnostic pg, shared 45, connector 46, frontend 24 dont
+  10 machine à états + 6 validation téléphone + 2 helpers UX). Sans base : les
+  intégrations pg skippent.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
 
