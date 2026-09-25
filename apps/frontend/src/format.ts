@@ -29,6 +29,11 @@ export function chooseOfferLabel(priceFcfa: number): string {
   return `Choisir ${priceFcfa} FCFA`;
 }
 
+/** UX 5 — CTA de paiement dynamique (§15/31) : « Payer 100 FCFA ». */
+export function payCtaLabel(priceFcfa: number): string {
+  return `Payer ${priceFcfa} FCFA`;
+}
+
 /** UX 2 — numéro masqué pour récapitulatifs (§17) : derniers 4 chiffres visibles. */
 export function maskPhone(phone: string): string {
   const digits = phone.replace(/\D/g, '');

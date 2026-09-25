@@ -210,6 +210,18 @@ pre {
 .badge.op-moov { background: #e84e0f; color: #fff; }
 .badge.op-celtiis { background: #0066b3; color: #fff; }
 .field-label { font-weight: 700; font-size: 13px; color: #23282c; margin: 0; }
+/* UX 5 — traitement + démo */
+.spinner {
+  width: 34px; height: 34px; margin: 4px auto;
+  border: 4px solid var(--panel-2); border-top-color: var(--blue);
+  border-radius: 50%; animation: dg-spin 0.9s linear infinite;
+}
+@keyframes dg-spin { to { transform: rotate(360deg); } }
+.dev-banner {
+  border: 1px dashed var(--yellow); border-radius: 5px;
+  background: #fff8e1; padding: 10px 12px; display: flex;
+  flex-direction: column; gap: 8px;
+}
 @media (min-width: 720px) {
   .offer-list { display: grid; grid-template-columns: repeat(3, 1fr); }
 }

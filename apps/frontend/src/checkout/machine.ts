@@ -80,6 +80,10 @@ export type CheckoutEvent =
   | { type: 'TICKET_PREPARING' }
   | { type: 'TICKET_READY' }
   | { type: 'RETRY_PAYMENT' }
+  /** §24 — reprise après actualisation/fermeture : transaction déjà créée. */
+  | { type: 'RESUME'; orderId: string; offer: import('../api.js').Offer; phone: string }
+  /** Rattache l'identifiant de commande créé par le backend, sans changer d'étape. */
+  | { type: 'ATTACH_ORDER'; orderId: string }
   /** §26 — retours arrière d'une étape, sans perte de données. */
   | { type: 'BACK' }
   | { type: 'RESTART' };
@@ -177,6 +181,23 @@ export function checkoutReducer(state: CheckoutState, event: CheckoutEvent): Che
     case 'RETRY_PAYMENT':
       if (state.step !== 'PAYMENT_FAILED' && state.step !== 'ERROR') return state;
       return { ...state, step: 'PAYMENT_CONFIRMATION', message: null };
+
+    case 'ATTACH_ORDER':
+      if (state.step === 'PAYMENT_PROCESSING' || state.step === 'PAYMENT_PENDING') {
+        return { ...state, orderId: event.orderId };
+      }
+      return state;
+
+    case 'RESUME':
+      if (state.step !== 'ENTRY') return state;
+      return {
+        ...state,
+        step: 'PAYMENT_PENDING',
+        offer: event.offer,
+        phone: event.phone,
+        orderId: event.orderId,
+        message: null,
+      };
 
     case 'BACK': {
       if (state.step === 'PAYMENT_METHOD') return { ...state, step: 'PLAN_CONFIRMATION' };
