@@ -13,8 +13,8 @@
 ```text
 supabase/
 ├── config.toml          # config Supabase CLI (project_id = PLACEHOLDER, à lier)
-├── migrations/          # 11 migrations OFFICIELLES, ordonnées 0001→0011
-└── down/                # 11 rollbacks (jamais exécutés pour installer ;
+├── migrations/          # 12 migrations OFFICIELLES, ordonnées 0001→0012
+└── down/                # 12 rollbacks (jamais exécutés pour installer ;
                          # servent à `tools/db-migrate.sh down` / reset)
 tools/
 ├── db-migrate.sh        # applique up/down/reset + smoke/rls/states (psql pur)
@@ -25,7 +25,7 @@ tools/
 ```
 
 Il n'existe **AUCUN** dossier `supabase/tables/` ni de SQL dupliqués : chaque
-table est créée **exactement une fois** dans les 11 migrations (vérifié par
+table est créée **exactement une fois** dans les 12 migrations (vérifié par
 analyse : customers, plans, orders, payments, payment_events, tickets,
 ticket_batches, mikrotik_sync, access_sessions, reconciliation_runs,
 audit_logs, incidents, alerts, settings, state_transitions = 1 création chacune).
@@ -45,6 +45,7 @@ audit_logs, incidents, alerts, settings, state_transitions = 1 création chacune
 | 0009_state_guards.sql | migration | trigger `guard_state_transition` + audit transitions | OUI | 0003-0005 |
 | 0010_seed_stock_mikmon.sql | seed | 660 tickets legacy hashés (NON rejouable : générée une fois) | OUI, 1 fois | 0004 |
 | 0011_activation_deadline.sql | migration | colonne `activation_deadline` + transition SOLD→EXPIRED | OUI | 0004/0009 |
+| 0012_ticket_code_vault.sql | migration | colonne `tickets.code_cipher` (sceau chiffré du code) | OUI | 0004 |
 | down/*.sql | **rollback** | supprime ce que la migration crée | **NON pour installer** | — |
 | tools/db-smoke.sql | vérification | assertions SELECT | optionnel (recommandé) | base migrée |
 | tools/db-rls-tests.sql / db-state-tests.sql | tests | vérifient RLS/gardes | optionnel | base migrée |
@@ -59,7 +60,7 @@ migrations.
 
 1. `customers` est créé **une seule fois**, dans `0002` (ligne 6).
 2. L'erreur signifie : au moment où 0002 a été lancé, la table existait DÉJÀ.
-3. Sur une base neuve, la chaîne 0001→0011 s'exécute sans erreur (prouvé :
+3. Sur une base neuve, la chaîne 0001→0012 s'exécute sans erreur (prouvé :
    base vide → up → smoke → down → up → rls → states, tout vert ; CI GitHub
    idem sur Postgres 16 et 17).
 4. Conclusion : l'erreur vient d'une **exécution manuelle répétée ou
@@ -153,7 +154,7 @@ mot de passe, TLS) en message actionnable au lieu d'une erreur brute (IMP-25.5/2
 
 ---
 
-## Étape 4 — Appliquer les 11 migrations (au choix)
+## Étape 4 — Appliquer les 12 migrations (au choix)
 
 ### Méthode CLI (RECOMMANDÉE : historique + idempotence)
 
@@ -174,17 +175,17 @@ supabase db push --db-url "$DATABASE_URL"
 supabase migration list --linked
 ```
 
-Résultat attendu : 11 lignes `Applied`. Erreur possible : `project not linked`
+Résultat attendu : 12 lignes `Applied`. Erreur possible : `project not linked`
 → refaire l'étape 2.
 
 ### Méthode GUI (SQL Editor) — si vous préférez
 
 Sur la base RÉINITIALISÉE (étape 2), ouvrir CHAQUE fichier de
-`supabase/migrations/` **dans l'ordre 0001 → 0011**, coller son contenu dans
+`supabase/migrations/` **dans l'ordre 0001 → 0012**, coller son contenu dans
 une nouvelle requête, **Run UNE SEULE FOIS**, attendre `Success` avant le
 suivant. Ne JAMAIS recliquer Run sur un fichier déjà passé, même « pour voir ».
 
-Après 0011 : Table Editor → vous devez voir 15 tables `public` :
+Après 0012 : Table Editor → vous devez voir 15 tables `public` :
 `customers, plans, orders, payments, payment_events, tickets, ticket_batches,
 mikrotik_sync, access_sessions, reconciliation_runs, audit_logs, incidents,
 alerts, settings, state_transitions`.
@@ -336,6 +337,6 @@ DATABASE_URL par l'URI Supabase (étape 3) et redémarrez le backend.
 ## Ordre résumé
 
 ```text
-npm install → .env → reset schéma public (ét.2) → migrations 0001→0011 (ét.4)
+npm install → .env → reset schéma public (ét.2) → migrations 0001→0012 (ét.4)
 → vérifs SELECT → backend → frontend → parcours visuel → tests
 ```

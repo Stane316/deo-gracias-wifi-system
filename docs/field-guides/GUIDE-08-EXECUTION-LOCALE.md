@@ -114,13 +114,13 @@ Toujours dans Git Bash, à la racine du repo :
 
 ```bash
 export DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias"
-bash tools/db-migrate.sh up       # applique 0001→0011 (idempotent : déjà jouées = no-op)
+bash tools/db-migrate.sh up       # applique 0001→0012 (idempotent : déjà jouées = no-op)
 bash tools/db-migrate.sh smoke    # contrat de schéma (15 tables…)
 bash tools/db-migrate.sh rls      # matrice RLS anon/authenticated/service_role
 bash tools/db-migrate.sh states   # gardes de transitions + audit (IMP-11)
 ```
 
-Attendu : `OK: up (11 migrations appliquées)`, `OK: smoke`, `OK: rls`,
+Attendu : `OK: up (12 migrations appliquées)`, `OK: smoke`, `OK: rls`,
 `OK: states` (NOTICE « transitions interdites refusées, chaînes valides acceptées,
 audit alimenté (14) »). En cas d'échec : `bash tools/db-migrate.sh reset` (down+up
 complets) puis relancer smoke/rls/states.
@@ -207,14 +207,14 @@ npm test                  # vitest partout ; sans DATABASE_URL : tests d'intégr
 DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias" npm test   # tout, intégration incluse
 ```
 
-Attendu actuellement : typecheck 4/4 ; tests **306/306** avec DATABASE_URL
+Attendu actuellement : typecheck 4/4 ; tests **313/313** avec DATABASE_URL
 (backend 169 — dont 43 d'intégration réelle : concurrence d'allocation,
 stock seedé 0010, statistiques admin, lots digitaux, échéance d'activation,
 workers IMP-20, contrat Connector IMP-21 (dont E2E dry-run), Connector v0
 read-only IMP-22, réconciliation v0 IMP-24 bout en bout, et 5 tests des modes
 démo IMP-25 ; le client RouterOS API IMP-23 est testé contre un stub
 protocolaire sans routeur ; shared 45, frontend 5, connector 46),
-261 + 45 skippés sans.
+268 + 45 skippés sans.
 C'est exactement ce que joue la CI GitHub à chaque push.
 
 ## 7. Commandes régulières — mémo

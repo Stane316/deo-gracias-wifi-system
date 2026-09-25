@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, storage, type ReconciliationView } from '../api.js';
 import { backendUnreachableMessage, formatDateTime, formatFcfa, problemDetail } from '../format.js';
+import {
+  browserSupabaseConfig,
+  readAdminSession,
+  SupabaseAuthClient,
+  writeAdminSession,
+  type SupabaseSession,
+} from '../supabase-auth.js';
 
 interface DashboardPayload {
   generated_at: string;
@@ -19,10 +26,17 @@ interface TicketsStats {
 /**
  * IMP-25 — Console d'administration de la démo : tableau de bord (IMP-17),
  * stats tickets, réconciliation (IMP-24) avec acquittement des alertes.
- * Auth : jeton DEV_ADMIN_TOKEN en mode démo (Supabase Auth en production).
+ * Auth : Supabase Auth email/mot de passe lorsque VITE_SUPABASE_* est configuré ;
+ * jeton DEV_ADMIN_TOKEN conservé uniquement pour la démo locale.
  */
+const supabaseConfig = browserSupabaseConfig();
+const supabaseAuth = supabaseConfig ? new SupabaseAuthClient(supabaseConfig) : null;
+
 export function Admin() {
   const [tokenInput, setTokenInput] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [supabaseSession, setSupabaseSession] = useState<SupabaseSession | null>(() => readAdminSession());
   const [connected, setConnected] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -32,71 +46,155 @@ export function Admin() {
   const [recon, setRecon] = useState<ReconciliationView | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const token = storage.adminToken();
+  const usesSupabase = supabaseAuth !== null;
+  const token = usesSupabase ? (supabaseSession?.access_token ?? null) : storage.adminToken();
+
+  const clearAuth = useCallback(() => {
+    if (usesSupabase) {
+      writeAdminSession(null);
+      setSupabaseSession(null);
+    } else {
+      storage.setAdminToken(null);
+    }
+    setConnected(false);
+  }, [usesSupabase]);
 
   const check = useCallback(async () => {
-    if (!token) return;
-    const res = await api<{ sub: string; role: string }>('/admin/me', { token });
-    if (res.ok) setConnected(true);
-    else {
-      storage.setAdminToken(null);
+    if (!token) {
       setConnected(false);
+      return;
     }
-  }, [token]);
+    let res = await api<{ sub: string; role: string }>('/admin/me', { token });
+    if (!res.ok && res.status === 401 && supabaseAuth && supabaseSession?.refresh_token) {
+      try {
+        const refreshed = await supabaseAuth.refreshSession(supabaseSession.refresh_token);
+        writeAdminSession(refreshed);
+        setSupabaseSession(refreshed);
+        res = await api<{ sub: string; role: string }>('/admin/me', { token: refreshed.access_token });
+      } catch {
+        clearAuth();
+        return;
+      }
+    }
+    if (res.ok) setConnected(true);
+    else clearAuth();
+  }, [clearAuth, supabaseSession?.refresh_token, token]);
 
   useEffect(() => { void check(); }, [check]);
+
+  // Rafraîchissement avant expiration : l'onglet ne conserve jamais un token expiré.
+  useEffect(() => {
+    if (!supabaseAuth || !supabaseSession) return;
+    const expiresAt = supabaseSession.expires_at ?? Math.floor(Date.now() / 1000) + supabaseSession.expires_in;
+    const delay = Math.max(1000, expiresAt * 1000 - Date.now() - 60_000);
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const refreshed = await supabaseAuth.refreshSession(supabaseSession.refresh_token);
+          writeAdminSession(refreshed);
+          setSupabaseSession(refreshed);
+        } catch {
+          clearAuth();
+        }
+      })();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [clearAuth, supabaseSession]);
 
   const load = useCallback(async () => {
     setError(null);
     if (tab === 'dashboard') {
-      const res = await api<DashboardPayload>('/admin/dashboard', { token: storage.adminToken() });
+      const res = await api<DashboardPayload>('/admin/dashboard', { token });
       if (res.ok && res.body) setDashboard(res.body);
       else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
     } else if (tab === 'tickets') {
-      const res = await api<TicketsStats>('/admin/tickets/stats', { token: storage.adminToken() });
+      const res = await api<TicketsStats>('/admin/tickets/stats', { token });
       if (res.ok && res.body) setStats(res.body);
       else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
     } else {
-      const res = await api<ReconciliationView>('/admin/reconciliation', { token: storage.adminToken() });
+      const res = await api<ReconciliationView>('/admin/reconciliation', { token });
       if (res.ok && res.body) setRecon(res.body);
       else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
     }
-  }, [tab]);
+  }, [tab, token]);
 
   useEffect(() => { if (connected) void load(); }, [connected, load]);
 
   const login = async () => {
     setAuthError(null);
+    if (supabaseAuth) {
+      try {
+        const session = await supabaseAuth.signInWithPassword(email.trim(), password);
+        writeAdminSession(session);
+        setSupabaseSession(session);
+        setPassword('');
+      } catch {
+        setAuthError('Adresse e-mail ou mot de passe invalide.');
+      }
+      return;
+    }
     storage.setAdminToken(tokenInput.trim());
     const res = await api<{ sub: string; role: string }>('/admin/me', { token: tokenInput.trim() });
     if (res.ok) { setConnected(true); setTokenInput(''); }
     else { storage.setAdminToken(null); setAuthError(problemDetail(res.body)); }
   };
 
+  const logout = async () => {
+    const current = token;
+    if (supabaseAuth && current) await supabaseAuth.signOut(current);
+    clearAuth();
+  };
+
   const ack = async (alertId: string) => {
-    await api(`/admin/alerts/${alertId}/ack`, { method: 'POST', token: storage.adminToken() });
+    await api(`/admin/alerts/${alertId}/ack`, { method: 'POST', token });
     await load();
   };
 
   if (!connected) {
     return (
       <section className="card narrow">
-        <h2>Connexion admin</h2>
+        <h2>{usesSupabase ? 'Connexion administrateur' : 'Connexion admin — démo locale'}</h2>
         <p className="hint">
-          Mode démo : entrez le jeton <code>DEV_ADMIN_TOKEN</code> du backend
-          (en production : compte Supabase avec rôle ADMIN).
+          {usesSupabase
+            ? 'Utilisez le compte Supabase autorisé. Le rôle est vérifié par le serveur.'
+            : <>Mode local uniquement : entrez le jeton <code>DEV_ADMIN_TOKEN</code> du backend. En production, cette connexion est remplacée par Supabase Auth.</>}
         </p>
-        <div className="stack">
-          <input
-            type="password"
-            value={tokenInput}
-            onChange={(e) => setTokenInput(e.target.value)}
-            placeholder="Jeton admin"
-            aria-label="Jeton admin"
-          />
-          <button className="btn" onClick={() => void login()} disabled={tokenInput.length === 0}>Connexion</button>
-          {authError ? <p className="err">{authError}</p> : null}
-        </div>
+        <form className="stack" onSubmit={(event) => { event.preventDefault(); void login(); }}>
+          {usesSupabase ? (
+            <>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Adresse e-mail"
+                aria-label="Adresse e-mail administrateur"
+                autoComplete="username"
+              />
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Mot de passe"
+                aria-label="Mot de passe administrateur"
+                autoComplete="current-password"
+              />
+              <button className="btn" type="submit" disabled={email.trim().length === 0 || password.length === 0}>Connexion</button>
+            </>
+          ) : (
+            <>
+              <input
+                type="password"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                placeholder="Jeton admin local"
+                aria-label="Jeton admin local"
+                autoComplete="off"
+              />
+              <button className="btn" type="submit" disabled={tokenInput.length === 0}>Connexion</button>
+            </>
+          )}
+          {authError ? <p className="err" role="alert">{authError}</p> : null}
+        </form>
       </section>
     );
   }
@@ -107,7 +205,7 @@ export function Admin() {
         <button className={tab === 'dashboard' ? 'active' : ''} onClick={() => setTab('dashboard')}>Tableau de bord</button>
         <button className={tab === 'tickets' ? 'active' : ''} onClick={() => setTab('tickets')}>Tickets</button>
         <button className={tab === 'reconciliation' ? 'active' : ''} onClick={() => setTab('reconciliation')}>Réconciliation</button>
-        <button className="ghost right" onClick={() => { storage.setAdminToken(null); setConnected(false); }}>Déconnexion</button>
+        <button className="ghost right" onClick={() => void logout()}>Déconnexion</button>
       </div>
       {error ? <p className="err">{error}</p> : null}
 

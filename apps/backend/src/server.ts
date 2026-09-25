@@ -12,12 +12,20 @@ import { deriveVaultKey } from './ticketvault.js';
 import { DevStaticAuthVerifier, SupabaseAuthVerifier } from './auth.js';
 import { DevPaymentProvider } from './dev-payment.js';
 import { FedaPayClient } from './fedapay.js';
+import { validateRuntimeConfig } from './runtime-config.js';
 import { PgRepo } from './repo.js';
 
 // FIX IMP-25.1 — le backend lit désormais `.env` (dossier backend OU racine du
 // monorepo) ; les variables d'environnement réelles gardent priorité (dotenv
 // n'écrase jamais une variable déjà définie). GUIDE-09 §2 documente chaque variable.
 for (const envPath of ['.env', '../../.env']) loadDotenv({ path: envPath });
+
+const runtimeConfig = validateRuntimeConfig(process.env);
+if (runtimeConfig.errors.length > 0) {
+  console.error(`Configuration d’exécution invalide :\n- ${runtimeConfig.errors.join('\n- ')}`);
+  process.exit(1);
+}
+for (const warning of runtimeConfig.warnings) console.warn(`Avertissement configuration : ${warning}`);
 
 const databaseUrl = process.env['DATABASE_URL'];
 // IMP-25.4 — rejette immédiatement une DATABASE_URL mal formée (ex. URL du projet
@@ -34,7 +42,9 @@ const repo = new PgRepo(new Pool({ connectionString: databaseUrl }));
 // AUTH_DEV_MODE=1 active le renvoi du code OTP en local (jamais en production).
 const supabaseUrl = process.env['SUPABASE_URL'];
 const supabaseAnonKey = process.env['SUPABASE_ANON_KEY'];
-const devMode = ['1', 'true'].includes((process.env['AUTH_DEV_MODE'] ?? '').toLowerCase());
+const devMode =
+  ['local', 'test'].includes(runtimeConfig.environment) &&
+  ['1', 'true'].includes((process.env['AUTH_DEV_MODE'] ?? '').toLowerCase());
 // IMP-25 — démo visuelle locale : si Supabase est absent, AUTH_DEV_MODE=1 et
 // DEV_ADMIN_TOKEN défini, un jeton statique donne le rôle ADMIN (JAMAIS en prod).
 const devAdminToken = process.env['DEV_ADMIN_TOKEN'];
@@ -54,7 +64,9 @@ const fedapayEnvironment = process.env['FEDAPAY_ENVIRONMENT'] === 'live' ? 'live
 // IMP-25 — démo visuelle locale : paiement simulé seulement si PAYMENT_DEV_MODE=1
 // ET aucune clé FedaPay (la vraie integration prime toujours). Jamais en prod.
 const paymentDevMode =
-  ['1', 'true'].includes((process.env['PAYMENT_DEV_MODE'] ?? '').toLowerCase()) && !fedapaySecretKey;
+  ['local', 'test'].includes(runtimeConfig.environment) &&
+  ['1', 'true'].includes((process.env['PAYMENT_DEV_MODE'] ?? '').toLowerCase()) &&
+  !fedapaySecretKey;
 const provider = fedapaySecretKey
   ? new FedaPayClient({ secretKey: fedapaySecretKey, environment: fedapayEnvironment })
   : paymentDevMode
@@ -96,7 +108,7 @@ const port = Number(process.env['PORT'] ?? 3000);
     if (health.missing.length > 0) {
       app.log.warn(
         { missing: health.missing },
-        'BASE NON MIGRÉE : appliquez les 11 migrations sur cette base (GUIDE-10 §4) ou corrigez DATABASE_URL.',
+        'BASE NON MIGRÉE : appliquez les 12 migrations sur cette base (GUIDE-10 §4) ou corrigez DATABASE_URL.',
       );
     } else {
       app.log.info({ tables: health.present }, 'Schéma complet détecté');

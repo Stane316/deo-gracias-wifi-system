@@ -88,11 +88,12 @@ export const storage = {
     if (token) localStorage.setItem('dg.customer.token', token);
     else localStorage.removeItem('dg.customer.token');
   },
+  /** Admin : session limitée à l’onglet ; jamais de token durable en localStorage. */
   adminToken(): string | null {
-    return localStorage.getItem('dg.admin.token');
+    return sessionStorage.getItem('dg.admin.token');
   },
   setAdminToken(token: string | null): void {
-    if (token) localStorage.setItem('dg.admin.token', token);
-    else localStorage.removeItem('dg.admin.token');
+    if (token) sessionStorage.setItem('dg.admin.token', token);
+    else sessionStorage.removeItem('dg.admin.token');
   },
 };

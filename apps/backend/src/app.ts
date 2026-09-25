@@ -163,7 +163,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           .status(503)
           .type('application/problem+json')
           .send(problem(503, 'Base non migrée',
-            `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 11 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
+            `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 12 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
       }
       return { status: 'ready', schema_migrated: true };
     } catch (err) {
@@ -189,7 +189,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           .status(503)
           .type('application/problem+json')
           .send(problem(503, 'Base non migrée',
-            `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0011 sur CETTE base, ou corrigez DATABASE_URL.`));
+            `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0012 sur CETTE base, ou corrigez DATABASE_URL.`));
       }
       plans = await repo.listActivePlans();
     } catch (err) {
