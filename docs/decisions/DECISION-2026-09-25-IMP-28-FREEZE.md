@@ -91,4 +91,10 @@ FedaPay    : aucun paiement réel
 
 ## PROCHAINE ÉTAPE AUTORISABLE
 
-Attendre le feu vert explicite de Stane. Après ce feu vert seulement, lancer l’audit de reprise d’IMP-29 ; ne pas commencer l’implémentation avant la fin de cet audit.
+L’audit de reprise a été réalisé après le feu vert de Stane. Sa référence est :
+
+```text
+docs/IMP-29_REPRISE_AUDIT.md
+```
+
+La prochaine étape reste soumise à validation de ce rapport et à un feu vert explicite d’implémentation IMP-29. Aucun changement de code ne commence avant cette validation.

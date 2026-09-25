@@ -20,7 +20,7 @@ CURRENT:
 IMP-28 — FROZEN : code-first complet, dépendances externes différées, Walled Garden no-write
 
 NEXT:
-IMP-29 — GATE PENDING : audit de reprise puis implémentation uniquement après feu vert explicite de Stane
+IMP-29 — AUDIT COMPLET / IMPLEMENTATION GATE PENDING : code non modifié, implémentation uniquement après feu vert explicite de Stane
 
 REMAINING:
 IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-29 → IMP-40
@@ -32,7 +32,8 @@ IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28,
 - **IMP-28 — FROZEN / PARTIAL / CODE COMPLETE / EXTERNAL DEPENDENCIES DEFERRED** : tests offline, backend indisponible, `503`, inventaire des domaines et protocole no-write documentés ; commit GitHub `7d6bd0df05313f828bdc0b455a43e851c536a45b`, quatre checks CI verts.
 - **Décision d'intégration** : Walled Garden de production vide ; aucune commande MikroTik, aucun portail captif physique et aucun paiement FedaPay réel exécutés.
 - **Gel** : IMP-28 est gelée ; aucune extension fonctionnelle ou intégration externe ne démarre. Décision détaillée dans `docs/decisions/DECISION-2026-09-25-IMP-28-FREEZE.md`.
-- **Pilotage** : IMP-29 est en `GATE PENDING` ; aucune implémentation ne démarre avant le feu vert explicite de Stane et l'audit de reprise.
+- **Audit IMP-29** : terminé le 25/09/2026 ; fondations et écarts consignés dans `docs/IMP-29_REPRISE_AUDIT.md`, aucune modification de code démarrée.
+- **Pilotage** : IMP-29 reste en `IMPLEMENTATION GATE PENDING` ; aucune implémentation ne démarre avant validation du rapport et feu vert explicite de Stane.
 
 Précision indispensable : les intégrations physiques et externes restent séparées du code.
 `IMP-27` est stabilisée dans GitHub sous le commit `2b90f0e` avec CI verte. `IMP-28` dispose
@@ -143,7 +144,7 @@ Statuts autorisés : `DONE`, `PARTIAL`, `NOT STARTED`, `BLOCKED`, `NEEDS VERIFIC
 | IMP-26 | PARTIAL | fichiers non suivis `checkout/`, `ticketvault.ts`, migration `0012`, `CodeDelivery.tsx`, docs UX | UX 1→6 et coffre/reveal sont présents dans le workspace ; décision, E2E, migration distante et validation complète ne sont pas clôturés. |
 | IMP-27 | DONE | commit GitHub `2b90f0e`, `Checkout.tsx`, machine, polling, E2E, PostgreSQL réel, documentation | Parcours paiement → webhook/état backend → allocation → délivrance → récupération corrélée démontré ; les intégrations de production restent dans les dépendances externes différées. |
 | IMP-28 | FROZEN — CODE-FIRST COMPLET, EXTERNE DIFFÉRÉ | commit GitHub `7bb18db`, CI verte, `api.test.ts`, E2E offline/503, `IMP-28_VAGUE_4.md` | Aucun nouveau périmètre ; domaines publics, redirect FedaPay réel, portail captif et Walled Garden réel restent différés. |
-| IMP-29 | GATE PENDING | `Admin.tsx`, `/admin/me`, Supabase navigateur, session refresh/logout, routes admin | Fondations présentes à auditer ; aucune implémentation nouvelle avant feu vert explicite de Stane. |
+| IMP-29 | AUDIT COMPLETE — IMPLEMENTATION GATE PENDING | `docs/IMP-29_REPRISE_AUDIT.md`, fondations `Admin.tsx`, `/admin/me`, Supabase navigateur, session refresh/logout, routes admin | Écarts et critères d’acceptation identifiés ; code non modifié, implémentation en attente du feu vert explicite de Stane. |
 | IMP-30 | PARTIAL | `admin.ts`, `/admin/dashboard`, `/admin/system/status`, KPI/UI | KPI et santé v0 présents ; activité récente, santé MikroTik réelle, Connector ONLINE/OFFLINE et validation des six questions manquent. |
 | IMP-31 | PARTIAL | listes `/admin/orders`, détail, `/admin/payments`, tests et projections SQL non commités | Recherche/pagination/détail v0 présents ; timeline complète, correction exceptionnelle avec raison/permission/audit et intégration PG restent à valider. |
 | IMP-32 | PARTIAL | `/admin/tickets`, `/admin/batches`, création digital, coffre et vues frontend | Inventaire et lot digital présents ; import preview→validation→transaction, compteurs complets, physique/digital exhaustif et réservations opérationnelles manquent. |
@@ -245,7 +246,7 @@ aud itée et reclassée sans modifier la clôture indépendante d’IMP-27.
 | IMP-26 | UX 1→6 / coffre code | PARTIAL | historique courant non validé |
 | **IMP-27** | **Paiement, délivrance, récupération** | **DONE** | **code + CI validés ; externe différé** |
 | IMP-28 | Captif / états dégradés / WG | **FROZEN — CODE-FIRST COMPLET** | **externe différé ; no-write MikroTik** |
-| IMP-29 | Socle admin | **GATE PENDING** | **audit de reprise puis feu vert Stane requis** |
+| IMP-29 | Socle admin | **AUDIT COMPLETE — GATE IMPLÉMENTATION** | **rapport de reprise terminé ; code non modifié** |
 | IMP-30 | Dashboard overview | PARTIAL | FUTURE, v0 déjà présent |
 | IMP-31 | Commandes / paiements admin | PARTIAL | FUTURE, code non commité présent |
 | IMP-32 | Tickets / lots / import | PARTIAL | FUTURE, primitives déjà présentes |
