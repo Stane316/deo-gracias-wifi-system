@@ -210,6 +210,13 @@ export class FakeRepo implements BackendRepo {
     return this.payments.get(id) ?? null;
   }
 
+  async getLatestPaymentForOrder(orderId: string): Promise<PaymentRecord | null> {
+    const payments = [...this.payments.values()]
+      .filter((p) => p.orderId === orderId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return payments[0] ?? null;
+  }
+
   async getOpenPaymentForOrder(orderId: string): Promise<PaymentRecord | null> {
     const open = [...this.payments.values()].filter(
       (p) => p.orderId === orderId && ['CREATED', 'INITIATED', 'PENDING'].includes(p.state),

@@ -47,16 +47,28 @@ export interface Offer {
   limitUptime: string;
 }
 
+export interface OrderPaymentView {
+  id: string;
+  provider_ref: string | null;
+  state: string;
+}
+
 export interface OrderView {
   id: string;
+  order_reference: string;
   state: string;
   offer_id?: string;
   price_fcfa?: number;
+  plan_snapshot?: Record<string, unknown>;
+  payment: OrderPaymentView | null;
   created_at?: string;
+  updated_at?: string;
 }
 
 export interface TicketView {
   id: string;
+  order_id: string | null;
+  order_reference: string | null;
   offer_id: string | null;
   db_state: string;
   router_state: string;

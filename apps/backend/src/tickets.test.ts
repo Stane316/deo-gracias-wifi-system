@@ -243,3 +243,39 @@ describe('POST /admin/orders/:id/allocate (retry admin, doc 06 §88)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 });
+
+describe('IMP-27 — corrélation stricte commande → ticket', () => {
+  it('GET /tickets/mine?order_id filtre le ticket de la commande demandée', async () => {
+    const { repo, app } = await makeApp();
+    const first = await createOrder(repo, app, 'itest-imp27-ticket-0001', '0197999001');
+    const second = await createOrder(repo, app, 'itest-imp27-ticket-0002', '0197999001');
+    repo.seedTicket('24-HEURES', 'A1');
+    repo.seedTicket('24-HEURES', 'B2');
+    const firstOrder = (await repo.getOrderById(first.id))!;
+    const secondOrder = (await repo.getOrderById(second.id))!;
+    firstOrder.state = 'PAID';
+    secondOrder.state = 'PAID';
+    expect((await allocateAndDeliver(repo, first.id)).status).toBe('delivered');
+    expect((await allocateAndDeliver(repo, second.id)).status).toBe('delivered');
+
+    const appDev = await buildApp({
+      repo,
+      auth: { devMode: true, rateLimits: { requestMax: 100, verifyMax: 100 } },
+    });
+    const req = await appDev.inject({ method: 'POST', url: '/auth/phone/request', payload: { phone: '0197999001' } });
+    const code = (req.json() as Record<string, unknown>)['dev_code'] as string;
+    const ver = await appDev.inject({ method: 'POST', url: '/auth/phone/verify', payload: { phone: '0197999001', code } });
+    const token = (ver.json() as Record<string, unknown>)['token'] as string;
+    const filtered = await appDev.inject({
+      method: 'GET',
+      url: `/tickets/mine?order_id=${first.id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(filtered.statusCode).toBe(200);
+    const tickets = (filtered.json() as { tickets: Array<Record<string, unknown>> }).tickets;
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]).toMatchObject({ order_id: first.id, order_reference: first.id });
+    expect(JSON.stringify(tickets)).not.toContain(second.id);
+    await appDev.close();
+  });
+});

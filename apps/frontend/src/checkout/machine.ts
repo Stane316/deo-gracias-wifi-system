@@ -72,7 +72,11 @@ export type CheckoutEvent =
   | { type: 'SUBMIT_PHONE'; phone: string }
   | { type: 'LAUNCH_PAYMENT' }
   /** Résultat vu côté backend (jamais décidé par l'UI, §16). */
-  | { type: 'PAYMENT_PENDING_SEEN' }
+  | { type: 'PAYMENT_PENDING_SEEN'; message?: string }
+  /** Etat backend non reconnu : reprise conservatrice, jamais succès/échec local. */
+  | { type: 'ORDER_STATE_UNKNOWN'; message?: string }
+  /** Identifiants persistés dès que le backend les connaît, y compris après un 409. */
+  | { type: 'ATTACH_PAYMENT'; orderId: string; paymentId: string | null; providerRef: string | null }
   | { type: 'PAYMENT_CONFIRMED'; orderId: string; paymentId: string; providerRef: string | null }
   | { type: 'PAYMENT_REFUSED'; message: string }
   | { type: 'TECHNICAL_ERROR'; message: string }
@@ -81,9 +85,11 @@ export type CheckoutEvent =
   | { type: 'TICKET_READY' }
   | { type: 'RETRY_PAYMENT' }
   /** §24 — reprise après actualisation/fermeture : transaction déjà créée. */
-  | { type: 'RESUME'; orderId: string; offer: import('../api.js').Offer; phone: string }
+  | { type: 'RESUME'; orderId: string; offer: import('../api.js').Offer; phone: string; paymentId?: string | null; providerRef?: string | null }
   /** Rattache l'identifiant de commande créé par le backend, sans changer d'étape. */
   | { type: 'ATTACH_ORDER'; orderId: string }
+  /** Relance manuelle après timeout réseau/backend ; remet le message d'attente à zéro. */
+  | { type: 'RECONCILIATION_RETRY' }
   /** §26 — retours arrière d'une étape, sans perte de données. */
   | { type: 'BACK' }
   | { type: 'RESTART' };
@@ -149,7 +155,15 @@ export function checkoutReducer(state: CheckoutState, event: CheckoutEvent): Che
 
     case 'PAYMENT_PENDING_SEEN':
       if (state.step !== 'PAYMENT_PROCESSING' && state.step !== 'PAYMENT_PENDING') return state;
-      return { ...state, step: 'PAYMENT_PENDING', message: null };
+      return { ...state, step: 'PAYMENT_PENDING', message: event.message ?? null };
+
+    case 'ORDER_STATE_UNKNOWN':
+      if (state.step !== 'PAYMENT_PROCESSING' && state.step !== 'PAYMENT_PENDING' && state.step !== 'TICKET_DELIVERY') return state;
+      return { ...state, step: state.step === 'TICKET_DELIVERY' ? 'TICKET_DELIVERY' : 'PAYMENT_PENDING', message: event.message ?? 'Nous avons reçu un état inhabituel. Nous vérifions encore avec le serveur.' };
+
+    case 'ATTACH_PAYMENT':
+      if (state.step !== 'PAYMENT_PROCESSING' && state.step !== 'PAYMENT_PENDING' && state.step !== 'TICKET_DELIVERY') return state;
+      return { ...state, orderId: event.orderId, paymentId: event.paymentId, providerRef: event.providerRef };
 
     case 'PAYMENT_CONFIRMED':
       if (state.step !== 'PAYMENT_PROCESSING' && state.step !== 'PAYMENT_PENDING') return state;
@@ -183,10 +197,14 @@ export function checkoutReducer(state: CheckoutState, event: CheckoutEvent): Che
       return { ...state, step: 'PAYMENT_CONFIRMATION', message: null };
 
     case 'ATTACH_ORDER':
-      if (state.step === 'PAYMENT_PROCESSING' || state.step === 'PAYMENT_PENDING') {
+      if (state.step === 'PAYMENT_PROCESSING' || state.step === 'PAYMENT_PENDING' || state.step === 'TICKET_DELIVERY') {
         return { ...state, orderId: event.orderId };
       }
       return state;
+
+    case 'RECONCILIATION_RETRY':
+      if (state.step !== 'PAYMENT_PROCESSING' && state.step !== 'PAYMENT_PENDING' && state.step !== 'TICKET_DELIVERY') return state;
+      return { ...state, message: null };
 
     case 'RESUME':
       if (state.step !== 'ENTRY') return state;
@@ -196,6 +214,8 @@ export function checkoutReducer(state: CheckoutState, event: CheckoutEvent): Che
         offer: event.offer,
         phone: event.phone,
         orderId: event.orderId,
+        paymentId: event.paymentId ?? null,
+        providerRef: event.providerRef ?? null,
         message: null,
       };
 

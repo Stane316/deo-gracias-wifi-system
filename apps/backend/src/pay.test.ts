@@ -265,3 +265,47 @@ describe('POST /webhooks/fedapay (signature + idempotence)', () => {
     expect(res.statusCode).toBe(503);
   });
 });
+
+describe('IMP-27 — reprise HTTP 409 et identifiants persistants', () => {
+  it('409 déjà payé retourne order_id/payment_id/provider_ref pour reprendre le polling', async () => {
+    const { repo, app, provider } = await makeApp();
+    const order = await createOrder(repo, app, 'itest-imp27-409-0001');
+    const first = await app.inject({ method: 'POST', url: `/orders/${order.id}/pay` });
+    expect(first.statusCode).toBe(202);
+    const firstBody = first.json() as Record<string, unknown>;
+    const paymentId = firstBody['payment_id'] as string;
+    expect(await repo.confirmPayment(paymentId)).toBe('confirmed');
+
+    const conflict = await app.inject({ method: 'POST', url: `/orders/${order.id}/pay` });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({
+      status: 409,
+      order_id: order.id,
+      order_reference: order.id,
+      payment_id: paymentId,
+      provider_ref: firstBody['provider_ref'],
+      order_state: 'PAID',
+    });
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it('GET commande expose les identifiants paiement après reprise sans confirmer côté client', async () => {
+    const { repo, app } = await makeApp();
+    const order = await createOrder(repo, app, 'itest-imp27-resume-0001');
+    const first = await app.inject({ method: 'POST', url: `/orders/${order.id}/pay` });
+    const firstBody = first.json() as Record<string, unknown>;
+    const paymentId = firstBody['payment_id'] as string;
+    const current = await app.inject({ method: 'GET', url: `/orders/${order.id}` });
+    expect(current.statusCode).toBe(200);
+    expect(current.json()).toMatchObject({
+      id: order.id,
+      order_reference: order.id,
+      state: 'PAYMENT_PENDING',
+      payment: {
+        id: paymentId,
+        provider_ref: firstBody['provider_ref'],
+        state: 'PENDING',
+      },
+    });
+  });
+});

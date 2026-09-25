@@ -157,6 +157,8 @@ export interface BackendRepo {
   /** CREATED→INITIATED→PENDING + order CREATED→PAYMENT_PENDING (une transaction). */
   markPaymentAwaitingResult(paymentId: string, providerRef: string): Promise<'initiated' | 'illegal'>;
   getPaymentById(id: string): Promise<PaymentRecord | null>;
+  /** Dernier paiement de la commande, y compris CONFIRMED, pour la reprise client. */
+  getLatestPaymentForOrder(orderId: string): Promise<PaymentRecord | null>;
   getOpenPaymentForOrder(orderId: string): Promise<PaymentRecord | null>;
   getPaymentByProviderRef(providerRef: string): Promise<PaymentRecord | null>;
   /** Insert-only ; false = déjà présent (idempotence doc 06 §20-21). */
@@ -741,6 +743,19 @@ export class PgRepo implements BackendRepo {
               confirmed_at, created_at, updated_at
        FROM public.payments WHERE id = $1`,
       [id],
+    );
+    const row = res.rows[0];
+    return row ? mapPayment(row) : null;
+  }
+
+  async getLatestPaymentForOrder(orderId: string): Promise<PaymentRecord | null> {
+    const res = await this.pool.query<PaymentRow>(
+      `SELECT id, order_id, provider, provider_ref, amount_fcfa, state,
+              confirmed_at, created_at, updated_at
+       FROM public.payments
+       WHERE order_id = $1
+       ORDER BY created_at DESC LIMIT 1`,
+      [orderId],
     );
     const row = res.rows[0];
     return row ? mapPayment(row) : null;

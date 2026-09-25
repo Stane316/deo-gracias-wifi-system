@@ -40,9 +40,10 @@ import {
   orderIdParamsSchema,
   phoneSchema,
   problem,
+  ticketMineQuerySchema,
   type OrderView,
 } from './schemas.js';
-import { buildPlanSnapshot, type AdminListOptions, type BackendRepo, type OrderRecord, type SyncOpRecord } from './repo.js';
+import { buildPlanSnapshot, type AdminListOptions, type BackendRepo, type OrderRecord, type PaymentRecord, type SyncOpRecord } from './repo.js';
 import { allocateAndDeliver } from './tickets.js';
 import { buildDashboardPayload, startOfBusinessDay } from './admin.js';
 import { startWorkers, type StartWorkersOptions } from './workers.js';
@@ -117,15 +118,33 @@ export function toSyncOpView(op: SyncOpRecord): Record<string, unknown> {
   };
 }
 
-function toOrderView(o: OrderRecord, offerId: string): OrderView {
+function toOrderView(o: OrderRecord, offerId: string, payment: PaymentRecord | null = null): OrderView {
   return {
     id: o.id,
+    order_reference: o.id,
     state: o.state,
     currency: o.currency,
     offer_id: offerId,
     plan_snapshot: o.planSnapshot,
+    // Identifiants non secrets nécessaires à la reprise ; aucun code de ticket
+    // ni payload provider ne sort de cette vue publique.
+    payment: payment
+      ? { id: payment.id, provider_ref: payment.providerRef, state: payment.state }
+      : null,
     created_at: o.createdAt.toISOString(),
     updated_at: o.updatedAt.toISOString(),
+  };
+}
+
+function paymentConflictView(order: OrderRecord, payment: PaymentRecord | null, title: string, detail: string): Record<string, unknown> {
+  return {
+    ...problem(409, title, detail),
+    order_id: order.id,
+    order_reference: order.id,
+    payment_id: payment?.id ?? null,
+    provider_ref: payment?.providerRef ?? null,
+    payment_state: payment?.state ?? null,
+    order_state: order.state,
   };
 }
 
@@ -268,7 +287,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       planSnapshot: buildPlanSnapshot(plan),
       idempotencyKey: keyParsed.data,
     });
-    return reply.status(created ? 201 : 200).send(toOrderView(order, offerId));
+    const payment = await repo.getLatestPaymentForOrder(order.id);
+    return reply.status(created ? 201 : 200).send(toOrderView(order, offerId, payment));
   });
 
   app.get('/orders/:id', async (req, reply) => {
@@ -287,7 +307,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         .send(problem(404, 'Commande introuvable', `Aucune commande avec l'id ${parsed.data.id}.`));
     }
     const offerId = String(order.planSnapshot['offer_id'] ?? '');
-    return toOrderView(order, offerId);
+    const payment = await repo.getLatestPaymentForOrder(order.id);
+    return toOrderView(order, offerId, payment);
   });
 
   // ---------------------------------------------------------------------------
@@ -375,13 +396,19 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         .send(problem(500, 'Snapshot invalide', 'price_snapshot manquant dans la commande.'));
     }
     if (state === 'PAID' || state === 'TICKET_ALLOCATED' || state === 'DELIVERED') {
+      const latest = await repo.getLatestPaymentForOrder(order.id);
+      // 409 est volontairement récupérable : une autre fenêtre/relance a
+      // déjà fait avancer la commande. Le frontend rattache ces identifiants
+      // puis relit l'état backend ; il ne confirme rien lui-même.
       return reply.status(409).type('application/problem+json')
-        .send(problem(409, 'Commande déjà payée', `État courant : ${state}.`));
+        .send(paymentConflictView(order, latest, 'Commande déjà payée', `État courant : ${state}.`));
     }
     const open = await repo.getOpenPaymentForOrder(order.id);
     if (state === 'PAYMENT_PENDING' && open) {
       // Rejeu : on ne rappelle JAMAIS le prestataire pour rien (idempotence).
       return reply.status(200).send({
+        order_id: order.id,
+        order_reference: order.id,
         payment_id: open.id,
         provider_ref: open.providerRef,
         payment_state: open.state,
@@ -390,8 +417,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       });
     }
     if (!canOrderTransition(state, 'PAYMENT_PENDING')) {
+      const latest = await repo.getLatestPaymentForOrder(order.id);
       return reply.status(409).type('application/problem+json')
-        .send(problem(409, 'Commande non payable', `État courant : ${state}.`));
+        .send(paymentConflictView(order, latest, 'Commande non payable', `État courant : ${state}.`));
     }
     const customer = await repo.getCustomerById(order.customerId);
     if (!customer) {
@@ -416,10 +444,13 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     }
     const marked = await repo.markPaymentAwaitingResult(payment.id, checkout.providerRef);
     if (marked === 'illegal') {
+      const current = await repo.getLatestPaymentForOrder(order.id);
       return reply.status(409).type('application/problem+json')
-        .send(problem(409, 'Transition refusée', 'Le paiement ou la commande a changé d’état entre-temps.'));
+        .send(paymentConflictView(order, current, 'Transition refusée', 'Le paiement ou la commande a changé d’état entre-temps.'));
     }
     return reply.status(202).send({
+      order_id: order.id,
+      order_reference: order.id,
       payment_id: payment.id,
       provider_ref: checkout.providerRef,
       redirect_url: checkout.redirectUrl,
@@ -602,16 +633,29 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   };
 
   app.get('/tickets/mine', async (req, reply) => {
+    const query = ticketMineQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Paramètre invalide', 'order_id doit être un UUID.'));
+    }
     const customerId = await resolveCustomerId(req);
     if (!customerId) {
       return reply.status(401).type('application/problem+json')
         .send(problem(401, 'Authentification échouée', GENERIC_401));
     }
     const tickets = await repo.getSoldTicketsForCustomer(customerId);
+    const correlated = query.data.order_id
+      ? tickets.filter((ticket) => ticket.orderId === query.data.order_id)
+      : tickets;
     return {
       customer_id: customerId,
-      tickets: tickets.map((t) => ({
+      ...(query.data.order_id ? { order_id: query.data.order_id } : {}),
+      tickets: correlated.map((t) => ({
         id: t.id,
+        // Le serveur filtre déjà sur l'ordre demandé ; le client ne choisit
+        // jamais un ticket d'une autre commande parmi ceux du même téléphone.
+        order_id: t.orderId,
+        order_reference: t.orderId,
         offer_id: t.offerId,
         db_state: t.dbState,
         router_state: t.routerState,

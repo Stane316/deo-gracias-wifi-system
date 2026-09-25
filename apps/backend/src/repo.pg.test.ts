@@ -1955,3 +1955,74 @@ describeDb('IMP-26 UX6 — code client chiffré, révélé à l’acheteur, audi
     expect(JSON.stringify(res.json())).toContain('voucher');
   });
 });
+
+// ---------------------------------------------------------------------------
+// IMP-27 — contrat de reprise sur PostgreSQL réel : 409 récupérable + vue
+// GET /orders/:id avec les identifiants persistés. Les tests navigateur
+// complètent la preuve côté UI (apps/frontend/e2e/checkout.spec.ts).
+// ---------------------------------------------------------------------------
+class Imp27Provider implements PaymentProvider {
+  async createCheckout(_input: CheckoutInput): Promise<CheckoutResult> {
+    return { providerRef: 'IMP27-PG-REF', redirectUrl: null };
+  }
+}
+
+describeDb('IMP-27 — reprise paiement sur PostgreSQL réel', () => {
+  const pool27 = new Pool({ connectionString: DATABASE_URL });
+  const repo27 = new PgRepo(pool27);
+  let app27: Awaited<ReturnType<typeof buildApp>>;
+
+  const cleanup27 = async (): Promise<void> => {
+    await pool27.query(`DELETE FROM public.payment_events WHERE payment_id IN (
+      SELECT p.id FROM public.payments p JOIN public.orders o ON o.id = p.order_id
+      WHERE o.idempotency_key LIKE 'itest-imp27-pg-%')`);
+    await pool27.query(`DELETE FROM public.payments WHERE order_id IN (
+      SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp27-pg-%')`);
+    await pool27.query(`DELETE FROM public.orders WHERE idempotency_key LIKE 'itest-imp27-pg-%'`);
+    await pool27.query(`DELETE FROM public.customers WHERE phone LIKE '019727%'`);
+  };
+
+  beforeAll(async () => {
+    await cleanup27();
+    app27 = await buildApp({ repo: repo27, payment: { provider: new Imp27Provider(), webhookSecret: 'imp27-pg-secret' } });
+  });
+  afterAll(async () => {
+    await cleanup27();
+    await app27.close();
+    await pool27.end();
+  });
+
+  it('persiste les identifiants puis rend le 409 récupérable après confirmation backend', async () => {
+    const created = await app27.inject({
+      method: 'POST',
+      url: '/orders',
+      headers: { 'idempotency-key': 'itest-imp27-pg-0001' },
+      payload: { offer_id: '24-HEURES', customer_phone: '0197270001' },
+    });
+    expect(created.statusCode).toBe(201);
+    const orderId = String((created.json() as Record<string, unknown>)['id']);
+
+    const started = await app27.inject({ method: 'POST', url: `/orders/${orderId}/pay` });
+    expect(started.statusCode).toBe(202);
+    const paymentId = String((started.json() as Record<string, unknown>)['payment_id']);
+    const providerRef = String((started.json() as Record<string, unknown>)['provider_ref']);
+
+    const pending = await app27.inject({ method: 'GET', url: `/orders/${orderId}` });
+    expect(pending.json()).toMatchObject({
+      order_reference: orderId,
+      state: 'PAYMENT_PENDING',
+      payment: { id: paymentId, provider_ref: providerRef, state: 'PENDING' },
+    });
+
+    expect(await repo27.confirmPayment(paymentId)).toBe('confirmed');
+    const replay = await app27.inject({ method: 'POST', url: `/orders/${orderId}/pay` });
+    expect(replay.statusCode).toBe(409);
+    expect(replay.json()).toMatchObject({
+      order_id: orderId,
+      order_reference: orderId,
+      payment_id: paymentId,
+      provider_ref: providerRef,
+      order_state: 'PAID',
+    });
+  });
+});

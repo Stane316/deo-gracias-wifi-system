@@ -26,6 +26,13 @@ export const adminListQuerySchema = z.object({
 
 export const adminIdParamsSchema = z.object({ id: z.string().uuid() }).strict();
 
+/** IMP-27 — récupération des tickets limitée à la commande en cours.
+ * Le token client reste obligatoire côté route ; order_id ne sert qu'à
+ * corréler la délivrance, jamais à contourner l'autorisation. */
+export const ticketMineQuerySchema = z.object({
+  order_id: z.string().uuid().optional(),
+}).strict();
+
 /**
  * Téléphone Bénin (identification minimale, doc 06 §06) : 10 chiffres commençant
  * par 01 (plan de numérotation national), préfixe international +229 toléré et
@@ -118,12 +125,21 @@ export const idempotencyKeySchema = z.string().trim().min(8).max(200);
 export const orderIdParamsSchema = z.object({ id: z.string().uuid() });
 
 /** Vue publique d'une commande (jamais de secret, pas de phone — doc 06 §05). */
+export interface OrderPaymentView {
+  id: string;
+  provider_ref: string | null;
+  state: string;
+}
+
 export interface OrderView {
   id: string;
+  /** Référence publique stable : l'identifiant de commande backend. */
+  order_reference: string;
   state: string;
   currency: string;
   offer_id: string;
   plan_snapshot: Record<string, unknown>;
+  payment: OrderPaymentView | null;
   created_at: string;
   updated_at: string;
 }

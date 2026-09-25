@@ -8,7 +8,7 @@ import { problemDetail } from '../format.js';
  * auditée via GET /tickets/:id/code. Le code est mono-usage : l'afficher à
  * son acheteur est le but même de la vente.
  */
-export function CodeDelivery({ phone, offer }: { phone: string; offer: Offer | null }) {
+export function CodeDelivery({ phone, offer, orderId }: { phone: string; offer: Offer | null; orderId: string | null }) {
   const [phase, setPhase] = useState<'need-auth' | 'loading' | 'code' | 'error'>('loading');
   const [otp, setOtp] = useState('');
   const [otpRequested, setOtpRequested] = useState(false);
@@ -20,14 +20,23 @@ export function CodeDelivery({ phone, offer }: { phone: string; offer: Offer | n
   const reveal = useCallback(async () => {
     setPhase('loading');
     setMessage(null);
-    const mine = await api<{ tickets: TicketView[] }>('/tickets/mine', { token: storage.customerToken() });
+    if (!orderId) {
+      setMessage('Référence de commande absente : nous ne pouvons pas afficher un ticket non corrélé.');
+      setPhase('error');
+      return;
+    }
+    const mine = await api<{ tickets: TicketView[] }>(`/tickets/mine?order_id=${encodeURIComponent(orderId)}`, { token: storage.customerToken() });
     if (!mine.ok || !mine.body) {
       setMessage(problemDetail(mine.body));
       setPhase('error');
       return;
     }
     const ticket = mine.body.tickets.find(
-      (t) => (t.db_state === 'SOLD' || t.db_state === 'USED') && (offer ? t.offer_id === offer.id : true),
+      (t) =>
+        t.order_id === orderId &&
+        t.order_reference === orderId &&
+        (t.db_state === 'SOLD' || t.db_state === 'USED') &&
+        (offer ? t.offer_id === offer.id : true),
     );
     if (!ticket) {
       setMessage('Votre accès est en cours de préparation. Vérifiez à nouveau dans un instant.');
@@ -42,7 +51,7 @@ export function CodeDelivery({ phone, offer }: { phone: string; offer: Offer | n
     }
     setMessage(problemDetail(res.body));
     setPhase('error');
-  }, [offer]);
+  }, [offer, orderId]);
 
   useEffect(() => {
     if (storage.customerToken()) void reveal();
@@ -126,6 +135,7 @@ export function CodeDelivery({ phone, offer }: { phone: string; offer: Offer | n
   if (phase === 'code' && code) {
     return (
       <div className="stack">
+        {orderId ? <p className="hint">Référence commande : <strong>{orderId}</strong></p> : null}
         <div className="code-box" role="group" aria-label="Votre code Wi-Fi">
           <span className="code-label">VOTRE CODE WI-FI</span>
           <span className="code-value">{code}</span>
@@ -148,6 +158,7 @@ export function CodeDelivery({ phone, offer }: { phone: string; offer: Offer | n
 
   return (
     <div className="stack">
+      {orderId ? <p className="hint">Référence commande : <strong>{orderId}</strong></p> : null}
       <p className="err" role="alert">{message ?? 'Le code n’est pas encore disponible.'}</p>
       <button className="btn ghost" onClick={() => void reveal()}>Vérifier à nouveau</button>
     </div>

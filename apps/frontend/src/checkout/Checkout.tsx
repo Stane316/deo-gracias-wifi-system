@@ -14,6 +14,14 @@ import { PlanRecap } from './PlanRecap.js';
 import { validateCustomerPhone } from './phone.js';
 import { classifyOrderState } from './orderstate.js';
 import { CodeDelivery } from './CodeDelivery.js';
+import {
+  nextPollDelayMs,
+  POLL_MAX_NETWORK_ERRORS,
+  pollTimedOut,
+  RECONCILIATION_NETWORK_MESSAGE,
+  RECONCILIATION_TIMEOUT_MESSAGE,
+  UNKNOWN_ORDER_STATE_MESSAGE,
+} from './polling.js';
 
 /**
  * UX 5 — orchestration transactionnelle réelle :
@@ -30,12 +38,23 @@ interface ResumeInfo {
   orderId: string;
   offer: Offer;
   phone: string;
+  paymentId: string | null;
+  providerRef: string | null;
 }
 
 function readResume(): ResumeInfo | null {
   try {
     const raw = sessionStorage.getItem(RESUME_KEY);
-    return raw ? (JSON.parse(raw) as ResumeInfo) : null;
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<ResumeInfo>;
+    if (typeof value.orderId !== 'string' || !value.offer || typeof value.phone !== 'string') return null;
+    return {
+      orderId: value.orderId,
+      offer: value.offer,
+      phone: value.phone,
+      paymentId: typeof value.paymentId === 'string' ? value.paymentId : null,
+      providerRef: typeof value.providerRef === 'string' ? value.providerRef : null,
+    };
   } catch {
     return null;
   }
@@ -63,6 +82,36 @@ function navIndex(step: string): number {
   return 3;
 }
 
+/** Recompose l'offre depuis le snapshot backend lors d'une reprise.
+ * Le fallback sessionStorage sert seulement à garder l'écran utilisable si une
+ * ancienne commande ne contient pas encore tous les champs de compatibilité. */
+function offerFromOrder(order: OrderView, fallback: Offer): Offer {
+  const snapshot = order.plan_snapshot ?? {};
+  const number = (key: string, otherwise: number): number =>
+    typeof snapshot[key] === 'number' ? snapshot[key] as number : otherwise;
+  const text = (key: string, otherwise: string): string =>
+    typeof snapshot[key] === 'string' ? snapshot[key] as string : otherwise;
+  return {
+    id: order.offer_id ?? text('offer_id', fallback.id),
+    priceFcfa: number('price_snapshot', fallback.priceFcfa),
+    accessHours: number('access_duration_snapshot', fallback.accessHours),
+    validityHours: number('validity_duration_snapshot', fallback.validityHours),
+    mikrotikProfile: text('mikrotik_profile', fallback.mikrotikProfile),
+    limitUptime: text('limit_uptime', fallback.limitUptime),
+  };
+}
+
+interface PaymentInitResponse {
+  order_id?: string;
+  order_reference?: string;
+  payment_id?: string | null;
+  provider_ref?: string | null;
+  redirect_url?: string | null;
+  payment_state?: string | null;
+  order_state?: string;
+  replay?: boolean;
+}
+
 export function Checkout() {
   const [state, dispatch] = useReducer(checkoutReducer, initialCheckoutState);
   const [view, setView] = useState<'journey' | 'tickets'>('journey');
@@ -73,9 +122,9 @@ export function Checkout() {
 
   /** DEV uniquement : le provider factice ne redirige pas, approbation manuelle étiquetée démo. */
   const [devApprove, setDevApprove] = useState(false);
-  const [paymentId, setPaymentId] = useState<string | null>(null);
-  const pollErrors = useRef(0);
-  const processingSince = useRef<number | null>(null);
+  const launchingPayment = useRef(false);
+  const pollSession = useRef<{ orderId: string; startedAt: number; attempt: number; networkErrors: number; stopped: boolean } | null>(null);
+  const [verifyBusy, setVerifyBusy] = useState(false);
 
   const loadOffers = async () => {
     setOffersLoading(true);
@@ -90,15 +139,22 @@ export function Checkout() {
     void loadOffers();
   }, []);
 
-  /** §24 — reprise après actualisation : transaction déjà créée => on revient en attente. */
+  /** §24 — reprise après actualisation : la commande et les identifiants
+   * viennent du backend ; le snapshot de session ne décide ni du prix ni du succès. */
   useEffect(() => {
     const info = readResume();
     if (!info) return;
     void (async () => {
       const res = await api<OrderView>(`/orders/${info.orderId}`);
-      const cls = res.ok && res.body ? classifyOrderState(res.body.state) : 'UNKNOWN';
-      if (cls === 'PENDING' || cls === 'PREPARING') {
-        dispatch({ type: 'RESUME', orderId: info.orderId, offer: info.offer, phone: info.phone });
+      if (!res.ok || !res.body) return;
+      const cls = classifyOrderState(res.body.state);
+      if (cls === 'PENDING' || cls === 'PREPARING' || cls === 'DELIVERED' || cls === 'UNKNOWN') {
+        const offer = offerFromOrder(res.body, info.offer);
+        const paymentId = res.body.payment?.id ?? info.paymentId;
+        const providerRef = res.body.payment?.provider_ref ?? info.providerRef;
+        setDevApprove(providerRef?.startsWith('DEV-') === true);
+        writeResume({ orderId: info.orderId, offer, phone: info.phone, paymentId, providerRef });
+        dispatch({ type: 'RESUME', orderId: info.orderId, offer, phone: info.phone, paymentId, providerRef });
       } else {
         writeResume(null);
       }
@@ -106,16 +162,45 @@ export function Checkout() {
   }, []);
 
   const applyOrderState = useCallback(
-    (orderState: string) => {
-      const cls = classifyOrderState(orderState);
+    (order: OrderView) => {
+      const cls = classifyOrderState(order.state);
+      const orderId = order.id;
+      const paymentId = order.payment?.id ?? state.paymentId ?? '';
+      const providerRef = order.payment?.provider_ref ?? state.providerRef;
+
+      if (order.payment) {
+        // Persist these values even when the backend answers 409/replay; they
+        // are correlation data, not a client-side payment confirmation.
+        dispatch({ type: 'ATTACH_PAYMENT', orderId, paymentId: order.payment.id, providerRef });
+        if (state.offer) writeResume({ orderId, offer: state.offer, phone: state.phone, paymentId: order.payment.id, providerRef });
+      }
+
+      if (cls === 'PENDING') {
+        if (state.step === 'PAYMENT_PROCESSING') dispatch({ type: 'PAYMENT_PENDING_SEEN' });
+        return;
+      }
+      if (cls === 'UNKNOWN') {
+        if (state.message !== UNKNOWN_ORDER_STATE_MESSAGE) {
+          dispatch({ type: 'ORDER_STATE_UNKNOWN', message: UNKNOWN_ORDER_STATE_MESSAGE });
+        }
+        return;
+      }
       if (cls === 'DELIVERED') {
         writeResume(null);
-        dispatch({ type: 'PAYMENT_CONFIRMED', orderId: state.orderId ?? '', paymentId: paymentId ?? '', providerRef: null });
-        dispatch({ type: 'TICKET_PREPARING' });
-        dispatch({ type: 'TICKET_READY' });
+        if (state.step === 'TICKET_DELIVERY') {
+          dispatch({ type: 'TICKET_READY' });
+        } else if (state.step === 'PAYMENT_PROCESSING' || state.step === 'PAYMENT_PENDING') {
+          // These transitions are driven only by the authoritative backend
+          // state; the frontend never infers payment success from a redirect.
+          dispatch({ type: 'PAYMENT_CONFIRMED', orderId, paymentId, providerRef });
+          dispatch({ type: 'TICKET_PREPARING' });
+          dispatch({ type: 'TICKET_READY' });
+        }
       } else if (cls === 'PREPARING') {
-        dispatch({ type: 'PAYMENT_CONFIRMED', orderId: state.orderId ?? '', paymentId: paymentId ?? '', providerRef: null });
-        dispatch({ type: 'TICKET_PREPARING' });
+        if (state.step === 'PAYMENT_PROCESSING' || state.step === 'PAYMENT_PENDING') {
+          dispatch({ type: 'PAYMENT_CONFIRMED', orderId, paymentId, providerRef });
+          dispatch({ type: 'TICKET_PREPARING' });
+        }
       } else if (cls === 'FAILED') {
         writeResume(null);
         dispatch({ type: 'PAYMENT_REFUSED', message: 'Le paiement n’a pas abouti : votre opérateur a refusé la transaction. Aucun montant n’est débité.' });
@@ -126,97 +211,132 @@ export function Checkout() {
         writeResume(null);
         dispatch({ type: 'PAYMENT_REFUSED', message: 'La session de paiement a expiré. Relancez le paiement : aucune somme n’est débitée.' });
       }
-      // PENDING / UNKNOWN : on continue de vérifier (§18), jamais d'échec déclaré
     },
-    [state.orderId, paymentId],
+    [state.message, state.offer, state.orderId, state.paymentId, state.phone, state.providerRef, state.step],
   );
 
-  /** Polling de l'état backend pendant traitement / attente / préparation. */
+  /**
+   * Reconciliation bornée : lecture immédiate, puis backoff 1/2/4/8/12 s,
+   * timeout 120 s. Une erreur réseau ou un état inconnu reste une attente ;
+   * seul l'état explicite lu depuis le backend peut faire avancer la machine.
+   */
   useEffect(() => {
     const active =
       state.step === 'PAYMENT_PROCESSING' || state.step === 'PAYMENT_PENDING' || state.step === 'TICKET_DELIVERY';
     if (!active || !state.orderId) return;
-    if (state.step === 'PAYMENT_PROCESSING' && processingSince.current === null) {
-      processingSince.current = Date.now();
+
+    if (!pollSession.current || pollSession.current.orderId !== state.orderId) {
+      pollSession.current = { orderId: state.orderId, startedAt: Date.now(), attempt: 0, networkErrors: 0, stopped: false };
     }
-    const tick = async () => {
-      const res = await api<OrderView>(`/orders/${state.orderId}`);
-      if (!res.ok || !res.body) {
-        pollErrors.current += 1;
-        if (pollErrors.current >= 3) {
-          dispatch({ type: 'TECHNICAL_ERROR', message: 'Nous n’arrivons plus à joindre le service. Vérifiez votre connexion, puis utilisez « Vérifier à nouveau ».' });
-        }
-        return;
-      }
-      pollErrors.current = 0;
-      if (
-        state.step === 'PAYMENT_PROCESSING' &&
-        classifyOrderState(res.body.state) === 'PENDING' &&
-        processingSince.current !== null &&
-        Date.now() - processingSince.current > 20000
-      ) {
-        dispatch({ type: 'PAYMENT_PENDING_SEEN' });
-        return;
-      }
-      applyOrderState(res.body.state);
+    const session = pollSession.current;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = () => {
+      if (cancelled || session.stopped) return;
+      const delay = nextPollDelayMs(session.attempt);
+      session.attempt += 1;
+      timer = setTimeout(() => void tick(), delay);
     };
-    void tick();
-    const id = setInterval(() => void tick(), 2500);
-    return () => clearInterval(id);
-  }, [state.step, state.orderId, applyOrderState]);
 
-  /** §16/25 — lancement réel : commande idempotente puis paiement backend. */
-  const launchPayment = async () => {
-    if (!state.offer || !state.phone || !state.idempotencyKey) return;
-    dispatch({ type: 'LAUNCH_PAYMENT' });
-    processingSince.current = null;
-    pollErrors.current = 0;
-    const orderRes = await api<OrderView>('/orders', {
-      method: 'POST',
-      body: { offer_id: state.offer.id, customer_phone: state.phone },
-      headers: { 'idempotency-key': state.idempotencyKey },
-    });
-    if (!orderRes.ok || !orderRes.body) {
-      dispatch({ type: 'TECHNICAL_ERROR', message: backendUnreachableMessage(orderRes.status, orderRes.body) ?? problemDetail(orderRes.body) });
-      return;
-    }
-    const orderId = orderRes.body.id;
-    writeResume({ orderId, offer: state.offer, phone: state.phone });
-    const payRes = await api<{ payment_id: string; provider_ref: string; redirect_url: string; replay?: boolean }>(
-      `/orders/${orderId}/pay`,
-      { method: 'POST' },
-    );
-    if (!payRes.ok || !payRes.body) {
-      if (payRes.status === 409) {
-        // déjà payé / en cours : on repolle simplement (§25)
+    const tick = async () => {
+      if (cancelled || session.stopped) return;
+      if (pollTimedOut(session.startedAt)) {
+        session.stopped = true;
+        dispatch({ type: 'PAYMENT_PENDING_SEEN', message: RECONCILIATION_TIMEOUT_MESSAGE });
         return;
       }
-      dispatch({ type: 'TECHNICAL_ERROR', message: backendUnreachableMessage(payRes.status, payRes.body) ?? problemDetail(payRes.body) });
-      return;
-    }
-    setPaymentId(payRes.body.payment_id);
-    // Pour que la machine porte l'orderId, on transite par l'état confirmé uniquement
-    // via le polling ; ici on mémorise l'orderId localement pour le polling :
-    dispatchOrderId(orderId);
-    if (payRes.body.redirect_url && payRes.body.redirect_url.startsWith('http')) {
-      // Production : ouverture de la page sécurisée du provider (§16)
-      const w = window.open(payRes.body.redirect_url, '_blank', 'noopener');
-      if (!w) window.location.href = payRes.body.redirect_url;
-    } else {
-      setDevApprove(true); // DEV : approbation factice étiquetée démo
-    }
-  };
+      const res = await api<OrderView>(`/orders/${state.orderId}`);
+      if (cancelled || session.stopped) return;
+      if (!res.ok || !res.body) {
+        session.networkErrors += 1;
+        if (session.networkErrors >= POLL_MAX_NETWORK_ERRORS) {
+          session.stopped = true;
+          dispatch({ type: 'PAYMENT_PENDING_SEEN', message: RECONCILIATION_NETWORK_MESSAGE });
+          return;
+        }
+        schedule();
+        return;
+      }
+      session.networkErrors = 0;
+      applyOrderState(res.body);
+      const cls = classifyOrderState(res.body.state);
+      if (cls === 'FAILED' || cls === 'CANCELLED' || cls === 'EXPIRED' || cls === 'DELIVERED') {
+        session.stopped = true;
+        return;
+      }
+      schedule();
+    };
 
-  // Le polling lit state.orderId : on le pose via un événement dédié de la machine.
-  const dispatchOrderId = (orderId: string) => {
-    dispatch({ type: 'ATTACH_ORDER', orderId });
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [state.orderId, state.step, applyOrderState]);
+
+  /** §16/25 — commande idempotente puis paiement backend. */
+  const launchPayment = async () => {
+    if (launchingPayment.current || !state.offer || !state.phone || !state.idempotencyKey) return;
+    launchingPayment.current = true;
+    let keepLock = false;
+    dispatch({ type: 'LAUNCH_PAYMENT' });
+    const offer = state.offer;
+    const phone = state.phone;
+    try {
+      const orderRes = await api<OrderView>('/orders', {
+        method: 'POST',
+        body: { offer_id: offer.id, customer_phone: phone },
+        headers: { 'idempotency-key': state.idempotencyKey },
+      });
+      if (!orderRes.ok || !orderRes.body) {
+        dispatch({ type: 'TECHNICAL_ERROR', message: backendUnreachableMessage(orderRes.status, orderRes.body) ?? problemDetail(orderRes.body) });
+        return;
+      }
+      const order = orderRes.body;
+      const orderId = order.id;
+      const resumedOffer = offerFromOrder(order, offer);
+      writeResume({ orderId, offer: resumedOffer, phone, paymentId: order.payment?.id ?? null, providerRef: order.payment?.provider_ref ?? null });
+      dispatch({ type: 'ATTACH_ORDER', orderId });
+
+      const payRes = await api<PaymentInitResponse>(`/orders/${orderId}/pay`, { method: 'POST' });
+      const payBody = payRes.body;
+      if (payRes.status === 409) {
+        // Reprise explicite du chemin HTTP 409 : rattacher la commande ET
+        // conserver les identifiants avant de relire GET /orders/:id.
+        const paymentId = payBody?.payment_id ?? order.payment?.id ?? null;
+        const providerRef = payBody?.provider_ref ?? order.payment?.provider_ref ?? null;
+        dispatch({ type: 'ATTACH_PAYMENT', orderId, paymentId, providerRef });
+        writeResume({ orderId, offer: resumedOffer, phone, paymentId, providerRef });
+        setDevApprove(providerRef?.startsWith('DEV-') === true);
+        keepLock = true;
+        return;
+      }
+      if (!payRes.ok || !payBody || !payBody.payment_id) {
+        dispatch({ type: 'TECHNICAL_ERROR', message: backendUnreachableMessage(payRes.status, payBody) ?? problemDetail(payBody) });
+        return;
+      }
+      const paymentId = payBody.payment_id;
+      const providerRef = payBody.provider_ref ?? null;
+      dispatch({ type: 'ATTACH_PAYMENT', orderId, paymentId, providerRef });
+      writeResume({ orderId, offer: resumedOffer, phone, paymentId, providerRef });
+      setDevApprove(providerRef?.startsWith('DEV-') === true);
+      keepLock = true;
+      if (payBody.redirect_url && payBody.redirect_url.startsWith('http')) {
+        // Production : ouverture de la page sécurisée du provider (§16).
+        const w = window.open(payBody.redirect_url, '_blank', 'noopener');
+        if (!w) window.location.href = payBody.redirect_url;
+      }
+    } finally {
+      if (!keepLock) launchingPayment.current = false;
+    }
   };
 
   const approveDev = async () => {
-    if (!paymentId) return;
+    if (!state.paymentId) return;
     const res = await api<{ processed?: string }>('/webhooks/dev-approve', {
       method: 'POST',
-      body: { payment_id: paymentId },
+      body: { payment_id: state.paymentId },
     });
     if (!res.ok) {
       dispatch({ type: 'TECHNICAL_ERROR', message: problemDetail(res.body) });
@@ -362,6 +482,7 @@ export function Checkout() {
           <div className="card-body stack">
             <div className="spinner" aria-hidden="true" />
             <p className="confirm-line" role="status">Nous vérifions votre paiement. Ne fermez pas cette page.</p>
+            {state.orderId ? <p className="hint">Référence commande : <strong>{state.orderId}</strong></p> : null}
             <ul className="kv">
               <li><span>Montant</span><strong>{state.offer ? `${state.offer.priceFcfa} FCFA` : ''}</strong></li>
               <li><span>Paiement</span><strong>{state.method ?? 'Mobile Money'}</strong></li>
@@ -371,7 +492,7 @@ export function Checkout() {
               <div className="dev-banner">
                 <p className="hint">Mode démo : aucun prestataire réel n’est connecté.</p>
                 <button className="btn ghost" onClick={() => void approveDev()}>
-                  Confirmer le paiement (démo)
+                  Simuler le webhook backend (démo)
                 </button>
               </div>
             ) : (
@@ -384,18 +505,19 @@ export function Checkout() {
           <h2>Paiement en attente</h2>
           <div className="card-body stack">
             <p className="confirm-line" role="status">
-              Votre paiement n’est pas encore confirmé. Nous continuons de vérifier.
+              {state.message ?? 'Votre paiement n’est pas encore confirmé. Nous continuons de vérifier.'}
             </p>
+            {state.orderId ? <p className="hint">Référence commande : <strong>{state.orderId}</strong></p> : null}
             {devApprove ? (
               <div className="dev-banner">
                 <p className="hint">Mode démo : confirmez pour poursuivre.</p>
                 <button className="btn ghost" onClick={() => void approveDev()}>
-                  Confirmer le paiement (démo)
+                  Simuler le webhook backend (démo)
                 </button>
               </div>
             ) : null}
-            <button className="btn big" onClick={() => { if (state.orderId) void applyOrderStateNow(); }}>
-              Vérifier à nouveau
+            <button className="btn big" disabled={verifyBusy} onClick={() => void applyOrderStateNow()}>
+              {verifyBusy ? 'Vérification…' : 'Vérifier à nouveau'}
             </button>
             <button className="btn ghost" onClick={() => { writeResume(null); dispatch({ type: 'RESTART' }); }}>
               Retourner à l’accueil
@@ -433,6 +555,7 @@ export function Checkout() {
           <h2>Paiement réussi</h2>
           <div className="card-body stack">
             <p className="ok" role="status">Votre accès Wi-Fi est en cours de préparation.</p>
+            {state.orderId ? <p className="hint">Référence commande : <strong>{state.orderId}</strong></p> : null}
             {state.offer ? <PlanRecap offer={state.offer} /> : null}
             <div className="spinner" aria-hidden="true" />
             <p className="hint">Nous finalisons votre code Wi-Fi. Aucun second paiement n’est nécessaire.</p>
@@ -442,8 +565,9 @@ export function Checkout() {
         <section className="card journey-card">
           <h2>Paiement réussi — votre code Wi-Fi</h2>
           <div className="card-body stack">
+            {state.orderId ? <p className="hint">Référence commande : <strong>{state.orderId}</strong></p> : null}
             {state.offer ? <PlanRecap offer={state.offer} /> : null}
-            <CodeDelivery phone={state.phone} offer={state.offer} />
+            <CodeDelivery phone={state.phone} offer={state.offer} orderId={state.orderId} />
             <button className="btn ghost" onClick={() => dispatch({ type: 'RESTART' })}>Retour à l’accueil</button>
           </div>
         </section>
@@ -452,9 +576,18 @@ export function Checkout() {
   );
 
   async function applyOrderStateNow() {
-    if (!state.orderId) return;
-    const res = await api<OrderView>(`/orders/${state.orderId}`);
-    if (res.ok && res.body) applyOrderState(res.body.state);
+    if (!state.orderId || verifyBusy) return;
+    setVerifyBusy(true);
+    if (pollSession.current) pollSession.current.stopped = true;
+    pollSession.current = null;
+    dispatch({ type: 'RECONCILIATION_RETRY' });
+    try {
+      const res = await api<OrderView>(`/orders/${state.orderId}`);
+      if (res.ok && res.body) applyOrderState(res.body);
+      else dispatch({ type: 'PAYMENT_PENDING_SEEN', message: RECONCILIATION_NETWORK_MESSAGE });
+    } finally {
+      setVerifyBusy(false);
+    }
   }
 }
 

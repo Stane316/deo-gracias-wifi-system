@@ -76,11 +76,12 @@ export function MyTickets() {
         ) : (
           <table className="table">
             <thead>
-              <tr><th>Offre</th><th>État base</th><th>Préfixe</th><th>Code</th><th>Vendu le</th></tr>
+              <tr><th>Commande</th><th>Offre</th><th>État base</th><th>Préfixe</th><th>Code</th><th>Vendu le</th></tr>
             </thead>
             <tbody>
               {tickets.map((t) => (
                 <tr key={t.id}>
+                  <td>{t.order_reference ?? t.order_id ?? '—'}</td>
                   <td>{t.offer_id ?? '—'}</td>
                   <td>{t.db_state}</td>
                   <td>{t.code_prefix_hint ?? '—'}</td>
