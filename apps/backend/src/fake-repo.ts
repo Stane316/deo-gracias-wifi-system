@@ -4,7 +4,7 @@
  */
 import { OFFERS } from '@dg/shared';
 import { randomUUID } from 'node:crypto';
-import type { AdminDashboardDbStats, AlertAckRecord } from './admin.js';
+import type { AdminDashboardDbStats, AlertAckRecord, ConnectorHeartbeat } from './admin.js';
 import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs } from './ticketgen.js';
 import type { CreatedBackendBatch } from './repo.js';
 import type {
@@ -506,18 +506,44 @@ export class FakeRepo implements BackendRepo {
   // IMP-17 — stats admin pilotables par les tests unitaires (doc 09 §12-13).
   dashboardStats: AdminDashboardDbStats = {
     ordersCountToday: 0,
+    salesCountToday: 0,
     paymentsConfirmedToday: 0,
     revenueTodayFcfa: 0,
     ticketsDeliveredToday: 0,
+    salesByOffer: [],
     ticketsByState: {},
     availableByOffer: {},
     incidentsOpen: 0,
     syncPending: 0,
     syncFailed: 0,
     syncSuccess: 0,
+    syncLastAt: null,
+    syncLastState: null,
+    syncLastError: null,
+    recentActivity: [],
+    connector: null,
   };
   async getAdminDashboardStats(_since: Date): Promise<AdminDashboardDbStats> {
     return this.dashboardStats;
+  }
+  connectorHeartbeat: ConnectorHeartbeat | null = null;
+  async recordConnectorHeartbeat(input: {
+    connectorId: string;
+    version?: string;
+    routerModel?: string;
+    routerosVersion?: string;
+  }): Promise<void> {
+    this.connectorHeartbeat = {
+      connectorId: input.connectorId,
+      version: input.version ?? null,
+      routerModel: input.routerModel ?? null,
+      routerosVersion: input.routerosVersion ?? null,
+      lastSeenAt: new Date().toISOString(),
+    };
+    this.dashboardStats.connector = this.connectorHeartbeat;
+  }
+  async getConnectorHeartbeat(): Promise<ConnectorHeartbeat | null> {
+    return this.connectorHeartbeat;
   }
   ticketsStatsByOffer: Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }> = [];
   async getTicketsStatsByOffer(): Promise<Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }>> {

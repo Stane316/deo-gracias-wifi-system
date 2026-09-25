@@ -9,41 +9,41 @@ BEGIN
   FROM information_schema.tables
   WHERE table_schema = 'public' AND table_type = 'BASE TABLE';
 
-  IF n_tables <> 15 THEN
-    RAISE EXCEPTION 'smoke: attendu 15 tables public, trouvé %', n_tables;
+  IF n_tables <> 16 THEN
+    RAISE EXCEPTION 'smoke: attendu 16 tables public, trouvé %', n_tables;
   END IF;
 
-  -- Les 15 tables du contrat (blueprint §3.1 + state_transitions IMP-11)
+  -- Les 16 tables du contrat (blueprint §3.1 + state_transitions IMP-11)
   PERFORM 1 FROM information_schema.tables
   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     AND table_name IN (
       'customers','plans','orders','payments','payment_events',
       'ticket_batches','tickets','mikrotik_sync','access_sessions',
-      'reconciliation_runs','audit_logs','incidents','alerts','settings','state_transitions');
+      'reconciliation_runs','audit_logs','incidents','alerts','settings','state_transitions','connector_heartbeats');
   IF NOT FOUND THEN
     RAISE EXCEPTION 'smoke: table(s) du contrat manquante(s)';
   END IF;
 
-  -- Vérification explicite : chaque table du contrat existe (count = 15)
+  -- Vérification explicite : chaque table du contrat existe (count = 16)
   SELECT count(*) INTO n_tables
   FROM information_schema.tables
   WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     AND table_name IN (
       'customers','plans','orders','payments','payment_events',
       'ticket_batches','tickets','mikrotik_sync','access_sessions',
-      'reconciliation_runs','audit_logs','incidents','alerts','settings','state_transitions');
-  IF n_tables <> 15 THEN
-    RAISE EXCEPTION 'smoke: contrat de tables incomplet (%/15)', n_tables;
+      'reconciliation_runs','audit_logs','incidents','alerts','settings','state_transitions','connector_heartbeats');
+  IF n_tables <> 16 THEN
+    RAISE EXCEPTION 'smoke: contrat de tables incomplet (%/16)', n_tables;
   END IF;
 
-  -- Triggers updated_at : exactement 11 tables mutables en portent une.
+  -- Triggers updated_at : exactement 12 tables mutables en portent une.
   -- payment_events / audit_logs (insert-only) et reconciliation_runs (pas de colonne)
   -- n'en ont PAS : c'est le contrat, pas un oubli.
   SELECT count(*) INTO n_triggers
   FROM information_schema.triggers
   WHERE trigger_schema = 'public' AND trigger_name LIKE '%_updated_at';
-  IF n_triggers <> 11 THEN
-    RAISE EXCEPTION 'smoke: triggers updated_at attendus = 11, trouvé %', n_triggers;
+  IF n_triggers <> 12 THEN
+    RAISE EXCEPTION 'smoke: triggers updated_at attendus = 12, trouvé %', n_triggers;
   END IF;
 
   IF EXISTS (
@@ -73,7 +73,7 @@ BEGIN
     RAISE EXCEPTION 'smoke: contrainte tickets_sold_requires_order absente';
   END IF;
 
-  RAISE NOTICE 'smoke OK : 15 tables, % triggers updated_at, gardes présentes', n_triggers;
+  RAISE NOTICE 'smoke OK : 16 tables, % triggers updated_at, gardes présentes', n_triggers;
 END;
 $$;
 

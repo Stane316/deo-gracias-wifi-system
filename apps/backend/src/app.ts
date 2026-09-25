@@ -30,6 +30,7 @@ import {
   adminIdParamsSchema,
   adminListQuerySchema,
   connectorClaimBodySchema,
+  connectorHeartbeatBodySchema,
   connectorInventoryReportSchema,
   devApproveBodySchema,
   connectorResultBodySchema,
@@ -196,7 +197,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           .status(503)
           .type('application/problem+json')
           .send(problem(503, 'Base non migrée',
-            `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 12 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
+            `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 13 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
       }
       return { status: 'ready', schema_migrated: true };
     } catch (err) {
@@ -222,7 +223,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           .status(503)
           .type('application/problem+json')
           .send(problem(503, 'Base non migrée',
-            `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0012 sur CETTE base, ou corrigez DATABASE_URL.`));
+            `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0013 sur CETTE base, ou corrigez DATABASE_URL.`));
       }
       plans = await repo.listActivePlans();
     } catch (err) {
@@ -1038,6 +1039,24 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     return true;
   };
 
+  // IMP-30 — heartbeat explicite : l'absence de heartbeat conserve UNKNOWN.
+  app.post('/connector/heartbeat', async (req, reply) => {
+    if (!(await connectorAuthOk(req, reply))) return;
+    const parsed = connectorHeartbeatBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Body invalide', parsed.error.issues.map((i) => i.message).join(' ; ')));
+    }
+    await repo.recordConnectorHeartbeat({
+      connectorId: parsed.data.connector_id,
+      ...(parsed.data.version ? { version: parsed.data.version } : {}),
+      ...(parsed.data.router_model ? { routerModel: parsed.data.router_model } : {}),
+      ...(parsed.data.routeros_version ? { routerosVersion: parsed.data.routeros_version } : {}),
+    });
+    await repo.logAudit({ actor: 'connector', action: 'connector_heartbeat', entity: 'connector_heartbeats', entityId: parsed.data.connector_id });
+    return reply.status(200).send({ ok: true, received_at: new Date().toISOString() });
+  });
+
   app.post('/connector/sync/claim', async (req, reply) => {
     if (!(await connectorAuthOk(req, reply))) return;
     const parsed = connectorClaimBodySchema.safeParse(req.body);
@@ -1247,7 +1266,18 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       generated_at: payload.generated_at,
       timezone: payload.timezone,
       connector_state: payload.system.connector_state,
+      connector_id: payload.system.connector_id,
+      connector_last_contact_at: payload.system.connector_last_contact_at,
+      connector_version: payload.system.connector_version,
+      router_model: payload.system.router_model,
+      routeros_version: payload.system.routeros_version,
       sync_state: payload.system.sync_state,
+      last_sync_at: payload.system.last_sync_at,
+      last_sync_state: payload.system.last_sync_state,
+      last_sync_error: payload.system.last_sync_error,
+      sync_pending: payload.system.sync_pending,
+      sync_failed: payload.system.sync_failed,
+      sync_success: payload.system.sync_success,
       incidents_open: payload.system.incidents_open,
     };
   });

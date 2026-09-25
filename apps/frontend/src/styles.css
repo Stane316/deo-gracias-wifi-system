@@ -273,6 +273,18 @@ pre {
 /* IMP-27 — listes admin : lecture mobile, filtres et pagination bornée. */
 .admin-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; padding-top: 12px; padding-bottom: 12px; }
 .admin-toolbar input { text-align: left; max-width: 520px; }
+.admin-subheading { margin: 16px 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.admin-compact-list, .admin-alert-list, .admin-activity-list { list-style: none; margin: 0; padding: 0; }
+.admin-compact-list li, .admin-alert-list li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.admin-alert-list li { color: #8a4b00; }
+.admin-activity-card { margin-top: 16px; }
+.admin-activity-list li { display: grid; grid-template-columns: 90px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.admin-activity-list time { color: var(--muted); white-space: nowrap; font-size: 12px; }
+.activity-link { padding: 0; border: 0; background: none; color: var(--blue); cursor: pointer; font: inherit; text-align: left; }
+.activity-link:hover, .activity-link:focus-visible { text-decoration: underline; }
+.status-online, .status-healthy { color: var(--green); }
+.status-offline, .status-error { color: #b42318; }
+.status-unknown, .status-warning { color: #8a4b00; }
 .table-wrap { overflow-x: auto; padding-left: 0; padding-right: 0; }
 .admin-pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 12px; color: var(--muted); font-size: 12px; }
 .order-detail { margin: 16px 0; }

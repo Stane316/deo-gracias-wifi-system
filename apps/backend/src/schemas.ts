@@ -71,6 +71,14 @@ export const connectorClaimBodySchema = z.object({
   worker_id: z.string().trim().min(1).max(120),
 }).strict();
 
+/** IMP-30 — heartbeat explicite : aucun statut ONLINE/OFFLINE déduit d'une simple file. */
+export const connectorHeartbeatBodySchema = z.object({
+  connector_id: z.string().trim().min(1).max(120),
+  version: z.string().trim().min(1).max(80).optional(),
+  router_model: z.string().trim().min(1).max(120).optional(),
+  routeros_version: z.string().trim().min(1).max(80).optional(),
+}).strict();
+
 /** IMP-21 — résultat d'une opération réclamée : succès (result optionnel) OU
  * échec (error obligatoire). La politique retry/backoff est côté serveur (D12). */
 export const connectorResultBodySchema = z

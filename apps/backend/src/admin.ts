@@ -21,13 +21,39 @@ export const BUSINESS_TIMEZONE = 'Africa/Porto-Novo';
 export const BUSINESS_UTC_OFFSET_MINUTES = 60;
 /** Doc 09 §12.1 « tickets proches de l'épuisement » — seuil à confirmer. */
 export const LOW_STOCK_THRESHOLD = 10;
+export const CONNECTOR_ONLINE_WINDOW_MS = 2 * 60_000;
+export const CONNECTOR_OFFLINE_AFTER_MS = 5 * 60_000;
+
+export type ConnectorState = 'ONLINE' | 'OFFLINE' | 'UNKNOWN';
+export type SyncHealthState = 'HEALTHY' | 'WARNING' | 'ERROR' | 'UNKNOWN';
+
+export interface AdminActivityEvent {
+  id: string;
+  kind: 'SALE' | 'PAYMENT' | 'TICKET' | 'INCIDENT' | 'SYNC' | 'ADMIN';
+  action: string;
+  actor: string;
+  entity: string;
+  entityId: string | null;
+  state: string | null;
+  occurredAt: string;
+}
+
+export interface ConnectorHeartbeat {
+  connectorId: string;
+  version: string | null;
+  routerModel: string | null;
+  routerosVersion: string | null;
+  lastSeenAt: string;
+}
 
 /** Agrégats bruts remontés par le repo (source : données persistées). */
 export interface AdminDashboardDbStats {
   ordersCountToday: number;
+  salesCountToday: number;
   paymentsConfirmedToday: number;
   revenueTodayFcfa: number;
   ticketsDeliveredToday: number;
+  salesByOffer: Array<{ offerId: string; salesCount: number; revenueFcfa: number }>;
   /** Compte des tickets par état brut de `tickets.db_state`. */
   ticketsByState: Record<string, number>;
   /** Tickets réallouables (AVAILABLE + RELEASED) par `plans.offer_id`. */
@@ -36,6 +62,11 @@ export interface AdminDashboardDbStats {
   syncPending: number;
   syncFailed: number;
   syncSuccess: number;
+  syncLastAt: string | null;
+  syncLastState: string | null;
+  syncLastError: string | null;
+  recentActivity: AdminActivityEvent[];
+  connector: ConnectorHeartbeat | null;
 }
 
 export interface DashboardPayload {
@@ -45,9 +76,11 @@ export interface DashboardPayload {
   today: {
     revenue_fcfa: number;
     orders_count: number;
+    sales_count: number;
     payments_confirmed: number;
     tickets_delivered: number;
   };
+  sales_by_offer: Array<{ offer_id: string; sales_count: number; revenue_fcfa: number }>;
   inventory: {
     available: number;
     reserved: number;
@@ -55,9 +88,30 @@ export interface DashboardPayload {
     expired: number;
     low_stock: Array<{ offer_id: string; available: number }>;
   };
+  recent_activity: Array<{
+    id: string;
+    kind: AdminActivityEvent['kind'];
+    action: string;
+    actor: string;
+    entity: string;
+    entity_id: string | null;
+    state: string | null;
+    occurred_at: string;
+  }>;
   system: {
-    connector_state: 'ONLINE' | 'OFFLINE' | 'UNKNOWN';
-    sync_state: 'HEALTHY' | 'WARNING' | 'ERROR' | 'UNKNOWN';
+    connector_state: ConnectorState;
+    connector_id: string | null;
+    connector_last_contact_at: string | null;
+    connector_version: string | null;
+    router_model: string | null;
+    routeros_version: string | null;
+    sync_state: SyncHealthState;
+    last_sync_at: string | null;
+    last_sync_state: string | null;
+    last_sync_error: string | null;
+    sync_pending: number;
+    sync_failed: number;
+    sync_success: number;
     incidents_open: number;
   };
 }
@@ -116,10 +170,25 @@ export function computeSyncState(counts: {
   pending: number;
   failed: number;
   success: number;
-}): 'HEALTHY' | 'WARNING' | 'ERROR' | 'UNKNOWN' {
+}): SyncHealthState {
   if (counts.failed > 0) return 'ERROR';
   if (counts.pending > 0) return 'WARNING';
   if (counts.success > 0) return 'HEALTHY';
+  return 'UNKNOWN';
+}
+
+/**
+ * ONLINE/OFFLINE repose uniquement sur un heartbeat explicite.
+ * Une opération de file ne prouve pas que le Connector est encore joignable.
+ */
+export function computeConnectorState(
+  heartbeat: ConnectorHeartbeat | null,
+  now: Date = new Date(),
+): ConnectorState {
+  if (!heartbeat) return 'UNKNOWN';
+  const age = now.getTime() - new Date(heartbeat.lastSeenAt).getTime();
+  if (age <= CONNECTOR_ONLINE_WINDOW_MS) return 'ONLINE';
+  if (age > CONNECTOR_OFFLINE_AFTER_MS) return 'OFFLINE';
   return 'UNKNOWN';
 }
 
@@ -129,6 +198,12 @@ export function buildDashboardPayload(
   now: Date = new Date(),
 ): DashboardPayload {
   const totals = inventoryTotals(stats.ticketsByState);
+  const connectorState = computeConnectorState(stats.connector, now);
+  const syncState = computeSyncState({
+    pending: stats.syncPending,
+    failed: stats.syncFailed,
+    success: stats.syncSuccess,
+  });
   return {
     generated_at: now.toISOString(),
     business_day_start: startOfBusinessDay(now).toISOString(),
@@ -136,21 +211,43 @@ export function buildDashboardPayload(
     today: {
       revenue_fcfa: stats.revenueTodayFcfa,
       orders_count: stats.ordersCountToday,
+      sales_count: stats.salesCountToday,
       payments_confirmed: stats.paymentsConfirmedToday,
       tickets_delivered: stats.ticketsDeliveredToday,
     },
+    sales_by_offer: stats.salesByOffer.map((sale) => ({
+      offer_id: sale.offerId,
+      sales_count: sale.salesCount,
+      revenue_fcfa: sale.revenueFcfa,
+    })),
     inventory: {
       ...totals,
       low_stock: lowStockOffers(stats.availableByOffer, allOfferIds),
     },
+    recent_activity: stats.recentActivity.map((event) => ({
+      id: event.id,
+      kind: event.kind,
+      action: event.action,
+      actor: event.actor,
+      entity: event.entity,
+      entity_id: event.entityId,
+      state: event.state,
+      occurred_at: event.occurredAt,
+    })),
     system: {
-      // Phase 1 : le Connector (IMP-21) n'existe pas encore — état honnête.
-      connector_state: 'UNKNOWN',
-      sync_state: computeSyncState({
-        pending: stats.syncPending,
-        failed: stats.syncFailed,
-        success: stats.syncSuccess,
-      }),
+      connector_state: connectorState,
+      connector_id: stats.connector?.connectorId ?? null,
+      connector_last_contact_at: stats.connector?.lastSeenAt ?? null,
+      connector_version: stats.connector?.version ?? null,
+      router_model: stats.connector?.routerModel ?? null,
+      routeros_version: stats.connector?.routerosVersion ?? null,
+      sync_state: syncState,
+      last_sync_at: stats.syncLastAt,
+      last_sync_state: stats.syncLastState,
+      last_sync_error: stats.syncLastError,
+      sync_pending: stats.syncPending,
+      sync_failed: stats.syncFailed,
+      sync_success: stats.syncSuccess,
       incidents_open: stats.incidentsOpen,
     },
   };

@@ -6,7 +6,12 @@
 import type { Pool } from 'pg';
 import { createHash } from 'node:crypto';
 import { sealCode } from './ticketvault.js';
-import type { AdminDashboardDbStats, AlertAckRecord } from './admin.js';
+import type {
+  AdminActivityEvent,
+  AdminDashboardDbStats,
+  AlertAckRecord,
+  ConnectorHeartbeat,
+} from './admin.js';
 import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs, type GeneratedTicketSpec } from './ticketgen.js';
 
 
@@ -297,8 +302,16 @@ export interface BackendRepo {
     orderId: string | null;
   } | null>;
 
-  /** IMP-17 — agrégats du dashboard admin (doc 09 §12-13), jour courant = depuis `since`. */
+  /** IMP-17/30 — agrégats persistés du dashboard, jour courant = depuis `since`. */
   getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats>;
+  /** IMP-30 — heartbeat Connector explicite ; état ONLINE/OFFLINE sinon UNKNOWN. */
+  recordConnectorHeartbeat(input: {
+    connectorId: string;
+    version?: string;
+    routerModel?: string;
+    routerosVersion?: string;
+  }): Promise<void>;
+  getConnectorHeartbeat(): Promise<ConnectorHeartbeat | null>;
   /** IMP-17 — inventaire par offre active (doc 09 §12.1). */
   getTicketsStatsByOffer(): Promise<Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }>>;
   /** IMP-27 — listes opérationnelles protégées et paginées. */
@@ -1199,7 +1212,7 @@ export class PgRepo implements BackendRepo {
       'customers', 'plans', 'orders', 'payments', 'payment_events',
       'ticket_batches', 'tickets', 'mikrotik_sync', 'access_sessions',
       'reconciliation_runs', 'audit_logs', 'incidents', 'alerts', 'settings',
-      'state_transitions',
+      'state_transitions', 'connector_heartbeats',
     ];
     const res = await this.pool.query(
       `SELECT table_name FROM information_schema.tables
@@ -1519,19 +1532,32 @@ export class PgRepo implements BackendRepo {
   }
 
   async getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats> {
-    const [orders, payments, delivered, byState, byOffer, incidents, sync] = await Promise.all([
+    const [orders, payments, salesByOffer, delivered, byState, byOffer, incidents, sync, syncLast, activity, heartbeat] = await Promise.all([
       this.pool.query(
-        `SELECT count(*)::int AS n FROM public.orders WHERE created_at >= $1`,
+        `SELECT count(*)::int AS n
+         FROM public.orders WHERE created_at >= $1`,
         [since],
       ),
       this.pool.query(
         `SELECT count(*)::int AS n,
+                count(DISTINCT order_id)::int AS sales,
                 coalesce(sum(amount_fcfa), 0)::bigint AS total
          FROM public.payments WHERE state = 'CONFIRMED' AND confirmed_at >= $1`,
         [since],
       ),
       this.pool.query(
-        `SELECT count(*)::int AS n FROM public.tickets WHERE sold_at >= $1`,
+        `SELECT p.offer_id, count(DISTINCT o.id)::int AS sales_count,
+                coalesce(sum(pay.amount_fcfa), 0)::bigint AS revenue
+         FROM public.orders o
+         JOIN public.plans p ON p.id = o.plan_id
+         JOIN public.payments pay ON pay.order_id = o.id
+         WHERE pay.state = 'CONFIRMED' AND pay.confirmed_at >= $1
+         GROUP BY p.offer_id ORDER BY sales_count DESC, p.offer_id`,
+        [since],
+      ),
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM public.orders
+         WHERE state = 'DELIVERED' AND updated_at >= $1`,
         [since],
       ),
       this.pool.query(
@@ -1552,22 +1578,116 @@ export class PgRepo implements BackendRepo {
                 count(*) FILTER (WHERE state = 'SUCCESS')::int AS success
          FROM public.mikrotik_sync`,
       ),
+      this.pool.query(
+        `SELECT updated_at, state,
+                COALESCE(result->'error'->>'message', result->>'error') AS error
+         FROM public.mikrotik_sync ORDER BY updated_at DESC LIMIT 1`,
+      ),
+      this.pool.query(
+        `SELECT id::text, action, actor, entity, entity_id, at,
+                after->>'state' AS state
+         FROM public.audit_logs
+         UNION ALL
+         SELECT id::text, 'incident_created', 'system', 'incidents', id::text, created_at, state
+         FROM public.incidents
+         ORDER BY at DESC LIMIT 20`,
+      ),
+      this.pool.query(
+        `SELECT connector_id, version, router_model, routeros_version, last_seen_at
+         FROM public.connector_heartbeats ORDER BY last_seen_at DESC LIMIT 1`,
+      ),
     ]);
     const ticketsByState: Record<string, number> = {};
     for (const row of byState.rows) ticketsByState[String(row['db_state'])] = Number(row['n']);
     const availableByOffer: Record<string, number> = {};
     for (const row of byOffer.rows) availableByOffer[String(row['offer_id'])] = Number(row['n']);
+    const activityKind = (entity: string, action: string, state: string | null): AdminActivityEvent['kind'] => {
+      if (entity === 'incidents') return 'INCIDENT';
+      if (entity === 'mikrotik_sync') return 'SYNC';
+      if (entity === 'payments') return 'PAYMENT';
+      if (entity === 'tickets') return 'TICKET';
+      if (entity === 'orders' && ['PAID', 'TICKET_ALLOCATED', 'DELIVERED', 'REFUNDED'].includes(state ?? '')) return 'SALE';
+      return 'ADMIN';
+    };
+    const recentActivity: AdminActivityEvent[] = activity.rows.map((row) => {
+      const entity = String(row['entity']);
+      const action = String(row['action']);
+      const state = row['state'] == null ? null : String(row['state']);
+      return {
+        id: String(row['id']),
+        kind: activityKind(entity, action, state),
+        action,
+        actor: String(row['actor']),
+        entity,
+        entityId: row['entity_id'] == null ? null : String(row['entity_id']),
+        state,
+        occurredAt: new Date(row['at'] as string).toISOString(),
+      };
+    });
+    const syncRow = syncLast.rows[0];
+    const heartbeatRow = heartbeat.rows[0];
     return {
       ordersCountToday: Number(orders.rows[0]?.['n'] ?? 0),
+      salesCountToday: Number(payments.rows[0]?.['sales'] ?? 0),
       paymentsConfirmedToday: Number(payments.rows[0]?.['n'] ?? 0),
       revenueTodayFcfa: Number(payments.rows[0]?.['total'] ?? 0),
       ticketsDeliveredToday: Number(delivered.rows[0]?.['n'] ?? 0),
+      salesByOffer: salesByOffer.rows.map((row) => ({
+        offerId: String(row['offer_id']),
+        salesCount: Number(row['sales_count']),
+        revenueFcfa: Number(row['revenue'] ?? 0),
+      })),
       ticketsByState,
       availableByOffer,
       incidentsOpen: Number(incidents.rows[0]?.['n'] ?? 0),
       syncPending: Number(sync.rows[0]?.['pending'] ?? 0),
       syncFailed: Number(sync.rows[0]?.['failed'] ?? 0),
       syncSuccess: Number(sync.rows[0]?.['success'] ?? 0),
+      syncLastAt: syncRow == null ? null : new Date(syncRow['updated_at'] as string).toISOString(),
+      syncLastState: syncRow == null ? null : String(syncRow['state']),
+      syncLastError: syncRow?.['error'] == null ? null : String(syncRow['error']),
+      recentActivity,
+      connector: heartbeatRow == null ? null : {
+        connectorId: String(heartbeatRow['connector_id']),
+        version: heartbeatRow['version'] == null ? null : String(heartbeatRow['version']),
+        routerModel: heartbeatRow['router_model'] == null ? null : String(heartbeatRow['router_model']),
+        routerosVersion: heartbeatRow['routeros_version'] == null ? null : String(heartbeatRow['routeros_version']),
+        lastSeenAt: new Date(heartbeatRow['last_seen_at'] as string).toISOString(),
+      },
+    };
+  }
+
+  async recordConnectorHeartbeat(input: {
+    connectorId: string;
+    version?: string;
+    routerModel?: string;
+    routerosVersion?: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO public.connector_heartbeats
+         (connector_id, version, router_model, routeros_version, last_seen_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (connector_id) DO UPDATE SET
+         version = EXCLUDED.version,
+         router_model = EXCLUDED.router_model,
+         routeros_version = EXCLUDED.routeros_version,
+         last_seen_at = EXCLUDED.last_seen_at`,
+      [input.connectorId, input.version ?? null, input.routerModel ?? null, input.routerosVersion ?? null],
+    );
+  }
+
+  async getConnectorHeartbeat(): Promise<ConnectorHeartbeat | null> {
+    const result = await this.pool.query(
+      `SELECT connector_id, version, router_model, routeros_version, last_seen_at
+       FROM public.connector_heartbeats ORDER BY last_seen_at DESC LIMIT 1`,
+    );
+    const row = result.rows[0];
+    return row == null ? null : {
+      connectorId: String(row['connector_id']),
+      version: row['version'] == null ? null : String(row['version']),
+      routerModel: row['router_model'] == null ? null : String(row['router_model']),
+      routerosVersion: row['routeros_version'] == null ? null : String(row['routeros_version']),
+      lastSeenAt: new Date(row['last_seen_at'] as string).toISOString(),
     };
   }
 

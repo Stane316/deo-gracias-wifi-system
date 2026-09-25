@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BUSINESS_TIMEZONE,
   buildDashboardPayload,
+  computeConnectorState,
   computeSyncState,
   inventoryTotals,
   lowStockOffers,
@@ -38,15 +39,22 @@ async function adminApp() {
 
 const zeroStats: AdminDashboardDbStats = {
   ordersCountToday: 0,
+  salesCountToday: 0,
   paymentsConfirmedToday: 0,
   revenueTodayFcfa: 0,
   ticketsDeliveredToday: 0,
+  salesByOffer: [],
   ticketsByState: {},
   availableByOffer: {},
   incidentsOpen: 0,
   syncPending: 0,
   syncFailed: 0,
   syncSuccess: 0,
+  syncLastAt: null,
+  syncLastState: null,
+  syncLastError: null,
+  recentActivity: [],
+  connector: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -85,11 +93,20 @@ describe('IMP-17 — logique pure admin', () => {
     expect(computeSyncState({ pending: 0, failed: 0, success: 0 })).toBe('UNKNOWN');
   });
 
+  it('computeConnectorState : heartbeat absent/stale = UNKNOWN ou OFFLINE, récent = ONLINE', () => {
+    const now = new Date('2026-09-26T12:00:00.000Z');
+    expect(computeConnectorState(null, now)).toBe('UNKNOWN');
+    expect(computeConnectorState({ connectorId: 'c1', version: null, routerModel: null, routerosVersion: null, lastSeenAt: '2026-09-26T11:59:00.000Z' }, now)).toBe('ONLINE');
+    expect(computeConnectorState({ connectorId: 'c1', version: null, routerModel: null, routerosVersion: null, lastSeenAt: '2026-09-26T11:56:00.000Z' }, now)).toBe('UNKNOWN');
+    expect(computeConnectorState({ connectorId: 'c1', version: null, routerModel: null, routerosVersion: null, lastSeenAt: '2026-09-26T11:50:00.000Z' }, now)).toBe('OFFLINE');
+  });
+
   it('buildDashboardPayload : structure doc 09 §12.1 + fuseau métier + connector UNKNOWN', () => {
     const now = new Date('2026-09-23T12:00:00Z');
     const payload = buildDashboardPayload({
       ...zeroStats,
       ordersCountToday: 5,
+      salesCountToday: 4,
       paymentsConfirmedToday: 4,
       revenueTodayFcfa: 1100,
       ticketsDeliveredToday: 4,
@@ -102,7 +119,7 @@ describe('IMP-17 — logique pure admin', () => {
     // toISOString() normalise en UTC : minuit local (UTC+1) = 23h00 UTC la veille.
     expect(payload.business_day_start).toBe('2026-09-22T23:00:00.000Z');
     expect(payload.today).toEqual({
-      revenue_fcfa: 1100, orders_count: 5, payments_confirmed: 4, tickets_delivered: 4,
+      revenue_fcfa: 1100, orders_count: 5, sales_count: 4, payments_confirmed: 4, tickets_delivered: 4,
     });
     expect(payload.inventory.available).toBe(659);
     expect(payload.inventory.sold).toBe(1);
@@ -110,7 +127,12 @@ describe('IMP-17 — logique pure admin', () => {
     expect(payload.inventory.low_stock).toEqual([
       { offer_id: '1-MOIS', available: 0 },
     ]);
-    expect(payload.system).toEqual({ connector_state: 'UNKNOWN', sync_state: 'ERROR', incidents_open: 2 });
+    expect(payload.system).toEqual({
+      connector_state: 'UNKNOWN', connector_id: null, connector_last_contact_at: null,
+      connector_version: null, router_model: null, routeros_version: null,
+      sync_state: 'ERROR', last_sync_at: null, last_sync_state: null, last_sync_error: null,
+      sync_pending: 0, sync_failed: 1, sync_success: 0, incidents_open: 2,
+    });
   });
 });
 
@@ -142,6 +164,7 @@ describe('IMP-17 — GET /admin/dashboard', () => {
     repo.dashboardStats = {
       ...zeroStats,
       ordersCountToday: 3,
+      salesCountToday: 2,
       paymentsConfirmedToday: 2,
       revenueTodayFcfa: 600,
       ticketsDeliveredToday: 2,
@@ -153,12 +176,42 @@ describe('IMP-17 — GET /admin/dashboard', () => {
     const body = JSON.parse(res.body) as Record<string, unknown>;
     expect(body['timezone']).toBe('Africa/Porto-Novo');
     expect(body['today']).toEqual({
-      revenue_fcfa: 600, orders_count: 3, payments_confirmed: 2, tickets_delivered: 2,
+      revenue_fcfa: 600, orders_count: 3, sales_count: 2, payments_confirmed: 2, tickets_delivered: 2,
     });
     expect(body['inventory']).toMatchObject({ available: 660, reserved: 0, sold: 0 });
     // Stock complet => aucun low_stock.
     expect((body['inventory'] as { low_stock: unknown[] }).low_stock).toEqual([]);
     expect(body['system']).toMatchObject({ connector_state: 'UNKNOWN', sync_state: 'UNKNOWN' });
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMP-30 — heartbeat Connector : état système honnête.
+// ---------------------------------------------------------------------------
+describe('IMP-30 — POST /connector/heartbeat', () => {
+  it('protège le heartbeat par le token Connector et conserve la dernière identité', async () => {
+    const repo = new FakeRepo();
+    const app = await buildApp({
+      repo,
+      connector: { token: 'connector-secret' },
+      rateLimit: { max: 100000 },
+      auth: { rateLimits: looseLimits },
+    });
+    expect((await app.inject({ method: 'POST', url: '/connector/heartbeat' })).statusCode).toBe(401);
+    const invalid = await app.inject({
+      method: 'POST', url: '/connector/heartbeat',
+      headers: { authorization: 'Bearer connector-secret', 'content-type': 'application/json' },
+      payload: { connector_id: '' },
+    });
+    expect(invalid.statusCode).toBe(400);
+    const valid = await app.inject({
+      method: 'POST', url: '/connector/heartbeat',
+      headers: { authorization: 'Bearer connector-secret', 'content-type': 'application/json' },
+      payload: { connector_id: 'connector-calavi-01', version: '0.1.0', router_model: 'RB951Ui-2HnD', routeros_version: '6.49.17' },
+    });
+    expect(valid.statusCode).toBe(200);
+    expect(repo.connectorHeartbeat).toMatchObject({ connectorId: 'connector-calavi-01', version: '0.1.0' });
     await app.close();
   });
 });

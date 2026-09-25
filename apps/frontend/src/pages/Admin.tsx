@@ -26,9 +26,41 @@ import {
 interface DashboardPayload {
   generated_at: string;
   timezone: string;
-  today: { revenue_fcfa: number; orders_count: number; payments_confirmed: number; tickets_delivered: number };
-  inventory: Record<string, unknown>;
-  system: { connector_state: string; sync_state: Record<string, unknown>; incidents_open: number };
+  today: { revenue_fcfa: number; orders_count: number; sales_count: number; payments_confirmed: number; tickets_delivered: number };
+  sales_by_offer: Array<{ offer_id: string; sales_count: number; revenue_fcfa: number }>;
+  inventory: {
+    available: number;
+    reserved: number;
+    sold: number;
+    expired: number;
+    low_stock: Array<{ offer_id: string; available: number }>;
+  };
+  recent_activity: Array<{
+    id: string;
+    kind: string;
+    action: string;
+    actor: string;
+    entity: string;
+    entity_id: string | null;
+    state: string | null;
+    occurred_at: string;
+  }>;
+  system: {
+    connector_state: string;
+    connector_id: string | null;
+    connector_last_contact_at: string | null;
+    connector_version: string | null;
+    router_model: string | null;
+    routeros_version: string | null;
+    sync_state: string;
+    last_sync_at: string | null;
+    last_sync_state: string | null;
+    last_sync_error: string | null;
+    sync_pending: number;
+    sync_failed: number;
+    sync_success: number;
+    incidents_open: number;
+  };
 }
 
 interface TicketsStats {
@@ -280,6 +312,25 @@ export function Admin() {
     else setError(problemDetail(res.body));
   };
 
+  const openActivity = (entity: string, entityId: string | null) => {
+    if (!entityId) return;
+    if (entity === 'orders') {
+      setTab('orders');
+      void openOrder(entityId);
+    } else if (entity === 'payments') {
+      setTab('payments');
+      setSearch(entityId);
+    } else if (entity === 'incidents') {
+      setTab('incidents');
+      setSearch(entityId);
+    } else if (entity === 'mikrotik_sync') {
+      setTab('reconciliation');
+    } else {
+      setTab('audit');
+      setSearch(entityId);
+    }
+  };
+
   const createBatch = async () => {
     if (batchSubmitting) return;
     setBatchError(null);
@@ -383,27 +434,62 @@ export function Admin() {
         ) : null}
 
       {tab === 'dashboard' && dashboard ? (
-        <div className="grid">
-          <section className="card">
-            <h2>Aujourd’hui ({dashboard.timezone})</h2>
-            <div className="kpis">
-              <div className="kpi"><span className="kpi-value">{formatFcfa(dashboard.today.revenue_fcfa)}</span><span>Revenu</span></div>
-              <div className="kpi"><span className="kpi-value">{dashboard.today.orders_count}</span><span>Commandes</span></div>
-              <div className="kpi"><span className="kpi-value">{dashboard.today.payments_confirmed}</span><span>Paiements confirmés</span></div>
-              <div className="kpi"><span className="kpi-value">{dashboard.today.tickets_delivered}</span><span>Tickets livrés</span></div>
-            </div>
+        <>
+          <div className="grid">
+            <section className="card">
+              <h2>Aujourd’hui ({dashboard.timezone})</h2>
+              <div className="kpis">
+                <div className="kpi"><span className="kpi-value">{formatFcfa(dashboard.today.revenue_fcfa)}</span><span>CA encaissé</span></div>
+                <div className="kpi"><span className="kpi-value">{dashboard.today.sales_count}</span><span>Ventes</span></div>
+                <div className="kpi"><span className="kpi-value">{dashboard.today.payments_confirmed}</span><span>Paiements confirmés</span></div>
+                <div className="kpi"><span className="kpi-value">{dashboard.today.tickets_delivered}</span><span>Tickets livrés</span></div>
+              </div>
+              <h3 className="admin-subheading">Plans vendus aujourd’hui</h3>
+              {dashboard.sales_by_offer.length === 0 ? <p className="hint">Aucune vente confirmée.</p> : (
+                <ul className="admin-compact-list">
+                  {dashboard.sales_by_offer.map((sale) => <li key={sale.offer_id}><span>{sale.offer_id}</span><strong>{sale.sales_count} · {formatFcfa(sale.revenue_fcfa)}</strong></li>)}
+                </ul>
+              )}
+            </section>
+            <section className="card">
+              <h2>Inventaire</h2>
+              <ul className="kv">
+                <li><span>Disponibles</span><strong>{dashboard.inventory.available}</strong></li>
+                <li><span>Réservés</span><strong>{dashboard.inventory.reserved}</strong></li>
+                <li><span>Vendus / utilisés</span><strong>{dashboard.inventory.sold}</strong></li>
+                <li><span>Expirés</span><strong>{dashboard.inventory.expired}</strong></li>
+              </ul>
+              <h3 className="admin-subheading">Alertes de stock</h3>
+              {dashboard.inventory.low_stock.length === 0 ? <p className="ok">Stock au-dessus du seuil.</p> : (
+                <ul className="admin-alert-list">{dashboard.inventory.low_stock.map((entry) => <li key={entry.offer_id}><strong>{entry.offer_id}</strong><span>{entry.available} restant(s)</span></li>)}</ul>
+              )}
+            </section>
+            <section className="card">
+              <h2>Système</h2>
+              <ul className="kv">
+                <li><span>Connector</span><strong className={`status-${dashboard.system.connector_state.toLowerCase()}`}>{dashboard.system.connector_state}</strong></li>
+                <li><span>Dernier contact</span><strong>{dashboard.system.connector_last_contact_at ? formatDateTime(dashboard.system.connector_last_contact_at) : 'Aucun heartbeat'}</strong></li>
+                <li><span>Version Connector</span><strong>{dashboard.system.connector_version ?? '—'}</strong></li>
+                <li><span>Routeur</span><strong>{dashboard.system.router_model ?? 'Non communiqué'}</strong></li>
+                <li><span>Synchronisation</span><strong className={`status-${dashboard.system.sync_state.toLowerCase()}`}>{dashboard.system.sync_state}</strong></li>
+                <li><span>Dernière sync</span><strong>{dashboard.system.last_sync_at ? formatDateTime(dashboard.system.last_sync_at) : 'Aucune'}</strong></li>
+                <li><span>Opérations en attente</span><strong>{dashboard.system.sync_pending}</strong></li>
+                <li><span>Échecs</span><strong>{dashboard.system.sync_failed}</strong></li>
+                <li><span>Incidents ouverts</span><strong>{dashboard.system.incidents_open}</strong></li>
+              </ul>
+              {dashboard.system.last_sync_error ? <p className="err">Dernière erreur : {dashboard.system.last_sync_error}</p> : null}
+              <p className="hint">Généré le {formatDateTime(dashboard.generated_at)}</p>
+            </section>
+          </div>
+          <section className="card admin-activity-card">
+            <h2>Activité récente</h2>
+            {dashboard.recent_activity.length === 0 ? <p className="hint">Aucune activité récente.</p> : (
+              <ul className="admin-activity-list">
+                {dashboard.recent_activity.map((event) => <li key={`${event.id}-${event.occurred_at}`}><span className="badge">{event.kind}</span>{event.entity_id ? <button className="activity-link" onClick={() => openActivity(event.entity, event.entity_id)}>{event.action} · {event.entity} · {event.entity_id.slice(0, 8)}…{event.state ? ` · ${event.state}` : ''}</button> : <span>{event.action} · {event.entity}{event.state ? ` · ${event.state}` : ''}</span>}<time dateTime={event.occurred_at}>{formatDateTime(event.occurred_at)}</time></li>)}
+              </ul>
+            )}
           </section>
-          <section className="card">
-            <h2>Système</h2>
-            <ul className="kv">
-              <li><span>Connector</span><strong>{dashboard.system.connector_state}</strong></li>
-              <li><span>Synchronisation</span><strong>{JSON.stringify(dashboard.system.sync_state)}</strong></li>
-              <li><span>Incidents ouverts</span><strong>{dashboard.system.incidents_open}</strong></li>
-              <li><span>Généré le</span><strong>{formatDateTime(dashboard.generated_at)}</strong></li>
-            </ul>
-            <details><summary>Inventaire (détail)</summary><pre>{JSON.stringify(dashboard.inventory, null, 2)}</pre></details>
-          </section>
-        </div>
+        </>
       ) : null}
 
       {tab === 'orders' ? <section className="card"><h2>Commandes ({orders?.total ?? 0})</h2><AdminTable>

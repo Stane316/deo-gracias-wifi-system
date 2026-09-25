@@ -11,9 +11,16 @@ async function mockAdminApi(page: Page, onRequest?: (url: URL) => void) {
   await page.route('**/api/admin/me', (route) => json(route, { sub: 'e2e-admin', role: 'ADMIN', email: 'admin@dg.bj' }));
   await page.route('**/api/admin/dashboard', (route) => json(route, {
     generated_at: '2026-09-25T12:00:00.000Z', timezone: 'Africa/Porto-Novo',
-    today: { revenue_fcfa: 0, orders_count: 0, payments_confirmed: 0, tickets_delivered: 0 },
+    today: { revenue_fcfa: 0, orders_count: 0, sales_count: 0, payments_confirmed: 0, tickets_delivered: 0 },
+    sales_by_offer: [],
     inventory: { available: 0, reserved: 0, sold: 0, expired: 0, low_stock: [] },
-    system: { connector_state: 'UNKNOWN', sync_state: 'UNKNOWN', incidents_open: 0 },
+    recent_activity: [],
+    system: {
+      connector_state: 'UNKNOWN', connector_id: null, connector_last_contact_at: null,
+      connector_version: null, router_model: null, routeros_version: null,
+      sync_state: 'UNKNOWN', last_sync_at: null, last_sync_state: null, last_sync_error: null,
+      sync_pending: 0, sync_failed: 0, sync_success: 0, incidents_open: 0,
+    },
   }));
   await page.route('**/api/admin/orders*', (route) => {
     onRequest?.(new URL(route.request().url()));
