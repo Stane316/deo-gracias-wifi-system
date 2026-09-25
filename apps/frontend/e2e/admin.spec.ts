@@ -31,7 +31,7 @@ test.describe('IMP-29 — route admin, shell et filtres serveur', () => {
   });
 
   test('connexion locale contrôlée ouvre le shell /admin, filtre côté serveur et logout', async ({ page }) => {
-    let lastOrdersUrl: URL | null = null;
+    let lastOrdersUrl: URL | undefined;
     await mockAdminApi(page, (url) => { lastOrdersUrl = url; });
     await page.goto('/admin/login');
     await page.getByLabel('Jeton admin local').fill('e2e-local-token');
