@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Admin } from './pages/Admin.js';
-import { Accueil } from './pages/Accueil.js';
+import { Checkout } from './checkout/Checkout.js';
 
 /** Routage minimal par hash : #/ (public) et #/admin. */
 function useRoute(): 'accueil' | 'admin' {
@@ -28,7 +28,7 @@ export function App() {
         </nav>
       </header>
       <main className="content">
-        {route === 'admin' ? <Admin /> : <Accueil />}
+        {route === 'admin' ? <Admin /> : <Checkout />}
       </main>
       <footer className="footer">Merci pour votre confiance — Déo Gracias Wi-Fi</footer>
     </div>

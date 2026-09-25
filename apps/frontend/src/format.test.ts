@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   backendUnreachableMessage,
+  chooseOfferLabel,
   formatDateTime,
   formatFcfa,
   formatHours,
+  maskPhone,
   problemDetail,
 } from './format.js';
 
@@ -24,6 +26,16 @@ describe('IMP-25 — formatage', () => {
     expect(formatDateTime(null)).toBe('—');
     expect(formatDateTime('pas-une-date')).toBe('—');
     expect(formatDateTime('2026-09-24T13:05:00Z')).toMatch(/^\d{2}\/\d{2}\/2026 \d{2}:\d{2}$/);
+  });
+
+  it('chooseOfferLabel : le CTA dit le prix (§31)', () => {
+    expect(chooseOfferLabel(100)).toBe('Choisir 100 FCFA');
+    expect(chooseOfferLabel(500)).toBe('Choisir 500 FCFA');
+  });
+
+  it('maskPhone : seuls les 4 derniers chiffres visibles', () => {
+    expect(maskPhone('0197123456')).toBe('•• •• •• 3456');
+    expect(maskPhone('97')).toBe('97');
   });
 
   it('backendUnreachableMessage : 5xx sans corps => message actionnable', () => {

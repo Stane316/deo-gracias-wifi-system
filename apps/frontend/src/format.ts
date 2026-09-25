@@ -23,6 +23,19 @@ export function formatDateTime(iso: string | null): string {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** UX 2 — CTA explicite (§31) : « Choisir 100 FCFA » (libellé FCFA explicite,
+ *  plus lisible qu'un symbole monétaire abrégé sur un bouton d'achat). */
+export function chooseOfferLabel(priceFcfa: number): string {
+  return `Choisir ${priceFcfa} FCFA`;
+}
+
+/** UX 2 — numéro masqué pour récapitulatifs (§17) : derniers 4 chiffres visibles. */
+export function maskPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 4) return phone;
+  return `•• •• •• ${digits.slice(-4)}`;
+}
+
 /** IMP-25.4 — le backend est-il injoignable (proxy en erreur, corps non-JSON) ? */
 export function backendUnreachableMessage(status: number, body: unknown): string | null {
   if (body !== null) return null; // réponse structurée => message porté par problemDetail
