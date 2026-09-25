@@ -1,6 +1,6 @@
 # IMP-28 — Vague 4 — captif, états dégradés et Walled Garden
 
-Statut : **PARTIAL — CODE COMPLETE / EXTERNAL DEPENDENCIES DEFERRED — NO-GO MikroTik**.
+Statut : **FROZEN — PARTIAL / CODE COMPLETE / EXTERNAL DEPENDENCIES DEFERRED — NO-GO MikroTik**.
 
 La validation locale des comportements réseau est produite. La liste Walled Garden de production reste volontairement **vide** : aucun hostname public frontend/API réel n'est fourni dans le repository et le portail captif réel n'est pas accessible depuis cet environnement. Aucune écriture MikroTik n'a été exécutée.
 
@@ -178,4 +178,4 @@ La prochaine décision doit contenir :
 
 ## RÉSULTAT
 
-La Vague 4 est **complète côté code/tests et documentée**. Elle reste `PARTIAL` au niveau global parce que les dépendances externes — domaine public réel, redirect FedaPay sandbox, portail captif physique et MikroTik — sont explicitement différées. Le Walled Garden reste vide et aucune écriture MikroTik n'a été exécutée.
+La Vague 4 est **complète côté code/tests et documentée, puis gelée**. Elle reste `PARTIAL` au niveau global parce que les dépendances externes — domaine public réel, redirect FedaPay sandbox, portail captif physique et MikroTik — sont explicitement différées. Le Walled Garden reste vide et aucune écriture MikroTik n'a été exécutée. Toute extension fonctionnelle attend une décision explicite de réouverture.
