@@ -1771,7 +1771,7 @@ describeDb('IMP-25.3 — diagnostic base non migrée (base vide dédiée)', () =
       const health = await repoEmpty.getSchemaHealth();
       expect(health.present).toBe(0);
       expect(health.missing).toContain('plans');
-      expect(health.missing).toHaveLength(15);
+      expect(health.missing).toHaveLength(16);
 
       const ready = await appEmpty.inject({ method: 'GET', url: '/readyz' });
       expect(ready.statusCode).toBe(503);
