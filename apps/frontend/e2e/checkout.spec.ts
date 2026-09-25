@@ -148,4 +148,39 @@ test.describe('IMP-27 — parcours navigateur réel du checkout', () => {
     await expect(page.getByText('DG24-ABCD')).toBeVisible();
     await expect(page.getByText(`Référence commande : ${ORDER_ID}`)).toBeVisible();
   });
+
+  test('backend indisponible au chargement : message actionnable et aucune offre inventée', async ({ page }) => {
+    await page.route('**/api/offers', (route) => route.abort('failed'));
+    await page.goto('/#/');
+    await page.getByRole('button', { name: 'Acheter un accès Wi-Fi' }).click();
+    await expect(page.getByText(/Backend injoignable/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Réessayer' })).toBeVisible();
+    await expect(page.locator('.offer-card')).toHaveCount(0);
+  });
+
+  test('backend 503 pendant le chargement : problème affiché, aucun démarrage de paiement', async ({ page }) => {
+    await page.route('**/api/offers', (route) => route.fulfill({ status: 503, contentType: 'application/problem+json', body: '' }));
+    await page.goto('/#/');
+    await page.getByRole('button', { name: 'Acheter un accès Wi-Fi' }).click();
+    await expect(page.getByText(/Backend injoignable/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Réessayer' })).toBeVisible();
+    await expect(page.locator('.offer-card')).toHaveCount(0);
+  });
+
+  test('offline pendant la commande : état technique actionnable, aucun succès local', async ({ page }) => {
+    await commonApi(page);
+    await page.route('**/api/orders', (route) => route.abort('internetdisconnected'));
+    await page.goto('/#/');
+    await page.getByRole('button', { name: 'Acheter un accès Wi-Fi' }).click();
+    await page.locator('.offer-card').getByRole('button').click();
+    await page.getByRole('button', { name: 'Continuer vers le paiement' }).click();
+    await page.locator('.method-card').click();
+    await page.locator('#phone').fill('0197123456');
+    await page.getByRole('button', { name: 'Vérifier mon numéro' }).click();
+    await page.context().setOffline(true);
+    await page.getByRole('button', { name: 'Payer 300 FCFA' }).click();
+    await expect(page.getByRole('heading', { name: 'Un problème technique est survenu' })).toBeVisible();
+    await expect(page.getByText(/Backend injoignable/)).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Paiement réussi' })).not.toBeVisible();
+  });
 });
