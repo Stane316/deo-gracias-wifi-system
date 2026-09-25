@@ -207,6 +207,7 @@ automatiquement (dotenv, IMP-25.1).
 
 | Variable | Sensibilité | Où la trouver | Exemple FICTIF | Commiter ? |
 |---|---|---|---|---|
+| `APP_ENV` | RUNTIME REQUIRED | `.env.example` | `local` / `test` / `staging` / `production` | non |
 | `DATABASE_URL` | SECRET (server-only) | étape 3 | `postgres://postgres.abc:xxxx@db.abc.supabase.co:5432/postgres` | **JAMAIS** |
 | `SUPABASE_URL` | PUBLIC (client-safe) | Settings → API → Project URL | `https://abc.supabase.co` | non (mais public) |
 | `SUPABASE_ANON_KEY` | PUBLIC (client-safe) | Settings → API → anon public | `eyJhbGciOi…` | non (mais public) |
@@ -295,8 +296,15 @@ vise désormais 3000 par défaut (`BACKEND_PORT` pour changer).
 
 ```bash
 npm run typecheck        # 4 paquets, 0 erreur
-DATABASE_URL=… npm test  # 265/265 (dont 43 d'intégration Postgres réelle)
+DATABASE_URL=… npm test  # tests unitaires + intégration PostgreSQL lorsque la base est disponible
+npm run build            # build frontend et contrôle CI local
 ```
+
+Sans `DATABASE_URL`, les tests PostgreSQL sont ignorés explicitement ; ils ne
+sont pas comptés comme une validation verte. La CI fournit un PostgreSQL
+éphémère, applique les migrations, exécute les tests puis le build. Les tests
+IMP-25.6 vérifient aussi que les diagnostics et erreurs 5xx ne recopient aucune
+valeur secrète.
 
 Sur la base Supabase, après migrations : les 3 SELECT de l'étape 4
 (6 plans / 660 tickets / 0 alertes) sont la validation minimale ;
@@ -310,7 +318,8 @@ Symptôme : l'interface s'affiche mais la carte Offres montre cette erreur.
 Signification : le backend est **connecté** à une base, mais cette base n'a
 **pas le schéma**. Depuis IMP-25.3, `/readyz` et `/offers` répondent 503
 « Base non migrée » avec la liste des tables manquantes, et le log de
-démarrage affiche la cible masquée (`postgres://user:***@hote/db`).
+démarrage affiche uniquement la cible réseau (`postgres://hote:port`), jamais
+l'utilisateur, le mot de passe, le chemin de base ou les paramètres URI.
 
 Procédure structurée (PowerShell) :
 

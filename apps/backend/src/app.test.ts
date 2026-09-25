@@ -42,6 +42,22 @@ describe('GET /readyz', () => {
     expect(res.headers['content-type']).toContain('application/problem+json');
     expect(res.json()).toMatchObject({ type: 'about:blank', status: 503 });
   });
+
+  it('ne renvoie pas le message interne brut sur une erreur 5xx', async () => {
+    const isolated = await buildApp({ repo: new FakeRepo() });
+    isolated.get('/__test/internal-error', async () => {
+      throw new Error('DATABASE_URL=postgres://admin:super-secret@db.invalid/postgres');
+    });
+    const res = await isolated.inject({ method: 'GET', url: '/__test/internal-error' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toMatchObject({
+      title: 'Erreur interne',
+      detail: 'Une erreur interne est survenue.',
+    });
+    expect(res.body).not.toContain('super-secret');
+    expect(res.body).not.toContain('DATABASE_URL');
+    await isolated.close();
+  });
 });
 
 describe('GET /offers', () => {

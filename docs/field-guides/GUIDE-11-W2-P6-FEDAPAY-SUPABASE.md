@@ -73,7 +73,11 @@ backend refuse également de démarrer si l'une des variables critiques manque,
 si FedaPay n'est pas en `live`, ou si `DEV_ADMIN_TOKEN` est présent.
 
 Le contrôle est dans `apps/backend/src/runtime-config.ts` et est exécuté avant
-la création du pool PostgreSQL dans `server.ts`.
+la création du pool PostgreSQL dans `server.ts`. `APP_ENV` et `DATABASE_URL`
+sont obligatoires ; les flags `AUTH_DEV_MODE`, `PAYMENT_DEV_MODE`, `PORT` et
+`WORKERS` refusent les valeurs ambiguës. Les erreurs 5xx génériques ne renvoient
+pas le message interne brut, et le diagnostic PostgreSQL ne journalise que la
+cible réseau protocole/hôte/port, jamais l'URI complète.
 
 ## 3. Configurer Supabase Auth — GUI propriétaire
 

@@ -129,6 +129,13 @@ function toOrderView(o: OrderRecord, offerId: string): OrderView {
   };
 }
 
+/** Seul un code technique non sensible peut entrer dans les logs génériques. */
+function errorCodeOf(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && code.length > 0 ? code : undefined;
+}
+
 export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts.logger ?? false });
   const { repo } = opts;
@@ -138,14 +145,18 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     timeWindow: opts.rateLimit?.timeWindow ?? '1 minute',
   });
 
-  // Toute erreur (validation zod incluse) => RFC 7807.
+  // Toute erreur (validation zod incluse) => RFC 7807. Les erreurs 5xx ne
+  // renvoient ni ne journalisent le message brut, qui peut contenir SQL, URI ou secret.
   app.setErrorHandler((err: FastifyError, _req, reply) => {
     const status = err.statusCode && err.statusCode >= 400 ? err.statusCode : 500;
-    if (status >= 500) app.log.error(err);
+    if (status >= 500) {
+      app.log.error({ error_code: errorCodeOf(err) }, 'Erreur interne non exposée');
+    }
+    const detail = status >= 500 ? 'Une erreur interne est survenue.' : err.message;
     void reply
       .status(status)
       .type('application/problem+json')
-      .send(problem(status, status >= 500 ? 'Erreur interne' : err.message, err.message));
+      .send(problem(status, status >= 500 ? 'Erreur interne' : err.message, detail));
   });
   app.setNotFoundHandler((_req, reply) => {
     void reply
@@ -399,7 +410,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         description: `Deo Gracias Wi-Fi — ${offerId} — commande ${order.id}`,
       });
     } catch (err) {
-      app.log.error({ err }, 'FedaPay createCheckout échoué');
+      app.log.error({ error_code: errorCodeOf(err) }, 'FedaPay createCheckout échoué');
       return reply.status(502).type('application/problem+json')
         .send(problem(502, 'Prestataire injoignable', 'FedaPay n’a pas accepté la transaction ; réessayez.'));
     }

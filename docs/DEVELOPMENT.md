@@ -156,10 +156,12 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   immédiatement réactivé).
 - Test normatif : `packages/shared/src/stock-sync.test.ts` (structure du
   manifeste, distribution, unicité, idempotence, ordre du rollback).
-- Attendu : 306/306 avec base (backend 183 dont 45 d'intégration + 5 modes démo
-  + 4 validation env + 8 diagnostic pg, shared 45, connector 46, frontend 32 dont
-  12 machine à états + 6 téléphone + 5 états commande + 3 helpers UX). Sans base :
-  les intégrations pg skippent.
+- Attendu : tous les tests unitaires des quatre workspaces passent. Les tests
+  PostgreSQL d'intégration (48 actuellement) doivent être exécutés avec une base
+  migrée ; sans `DATABASE_URL`, ils sont ignorés explicitement et ne constituent
+  pas une validation complète. Les nombres exacts sont ceux affichés par Vitest,
+  afin d'éviter une documentation qui devient fausse après l'ajout d'un test.
+  La migration 0012 relève d'IMP-26 UX6 et doit être présente en `up` et en `down`.
 
 ## API admin : dashboard, stats tickets, ack alertes (IMP-17)
 
@@ -369,7 +371,13 @@ executes si `DATABASE_URL` est definie (skip propre sinon ; en CI : service
   Guide d'intégration environnement complet : GUIDE-10.
 - IMP-25.3 — diagnostic schéma : `getSchemaHealth()` (repo), `/readyz` et
   `/offers` répondent 503 « Base non migrée » actionnable, log de démarrage
-  avec DATABASE_URL masquée. Testé sur base vide dédiée (2 tests pg).
+  avec uniquement la cible PostgreSQL (protocole/hôte/port). Testé sur base vide
+  dédiée (2 tests pg).
+- IMP-25.6 — préflight runtime : `APP_ENV`, `DATABASE_URL`, flags DEV, FedaPay,
+  `PORT` et `WORKERS` sont validés avant création du pool. Les valeurs invalides
+  ou ambiguës arrêtent le backend ; les messages ne recopient jamais les secrets.
+  Les erreurs 5xx non gérées restent génériques côté HTTP et dans les logs ; les
+  diagnostics PostgreSQL connus sont traduits en consignes sans URI complète.
 
 ## Après récupération de fichiers (règle anti-désync, ajout 17/09/2026)
 
@@ -384,3 +392,23 @@ workspace de l'agent (ou après un `git pull` qui les touche) :
 
 Cas vécu (IMP-10) : 4 erreurs VSCode locales alors que la CI GitHub était verte — cause :
 `@types/node` ajouté au lock mais `npm ci` non relancé localement.
+
+
+## W2/P6 — préparation FedaPay réel + auth admin Supabase
+
+La préparation est documentée dans `docs/field-guides/GUIDE-11-W2-P6-FEDAPAY-SUPABASE.md`.
+Le backend possède maintenant un préflight runtime explicite : `APP_ENV` et
+`DATABASE_URL` sont obligatoires, `local`/`test` autorisent les modes de
+démonstration, tandis que `staging`/`production` les refusent. Les flags DEV,
+`FEDAPAY_ENVIRONMENT`, `PORT` et `WORKERS` doivent aussi utiliser une valeur
+connue. `APP_ENV=production` exige Supabase, FedaPay live, le secret du webhook
+et la clé du coffre des codes. L'administration utilise Supabase Auth
+email/mot de passe dans le navigateur lorsque `VITE_SUPABASE_URL` et
+`VITE_SUPABASE_ANON_KEY` sont présentes ; le rôle reste vérifié côté serveur.
+Les logs de démarrage et les réponses 5xx ne contiennent ni URI complète, ni
+mot de passe, ni message d'erreur brut.
+
+La séquence validée est **sandbox contrôlée → feu vert séparé → live**. Aucun
+secret, paiement réel, déploiement public ou changement Supabase distant n'est
+réalisé par l'agent. Le webhook FedaPay reste en attente d'une URL backend
+publique HTTPS.
