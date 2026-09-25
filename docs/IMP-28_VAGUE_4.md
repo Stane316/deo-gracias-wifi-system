@@ -1,6 +1,6 @@
 # IMP-28 — Vague 4 — captif, états dégradés et Walled Garden
 
-Statut : **PARTIAL / NEEDS EXTERNAL EVIDENCE — NO-GO MikroTik**.
+Statut : **PARTIAL — CODE COMPLETE / EXTERNAL DEPENDENCIES DEFERRED — NO-GO MikroTik**.
 
 La validation locale des comportements réseau est produite. La liste Walled Garden de production reste volontairement **vide** : aucun hostname public frontend/API réel n'est fourni dans le repository et le portail captif réel n'est pas accessible depuis cet environnement. Aucune écriture MikroTik n'a été exécutée.
 
@@ -172,9 +172,10 @@ La prochaine décision doit contenir :
 - `npm run build` : vert.
 - Playwright : **10 passed** — les 7 scénarios IMP-27 plus backend offline au chargement, backend `503` au chargement et offline pendant la commande.
 - Vérification statique des domaines : frontend en `/api/*` relatif ; proxy local `127.0.0.1` non production ; FedaPay sandbox/live limité aux URLs présentes dans `fedapay.ts` ; aucune URL publique frontend/API disponible dans le repository.
+- CI GitHub du commit `7d6bd0df05313f828bdc0b455a43e851c536a45b` : **4/4 checks verts** — Gitleaks, Typecheck + tests, migrations PostgreSQL 16 et migrations PostgreSQL 17.
 - Test captif MikroTik réel : **NON EXÉCUTÉ**, accès physique absent.
 - Écriture MikroTik : **AUCUNE**.
 
 ## RÉSULTAT
 
-La Vague 4 est **préparée et testée côté logiciel**, mais ne peut pas être déclarée terminée : le domaine public réel, le redirect FedaPay sandbox et le comportement du portail captif doivent être fournis et observés avant toute ouverture Walled Garden ou toute écriture MikroTik.
+La Vague 4 est **complète côté code/tests et documentée**. Elle reste `PARTIAL` au niveau global parce que les dépendances externes — domaine public réel, redirect FedaPay sandbox, portail captif physique et MikroTik — sont explicitement différées. Le Walled Garden reste vide et aucune écriture MikroTik n'a été exécutée.

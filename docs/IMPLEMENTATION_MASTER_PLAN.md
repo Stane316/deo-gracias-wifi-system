@@ -1,6 +1,6 @@
 # DÉO GRACIAS — IMPLEMENTATION MASTER PLAN
 
-> Version 1.0 — recalage du 25/09/2026
+> Version 1.1 — clôture IMP-27 et code-first IMP-28 du 25/09/2026
 >
 > Ce document devient la source de vérité pour la suite des implémentations IMP-01 → IMP-40.
 > Il a été établi après inspection du repository local, de l’historique Git, des fichiers suivis,
@@ -14,25 +14,34 @@
 
 ```text
 COMPLETED:
-IMP-01, IMP-02, IMP-03, IMP-06 → IMP-12, IMP-16 → IMP-22
+IMP-01, IMP-02, IMP-03, IMP-06 → IMP-12, IMP-16 → IMP-22, IMP-27
 
 CURRENT:
-Recalage IMP-25 → IMP-27 ; focus IMP-27 — parcours paiement confirmé → délivrance → récupération
+IMP-28 — code-first : états offline/backend indisponible, inventaire des domaines et documentation Walled Garden no-write
 
 NEXT:
-IMP-28 — contexte captif, états dégradés et liste Walled Garden
+IMP-29 — socle admin, uniquement après feu vert explicite de Stane
 
 REMAINING:
-IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, IMP-28 → IMP-40
+IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-29 → IMP-40
 ```
 
-Précision indispensable : `IMP-25`, `IMP-26` et le travail actuellement présent dans le
-workspace ne sont pas tous validés ni commités sur la branche locale. `IMP-27` est donc le
-**point de reprise fonctionnel**, mais pas une implémentation clôturée.
+# JOURNAL DE PILOTAGE — 25/09/2026
 
-Le code admin ajouté récemment dans le workspace ne redéfinit pas le périmètre historique
-d’IMP-27. Il constitue une fondation partielle des futurs IMP-29 à IMP-34 et sera traité comme
-tel après validation du présent plan.
+- **IMP-27 — DONE** : stabilisation code/tests confirmée ; commit GitHub `2b90f0e`, CI verte.
+- **IMP-28 — PARTIAL / CODE COMPLETE / EXTERNAL DEPENDENCIES DEFERRED** : tests offline, backend indisponible, `503`, inventaire des domaines et protocole no-write documentés ; commit GitHub `7d6bd0df05313f828bdc0b455a43e851c536a45b`, quatre checks CI verts.
+- **Décision d'intégration** : Walled Garden de production vide ; aucune commande MikroTik, aucun portail captif physique et aucun paiement FedaPay réel exécutés.
+- **Pilotage** : aucune nouvelle implémentation ne démarre avant le feu vert explicite de Stane ; le prochain candidat indépendant est IMP-29.
+
+Précision indispensable : les intégrations physiques et externes restent séparées du code.
+`IMP-27` est stabilisée dans GitHub sous le commit `2b90f0e` avec CI verte. `IMP-28` dispose
+désormais d'une partie code/test documentée sous le commit `7d6bd0df05313f828bdc0b455a43e851c536a45b`,
+avec les quatre checks CI verts ; elle reste PARTIAL au niveau global tant que les preuves physiques
+et les configurations externes ne sont pas réalisées.
+
+Le code admin déjà présent ne redéfinit pas le périmètre d'IMP-28. Il constitue une fondation
+partielle des futurs IMP-29 à IMP-34 et ne doit pas être traité comme une clôture de ces vagues.
+La mémoire persistante des dépendances différées est `docs/DEFERRED_EXTERNAL_INTEGRATIONS.md`.
 
 ---
 
@@ -131,8 +140,8 @@ Statuts autorisés : `DONE`, `PARTIAL`, `NOT STARTED`, `BLOCKED`, `NEEDS VERIFIC
 | IMP-24 | PARTIAL | commit `06916bc`, runner, routes inventory/report, runs/alertes, tests | Réconciliation v0 bout à bout avec dry-run ; cycle réel Connector↔MikroTik non démontré. |
 | IMP-25 | PARTIAL | commit `48b54f1`, commits `0167158`→`cd7219c`, SPA, DEV modes, guides 09/10 | Démo locale réelle présente ; production, Supabase distant, FedaPay distant et validation complète restent hors preuve. |
 | IMP-26 | PARTIAL | fichiers non suivis `checkout/`, `ticketvault.ts`, migration `0012`, `CodeDelivery.tsx`, docs UX | UX 1→6 et coffre/reveal sont présents dans le workspace ; décision, E2E, migration distante et validation complète ne sont pas clôturés. |
-| IMP-27 | PARTIAL — POINT DE REPRISE | `Checkout.tsx`, `machine.ts`, `orderstate.ts`, `CodeDelivery.tsx`, tests unitaires ; changements admin non commités | Le parcours principal existe, mais il manque notamment backoff réel, E2E, référence/récupération complète, validation UX Quality Gate et preuve externe. |
-| IMP-28 | PARTIAL | analyse portail legacy, guides 04/05, assets et contraintes HTTP documentés | Préparation présente ; liste WG contractuelle exacte, test offline Playwright, audit poids et validation Stane manquent. |
+| IMP-27 | DONE | commit GitHub `2b90f0e`, `Checkout.tsx`, machine, polling, E2E, PostgreSQL réel, documentation | Parcours paiement → webhook/état backend → allocation → délivrance → récupération corrélée démontré ; les intégrations de production restent dans les dépendances externes différées. |
+| IMP-28 | PARTIAL — CODE-FIRST COMPLET, EXTERNE DIFFÉRÉ | commit GitHub `7d6bd0df`, CI verte, `api.test.ts`, E2E offline/503, `IMP-28_VAGUE_4.md` | États dégradés et inventaire statique codés/testés ; domaines publics, redirect FedaPay réel, portail captif et Walled Garden réel restent différés. |
 | IMP-29 | PARTIAL | `Admin.tsx`, `/admin/me`, Supabase navigateur, session refresh/logout, routes admin | Fondations d’auth et écran présents ; MFA, route guard complet, layout/sidebar canonique et tests d’expiration manquent. |
 | IMP-30 | PARTIAL | `admin.ts`, `/admin/dashboard`, `/admin/system/status`, KPI/UI | KPI et santé v0 présents ; activité récente, santé MikroTik réelle, Connector ONLINE/OFFLINE et validation des six questions manquent. |
 | IMP-31 | PARTIAL | listes `/admin/orders`, détail, `/admin/payments`, tests et projections SQL non commités | Recherche/pagination/détail v0 présents ; timeline complète, correction exceptionnelle avec raison/permission/audit et intégration PG restent à valider. |
@@ -154,9 +163,9 @@ Statuts autorisés : `DONE`, `PARTIAL`, `NOT STARTED`, `BLOCKED`, `NEEDS VERIFIC
 
 IMP-27 est :
 
-> **C — commencée mais non validée**, avec un état de code `PARTIAL`.
+> **DONE côté code et CI**, commit GitHub `2b90f0e`, avec les intégrations physiques et FedaPay réelle conservées comme dépendances externes différées.
 
-Elle n’est ni uniquement préparée, ni complètement terminée.
+La chaîne contrôlée est couverte par les tests locaux, PostgreSQL réel, E2E mocké et CI GitHub.
 
 ## 4.2 Ce qui existe réellement
 
@@ -174,20 +183,17 @@ Présent dans le workspace :
 - instructions HotSpot et copie du code ;
 - tests unitaires machine/order state/phone.
 
-## 4.3 Ce qui empêche la clôture
+## 4.3 Dépendances externes différées
 
-Les preuves manquantes ou insuffisantes sont :
+Les éléments suivants ne bloquent plus le code IMP-27, mais restent volontairement hors validation de production :
 
-1. le polling est à intervalle fixe de 2,5 secondes ; le backoff canonique n’est pas démontré ;
-2. aucun test E2E navigateur Playwright n’existe pour pending→confirmed→ticket ;
-3. aucune preuve E2E de rafraîchissement pendant paiement avec état conservé ;
-4. aucune preuve E2E de double clic au niveau navigateur ;
-5. la référence de commande n’est pas présentée comme parcours complet de récupération ;
-6. le mécanisme « référence + token » de la spécification n’est pas matérialisé comme endpoint dédié ;
-7. la preuve `PAID`/allocation retardée existe surtout au niveau machine, pas dans un E2E complet ;
-8. aucune validation UX Quality Gate doc 05 §78 signée ;
-9. aucune validation FedaPay sandbox distante et webhook HTTPS ;
-10. le code est largement non commités, donc la base de reprise n’est pas stabilisée.
+1. transaction FedaPay sandbox/live réellement exécutée ;
+2. webhook HTTPS public et compte marchand FedaPay ;
+3. portail captif et routeur MikroTik réels ;
+4. Connector connecté et synchronisation RouterOS ;
+5. validation physique du réseau et du Walled Garden.
+
+Ces éléments sont conservés dans `docs/DEFERRED_EXTERNAL_INTEGRATIONS.md`. Ils ne doivent pas être présentés comme réalisés parce que les adapters, guides ou mocks existent.
 
 ## 4.4 Collision de périmètre détectée
 
@@ -202,7 +208,7 @@ Le workspace contient également une implémentation de listes admin dans :
 
 Cette implémentation est réelle mais elle correspond historiquement aux futurs IMP-29 à
 IMP-34, pas à l’IMP-27 fourni dans le référentiel canonique actuel. Elle doit être conservée,
-aud itée et reclassée, mais ne doit pas servir à déclarer IMP-27 terminé.
+aud itée et reclassée sans modifier la clôture indépendante d’IMP-27.
 
 ---
 
@@ -236,8 +242,8 @@ aud itée et reclassée, mais ne doit pas servir à déclarer IMP-27 terminé.
 | IMP-24 | Réconciliation v0 | PARTIAL | historique, routeur réel restant |
 | IMP-25 | Démo visuelle / environnement | PARTIAL | historique + workspace non stabilisé |
 | IMP-26 | UX 1→6 / coffre code | PARTIAL | historique courant non validé |
-| **IMP-27** | **Paiement, délivrance, récupération** | **PARTIAL** | **POINT DE REPRISE** |
-| IMP-28 | Captif / états dégradés / WG | PARTIAL | FUTURE immédiate |
+| **IMP-27** | **Paiement, délivrance, récupération** | **DONE** | **code + CI validés ; externe différé** |
+| IMP-28 | Captif / états dégradés / WG | **PARTIAL — CODE-FIRST COMPLET** | **externe différé ; no-write MikroTik** |
 | IMP-29 | Socle admin | PARTIAL | FUTURE, fondations déjà présentes |
 | IMP-30 | Dashboard overview | PARTIAL | FUTURE, v0 déjà présent |
 | IMP-31 | Commandes / paiements admin | PARTIAL | FUTURE, code non commité présent |
@@ -349,17 +355,27 @@ UNKNOWN jamais affiché comme FAILED
 
 ## IMP-28 — captif, dégradé, Walled Garden
 
-### Périmètre
+### Code-first réalisé
 
-- distinguer backend injoignable, offline navigateur et Internet indisponible ;
-- mesurer le poids initial et les assets ;
-- produire la liste WG exacte : frontend, API, provider sandbox observé, assets ;
-- guidage retour portail HotSpot après délivrance ;
-- documenter ce qui reste hors MVP, dont autologin.
+- distinction backend injoignable, offline navigateur et réponse `5xx` ;
+- tests unitaires d'origine `/api` et `status = 0` ;
+- tests E2E offline, backend indisponible et backend `503` ;
+- inventaire statique des URLs frontend/API/FedaPay ;
+- décision documentée : Walled Garden de production vide ;
+- protocole read-only du portail captif ;
+- mémoire des intégrations différées dans `docs/DEFERRED_EXTERNAL_INTEGRATIONS.md`.
+
+### Externe différé
+
+- mesure physique du portail et des assets ;
+- hostname public frontend/API réellement déployé ;
+- `redirect_url` FedaPay sandbox réellement observée ;
+- test HTTP/HTTPS sur téléphone non authentifié ;
+- toute écriture Walled Garden, firewall, NAT ou DNS.
 
 ### Gate
 
-Validation explicite de Stane de la liste WG. Aucune écriture MikroTik dans cet IMP.
+Validation externe de Stane nécessaire pour les domaines et le portail. Aucune écriture MikroTik dans cet IMP.
 
 ## IMP-29 — socle admin
 

@@ -1,6 +1,6 @@
 # IMP-27 — Vague 3 — contrat et preuve de reprise
 
-Statut : **PARTIAL / NEEDS VERIFICATION**. Le code de la Vague 3 est présent dans le workspace, mais la clôture reste conditionnée à une démonstration avec PostgreSQL réel, webhook/état backend réel, stock réel et navigateur.
+Statut : **DONE — CODE ET CI VALIDÉS**. La Vague 3 est stabilisée avec PostgreSQL réel, webhook/état backend contrôlé, stock, navigateur et CI GitHub verts. Les intégrations de production externes (FedaPay réel, MikroTik et portail captif) restent différées et sont suivies séparément.
 
 ## PROBLÈME
 
@@ -85,4 +85,4 @@ La confirmation serveur reste la combinaison webhook/provider → persistance ba
 - [x] démonstration navigateur effectivement exécutée dans un environnement Chromium fonctionnel (7/7) ;
 - [x] démonstration PostgreSQL 17.11 avec webhook signé/état confirmé, allocation atomique, délivrance, récupération corrélée et révélation auditée du code (207 tests backend verts).
 
-La preuve locale de la chaîne est maintenant produite. IMP-27 reste néanmoins **PARTIAL / NEEDS VERIFICATION** jusqu’à la correction puis la nouvelle exécution CI GitHub : l’audit du commit distant `e74b62be6cc4ffa5b8699039eb6c2d3b84a0b8b9` a échoué parce que Vitest chargeait les tests Playwright et que la valeur de secret de fixture IMP-27 était détectée par Gitleaks. Les corrections sont présentes dans le workspace, mais Stane doit les valider par commit/push selon la règle du dépôt.
+La preuve locale de la chaîne est produite et la stabilisation est validée par le commit GitHub `2b90f0ee` avec CI verte. IMP-27 est donc **DONE** dans le périmètre code/tests contrôlé. Les validations FedaPay production, MikroTik, portail captif et autres opérations physiques ne font pas partie de cette clôture ; elles restent différées dans `docs/DEFERRED_EXTERNAL_INTEGRATIONS.md`.
