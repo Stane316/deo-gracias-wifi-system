@@ -1984,7 +1984,7 @@ describeDb('IMP-27 — reprise paiement sur PostgreSQL réel', () => {
 
   beforeAll(async () => {
     await cleanup27();
-    app27 = await buildApp({ repo: repo27, payment: { provider: new Imp27Provider(), webhookSecret: 'imp27-pg-secret' } });
+    app27 = await buildApp({ repo: repo27, payment: { provider: new Imp27Provider(), webhookSecret: 'imp27-webhook-test-value' } });
   });
   afterAll(async () => {
     await cleanup27();

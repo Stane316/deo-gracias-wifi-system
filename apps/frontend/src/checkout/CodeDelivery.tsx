@@ -135,7 +135,6 @@ export function CodeDelivery({ phone, offer, orderId }: { phone: string; offer: 
   if (phase === 'code' && code) {
     return (
       <div className="stack">
-        {orderId ? <p className="hint">Référence commande : <strong>{orderId}</strong></p> : null}
         <div className="code-box" role="group" aria-label="Votre code Wi-Fi">
           <span className="code-label">VOTRE CODE WI-FI</span>
           <span className="code-value">{code}</span>
@@ -158,7 +157,6 @@ export function CodeDelivery({ phone, offer, orderId }: { phone: string; offer: 
 
   return (
     <div className="stack">
-      {orderId ? <p className="hint">Référence commande : <strong>{orderId}</strong></p> : null}
       <p className="err" role="alert">{message ?? 'Le code n’est pas encore disponible.'}</p>
       <button className="btn ghost" onClick={() => void reveal()}>Vérifier à nouveau</button>
     </div>

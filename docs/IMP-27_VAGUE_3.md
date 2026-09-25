@@ -65,11 +65,12 @@ La confirmation serveur reste la combinaison webhook/provider → persistance ba
 ## TEST
 
 - `npm run typecheck` : vert.
-- `npm test` : vert — backend `158 passed`, frontend `37 passed`, connector `46 passed`, shared `45 passed`; les 48 tests PostgreSQL réels sont ignorés sans `DATABASE_URL`.
+- `npm test` sans base : vert — backend `158 passed` + `49 skipped`, frontend `37 passed`, connector `46 passed`, shared `45 passed`.
+- `PATH=/tmp/imp27-pg/root/usr/lib/postgresql/17/bin:$PATH DATABASE_URL=postgresql://user@127.0.0.1:5433/postgres npm test` : vert sur PostgreSQL **17.11** — backend `207 passed` dont les **49** tests PostgreSQL réels, frontend `37 passed`, connector `46 passed`, shared `45 passed`. Les migrations `0012` sont appliquées sans modification.
 - `npm run build` : vert.
 - Tests backend IMP-27 : `pay.test.ts` couvre `409` + identifiants persistants ; `tickets.test.ts` couvre le filtre strict commande → ticket.
 - Tests frontend IMP-27 : machine, états inconnus et backoff borné.
-- Playwright : `npm run test:e2e -w @dg/frontend` liste bien les 7 scénarios requis. L’exécution navigateur locale a été bloquée par l’image sandbox, qui ne fournit pas `libnspr4.so` pour Chromium ; elle reste à rejouer sur CI/une machine avec les dépendances navigateur.
+- Playwright : `LD_LIBRARY_PATH=/tmp/imp27-browser-libs/usr/lib/x86_64-linux-gnu npm run test:e2e -w @dg/frontend` : **7 passed** (double clic, attente, rafraîchissement, confirmation backend, allocation différée, état inconnu, ticket délivré). Le runtime Chromium a été complété temporairement hors repository ; aucune bibliothèque système ni artefact e2e n’est ajouté au dépôt.
 
 ## Quality Gate UX — à démontrer avant clôture
 
@@ -81,7 +82,7 @@ La confirmation serveur reste la combinaison webhook/provider → persistance ba
 - [x] allocation différée : `PAID` reste une préparation, pas une délivrance fictive ;
 - [x] référence de commande affichée dans les états de paiement/délivrance ;
 - [x] ticket filtré par commande et token ;
-- [ ] démonstration navigateur effectivement exécutée dans un environnement Chromium fonctionnel ;
-- [ ] démonstration PostgreSQL 16/17 avec webhook/état confirmé, allocation, délivrance et coffre de code.
+- [x] démonstration navigateur effectivement exécutée dans un environnement Chromium fonctionnel (7/7) ;
+- [x] démonstration PostgreSQL 17.11 avec webhook signé/état confirmé, allocation atomique, délivrance, récupération corrélée et révélation auditée du code (207 tests backend verts).
 
-Tant que les deux derniers points ne sont pas produits, IMP-27 reste **PARTIAL / NEEDS VERIFICATION**.
+La preuve locale de la chaîne est maintenant produite. IMP-27 reste néanmoins **PARTIAL / NEEDS VERIFICATION** jusqu’à la correction puis la nouvelle exécution CI GitHub : l’audit du commit distant `e74b62be6cc4ffa5b8699039eb6c2d3b84a0b8b9` a échoué parce que Vitest chargeait les tests Playwright et que la valeur de secret de fixture IMP-27 était détectée par Gitleaks. Les corrections sont présentes dans le workspace, mais Stane doit les valider par commit/push selon la règle du dépôt.
