@@ -5,6 +5,7 @@
  */
 import type { Pool } from 'pg';
 import { createHash } from 'node:crypto';
+import { sealCode } from './ticketvault.js';
 import type { AdminDashboardDbStats, AlertAckRecord } from './admin.js';
 import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs, type GeneratedTicketSpec } from './ticketgen.js';
 
@@ -193,7 +194,20 @@ export interface BackendRepo {
   /** IMP-18 — génération d'un lot de tickets digitaux (contrat Mikmon §3) :
    * batch + tickets hashés + ordres `create_ticket` en file `mikrotik_sync`,
    * le tout en UNE transaction. Retourne les codes clairs UNE seule fois. */
-  createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch>;
+  createBackendBatch(input: {
+    offerId: string;
+    quantity: number;
+    /** IMP-26 UX6 : clé du coffre ; absente => aucun sceau, codes non révélables. */
+    vaultKey?: Buffer;
+  }): Promise<CreatedBackendBatch>;
+
+  /** IMP-26 UX6 — ticket + sceau pour révélation auditée (null si inexistant). */
+  getTicketForReveal(ticketId: string): Promise<{
+    id: string;
+    dbState: string;
+    codeCipher: string | null;
+    orderId: string | null;
+  } | null>;
 
   /** IMP-17 — agrégats du dashboard admin (doc 09 §12-13), jour courant = depuis `since`. */
   getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats>;
@@ -879,7 +893,11 @@ export class PgRepo implements BackendRepo {
     return ids;
   }
 
-  async createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch> {
+  async createBackendBatch(input: {
+    offerId: string;
+    quantity: number;
+    vaultKey?: Buffer;
+  }): Promise<CreatedBackendBatch> {
     const plan = await this.getActivePlanByOffer(input.offerId);
     if (!plan) throw new Error(`offre sans plan actif : ${input.offerId}`);
     return this.withTx(async (q) => {
@@ -913,12 +931,14 @@ export class PgRepo implements BackendRepo {
       const ticketParams: unknown[] = [];
       specs.forEach((spec, i) => {
         const codeHash = createHash('sha256').update(spec.clientCode).digest('hex');
-        const t = i * 5;
-        ticketValues.push(`($${t + 1}, $${t + 2}, $${t + 3}, $${t + 4}, $${t + 5})`);
-        ticketParams.push(batchId, codeHash, spec.clientCode.slice(0, 2), plan.planId, spec.mikrotikComment);
+        // IMP-26 UX6 : sceau chiffré si clé fournie ; sinon NULL (stock non révélable).
+        const sealed = input.vaultKey ? sealCode(input.vaultKey, spec.clientCode) : null;
+        const t = i * 6;
+        ticketValues.push(`($${t + 1}, $${t + 2}, $${t + 3}, $${t + 4}, $${t + 5}, $${t + 6})`);
+        ticketParams.push(batchId, codeHash, spec.clientCode.slice(0, 2), plan.planId, spec.mikrotikComment, sealed);
       });
       const ticketRes = await q(
-        `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id, mikrotik_comment)
+        `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id, mikrotik_comment, code_cipher)
          VALUES ${ticketValues.join(', ')}
          RETURNING id, code_hash`,
         ticketParams,
@@ -949,6 +969,27 @@ export class PgRepo implements BackendRepo {
 
       return { batchId, seq, offerId: input.offerId, quantity: input.quantity, generatedAt, specs };
     });
+  }
+
+  async getTicketForReveal(ticketId: string): Promise<{
+    id: string;
+    dbState: string;
+    codeCipher: string | null;
+    orderId: string | null;
+  } | null> {
+    const res = await this.pool.query(
+      `SELECT id, db_state, code_cipher, order_id
+       FROM public.tickets WHERE id = $1`,
+      [ticketId],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      id: String(row['id']),
+      dbState: String(row['db_state']),
+      codeCipher: row['code_cipher'] === null || row['code_cipher'] === undefined ? null : String(row['code_cipher']),
+      orderId: row['order_id'] === null || row['order_id'] === undefined ? null : String(row['order_id']),
+    };
   }
 
   async expireStaleOrders(olderThan: Date): Promise<{ orderIds: string[]; paymentsExpired: number }> {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, storage, type TicketView } from '../api.js';
 import { problemDetail } from '../format.js';
+import { RevealCodeButton } from './CodeDelivery.js';
 
 /**
  * UX 2 — « Retrouver mes tickets » : connexion OTP + liste des tickets,
@@ -75,15 +76,15 @@ export function MyTickets() {
         ) : (
           <table className="table">
             <thead>
-              <tr><th>Offre</th><th>État base</th><th>État routeur</th><th>Préfixe code</th><th>Vendu le</th></tr>
+              <tr><th>Offre</th><th>État base</th><th>Préfixe</th><th>Code</th><th>Vendu le</th></tr>
             </thead>
             <tbody>
               {tickets.map((t) => (
                 <tr key={t.id}>
                   <td>{t.offer_id ?? '—'}</td>
                   <td>{t.db_state}</td>
-                  <td>{t.router_state}</td>
                   <td>{t.code_prefix_hint ?? '—'}</td>
+                  <td>{t.db_state === 'SOLD' || t.db_state === 'USED' ? <RevealCodeButton ticketId={t.id} /> : '—'}</td>
                   <td>{t.sold_at ?? '—'}</td>
                 </tr>
               ))}

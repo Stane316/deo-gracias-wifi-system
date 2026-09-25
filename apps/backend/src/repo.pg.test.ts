@@ -14,6 +14,7 @@ import { generateTestHeaderString, type CheckoutInput, type CheckoutResult, type
 import { PgRepo } from './repo.js';
 import { computeSyncState, startOfBusinessDay } from './admin.js';
 import { allocateAndDeliver } from './tickets.js';
+import { deriveVaultKey } from './ticketvault.js';
 import { runOrderExpiry, runReconciliationSim } from './workers.js';
 // Imports RELATIFS vers les sources du paquet connector (leçon IMP-22 : aucune
 // dépendance à l'état de node_modules/symlinks/paths — résolution directe).
@@ -1803,3 +1804,154 @@ describeDb('IMP-25.3 — diagnostic base non migrée (base vide dédiée)', () =
   });
 });
 
+// ---------------------------------------------------------------------------
+// IMP-26 UX 6 (D-UX6a) — révélation auditée du code client sur base réelle :
+// session client du téléphone payeur + ticket SOLD + sceau du coffre.
+// Fixtures : idempotency itest-imp26-%, téléphones 019726%, lot notes itest-imp26.
+// ---------------------------------------------------------------------------
+describeDb('IMP-26 UX6 — code client chiffré, révélé à l’acheteur, audité', () => {
+  const pool26 = new Pool({ connectionString: DATABASE_URL });
+  const repo26 = new PgRepo(pool26);
+  const vaultKey = deriveVaultKey('itest-imp26-vault');
+  let app26: Awaited<ReturnType<typeof buildApp>>;
+  let plan24: string;
+
+  const batchIds26: string[] = [];
+  const cleanup26 = async (): Promise<void> => {
+    // ordre FK : tickets (hors garde) -> payments -> orders -> batches -> customers
+    await pool26.query(`ALTER TABLE public.tickets DISABLE TRIGGER tickets_state_guard`);
+    if (batchIds26.length > 0) {
+      await pool26.query(`DELETE FROM public.tickets WHERE batch_id = ANY($1)`, [batchIds26]);
+    }
+    await pool26.query(`DELETE FROM public.tickets WHERE order_id IN (SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp26-%')`);
+    await pool26.query(`ALTER TABLE public.tickets ENABLE TRIGGER tickets_state_guard`);
+    await pool26.query(`DELETE FROM public.payments WHERE order_id IN (SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp26-%')`);
+    await pool26.query(`DELETE FROM public.orders WHERE idempotency_key LIKE 'itest-imp26-%'`);
+    if (batchIds26.length > 0) {
+      await pool26.query(`DELETE FROM public.ticket_batches WHERE id = ANY($1)`, [batchIds26]);
+      batchIds26.length = 0;
+    }
+    await pool26.query(`DELETE FROM public.customers WHERE phone LIKE '019726%'`);
+  };
+
+  /** Matrice 0009 : AVAILABLE -> RESERVED -> SOLD. */
+  const sellTicket = async (ticketId: string, orderId: string): Promise<void> => {
+    await pool26.query(
+      `UPDATE public.tickets SET db_state = 'RESERVED', order_id = $1, reserved_at = now() WHERE id = $2`,
+      [orderId, ticketId],
+    );
+    await pool26.query(
+      `UPDATE public.tickets SET db_state = 'SOLD', sold_at = now() WHERE id = $1`,
+      [ticketId],
+    );
+  };
+
+  const otpToken = async (phone: string): Promise<string> => {
+    const req = await app26.inject({ method: 'POST', url: '/auth/phone/request', payload: { phone } });
+    const code = (req.json() as Record<string, unknown>)['dev_code'] as string;
+    const ver = await app26.inject({ method: 'POST', url: '/auth/phone/verify', payload: { phone, code } });
+    return (ver.json() as Record<string, unknown>)['token'] as string;
+  };
+
+  beforeAll(async () => {
+    await cleanup26();
+    const plans = await pool26.query(
+      `SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`,
+    );
+    plan24 = String(plans.rows[0]?.['id']);
+    app26 = await buildApp({
+      repo: repo26,
+      auth: { devMode: true, rateLimits: { requestMax: 1000, verifyMax: 1000 } },
+      ticketVaultKey: vaultKey,
+    });
+  });
+  afterAll(async () => {
+    await cleanup26();
+    await app26.close();
+    await pool26.end();
+  });
+
+  it('acheteur connecté => code clair identique au généré + audit journalisé', async () => {
+    const batch = await repo26.createBackendBatch({ offerId: '24-HEURES', quantity: 1, vaultKey });
+    batchIds26.push(batch.batchId);
+    const spec = batch.specs[0];
+    expect(spec).toBeDefined();
+    const tick = await pool26.query(`SELECT id FROM public.tickets WHERE batch_id = $1`, [batch.batchId]);
+    const ticketId = String(tick.rows[0]?.['id']);
+
+    const orderRes = await app26.inject({
+      method: 'POST', url: '/orders',
+      headers: { 'idempotency-key': 'itest-imp26-a' },
+      payload: { offer_id: '24-HEURES', customer_phone: '0197260001' },
+    });
+    const orderId = (orderRes.json() as Record<string, unknown>)['id'] as string;
+    await sellTicket(ticketId, orderId);
+
+    const token = await otpToken('0197260001');
+    const res = await app26.inject({
+      method: 'GET', url: `/tickets/${ticketId}/code`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as Record<string, unknown>)['code']).toBe(spec?.clientCode);
+
+    const audit = await pool26.query(
+      `SELECT count(*)::int AS n FROM public.audit_logs WHERE action = 'ticket_code_revealed' AND entity_id = $1`,
+      [ticketId],
+    );
+    expect(audit.rows[0]?.['n']).toBeGreaterThanOrEqual(1);
+  });
+
+  it('sans token => 401 ; autre numéro => 403', async () => {
+    const batch = await repo26.createBackendBatch({ offerId: '24-HEURES', quantity: 1, vaultKey });
+    batchIds26.push(batch.batchId);
+    const tick = await pool26.query(`SELECT id FROM public.tickets WHERE batch_id = $1`, [batch.batchId]);
+    const ticketId = String(tick.rows[0]?.['id']);
+    const orderRes = await app26.inject({
+      method: 'POST', url: '/orders',
+      headers: { 'idempotency-key': 'itest-imp26-b' },
+      payload: { offer_id: '24-HEURES', customer_phone: '0197260002' },
+    });
+    const orderId = (orderRes.json() as Record<string, unknown>)['id'] as string;
+    await sellTicket(ticketId, orderId);
+
+    const anon = await app26.inject({ method: 'GET', url: `/tickets/${ticketId}/code` });
+    expect(anon.statusCode).toBe(401);
+
+    const otherToken = await otpToken('0197260003');
+    const forbidden = await app26.inject({
+      method: 'GET', url: `/tickets/${ticketId}/code`,
+      headers: { authorization: `Bearer ${otherToken}` },
+    });
+    expect(forbidden.statusCode).toBe(403);
+  });
+
+  it('stock physique importé (sans sceau) => 409 humain, jamais de code', async () => {
+    const batch = await pool26.query(
+      `INSERT INTO public.ticket_batches (source, quantity, notes) VALUES ('mikmon-manual', 1, 'itest-imp26') RETURNING id`,
+    );
+    const batchId = String(batch.rows[0]?.['id']);
+    batchIds26.push(batchId);
+    await pool26.query(
+      `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id)
+       VALUES ($1, $2, 'PH', $3)`,
+      [batchId, createHash('sha256').update('secretphysique').digest('hex'), plan24],
+    );
+    const tick = await pool26.query(`SELECT id FROM public.tickets WHERE batch_id = $1`, [batchId]);
+    const ticketId = String(tick.rows[0]?.['id']);
+    const orderRes = await app26.inject({
+      method: 'POST', url: '/orders',
+      headers: { 'idempotency-key': 'itest-imp26-c' },
+      payload: { offer_id: '24-HEURES', customer_phone: '0197260004' },
+    });
+    const orderId = (orderRes.json() as Record<string, unknown>)['id'] as string;
+    await sellTicket(ticketId, orderId);
+    const token = await otpToken('0197260004');
+    const res = await app26.inject({
+      method: 'GET', url: `/tickets/${ticketId}/code`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.stringify(res.json())).toContain('voucher');
+  });
+});

@@ -13,6 +13,7 @@ import { MyTickets } from './MyTickets.js';
 import { PlanRecap } from './PlanRecap.js';
 import { validateCustomerPhone } from './phone.js';
 import { classifyOrderState } from './orderstate.js';
+import { CodeDelivery } from './CodeDelivery.js';
 
 /**
  * UX 5 — orchestration transactionnelle réelle :
@@ -439,9 +440,10 @@ export function Checkout() {
         </section>
       ) : (
         <section className="card journey-card">
-          <h2>Votre code Wi-Fi</h2>
+          <h2>Paiement réussi — votre code Wi-Fi</h2>
           <div className="card-body stack">
-            <p className="hint">L’affichage du code arrive à l’étape UX 6.</p>
+            {state.offer ? <PlanRecap offer={state.offer} /> : null}
+            <CodeDelivery phone={state.phone} offer={state.offer} />
             <button className="btn ghost" onClick={() => dispatch({ type: 'RESTART' })}>Retour à l’accueil</button>
           </div>
         </section>

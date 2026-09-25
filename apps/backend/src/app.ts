@@ -44,6 +44,7 @@ import { allocateAndDeliver } from './tickets.js';
 import { buildDashboardPayload, startOfBusinessDay } from './admin.js';
 import { startWorkers, type StartWorkersOptions } from './workers.js';
 import { explainPgConnectionError } from './pg-diag.js';
+import { openCode } from './ticketvault.js';
 
 export interface BuildAppOptions {
   repo: BackendRepo;
@@ -52,6 +53,8 @@ export interface BuildAppOptions {
   rateLimit?: { max: number; timeWindow?: string };
   /** IMP-25.6 — URL visée, pour des messages de panne qui nomment l'hôte exact. */
   databaseUrl?: string | undefined;
+  /** IMP-26 UX6 (D-UX6a) — clé du coffre chiffré des codes clients ; absente => révélation désactivée. */
+  ticketVaultKey?: Buffer;
   /** IMP-13 — auth clients (phone OTP) + admin (Supabase Auth + rôle). */
   auth?: {
     /** Vérificateur de JWT Supabase ; absent => routes admin 503 (non configuré). */
@@ -271,6 +274,62 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     }
     const offerId = String(order.planSnapshot['offer_id'] ?? '');
     return toOrderView(order, offerId);
+  });
+
+  // ---------------------------------------------------------------------------
+  // IMP-26 UX 6 (D-UX6a) — révélation auditée du code client : session client
+  // du téléphone payeur + ticket SOLD/USED + sceau du coffre + audit_logs.
+  // ---------------------------------------------------------------------------
+  app.get('/tickets/:id/code', async (req, reply) => {
+    const parsed = orderIdParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Paramètre invalide', 'id doit être un UUID.'));
+    }
+    const customerId = await resolveCustomerId(req);
+    if (!customerId) {
+      return reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', GENERIC_401));
+    }
+    const ticket = await repo.getTicketForReveal(parsed.data.id);
+    if (!ticket) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Ticket introuvable', 'Aucun ticket avec cet identifiant.'));
+    }
+    if (!ticket.orderId) {
+      return reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Accès refusé', 'Ce ticket n’est rattaché à aucune commande.'));
+    }
+    const order = await repo.getOrderById(ticket.orderId);
+    if (!order || order.customerId !== customerId) {
+      return reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Accès refusé', 'Ce ticket n’a pas été acheté avec ce numéro.'));
+    }
+    if (ticket.dbState !== 'SOLD' && ticket.dbState !== 'USED') {
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'Code non disponible', 'Ce ticket n’est pas (encore) vendu : rien à afficher.'));
+    }
+    if (!opts.ticketVaultKey) {
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Affichage non configuré', 'TICKET_VAULT_KEY absente : la consultation des codes est désactivée.'));
+    }
+    if (!ticket.codeCipher) {
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'Code non affichable en ligne',
+          'Ce code provient d’un stock physique importé : il figure sur votre voucher papier.'));
+    }
+    const code = openCode(opts.ticketVaultKey, ticket.codeCipher);
+    if (!code) {
+      return reply.status(500).type('application/problem+json')
+        .send(problem(500, 'Coffre illisible', 'Le sceau de ce code ne correspond pas à la clé du coffre.'));
+    }
+    await repo.logAudit({
+      actor: `customer:${customerId}`,
+      action: 'ticket_code_revealed',
+      entity: 'tickets',
+      entityId: ticket.id,
+    });
+    return { ticket_id: ticket.id, code };
   });
 
   // ---------------------------------------------------------------------------
@@ -869,7 +928,11 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       return reply.status(400).type('application/problem+json')
         .send(problem(400, 'Offre sans plan actif', `Aucun plan actif pour l'offre ${parsed.data.offer_id}.`));
     }
-    const batch = await repo.createBackendBatch({ offerId: parsed.data.offer_id, quantity: parsed.data.quantity });
+    const batch = await repo.createBackendBatch({
+      offerId: parsed.data.offer_id,
+      quantity: parsed.data.quantity,
+      ...(opts.ticketVaultKey ? { vaultKey: opts.ticketVaultKey } : {}),
+    });
     await repo.logAudit({
       actor,
       action: 'admin_batch_created',

@@ -8,6 +8,7 @@ import { Pool } from 'pg';
 import { buildApp } from './app.js';
 import { explainDatabaseUrlProblem } from './env-check.js';
 import { explainPgConnectionError } from './pg-diag.js';
+import { deriveVaultKey } from './ticketvault.js';
 import { DevStaticAuthVerifier, SupabaseAuthVerifier } from './auth.js';
 import { DevPaymentProvider } from './dev-payment.js';
 import { FedaPayClient } from './fedapay.js';
@@ -60,6 +61,10 @@ const provider = fedapaySecretKey
     ? new DevPaymentProvider()
     : undefined;
 
+// IMP-26 UX 6 (D-UX6a) — coffre chiffré des codes ; absent => révélation désactivée (503 honnête).
+const vaultSecret = process.env['TICKET_VAULT_KEY'];
+const ticketVaultKey = vaultSecret && vaultSecret.length > 0 ? deriveVaultKey(vaultSecret) : undefined;
+
 const app = await buildApp({
   repo,
   databaseUrl,
@@ -72,6 +77,7 @@ const app = await buildApp({
   },
   // IMP-21 — contrat Connector : absent => routes /connector 503 (honnête).
   ...(connectorToken && connectorToken.length > 0 ? { connector: { token: connectorToken } } : {}),
+  ...(ticketVaultKey ? { ticketVaultKey } : {}),
   // IMP-20 — workers in-process : order-expiry (1 min), webhook-sweeper (5 min),
   // reconciler simulé (1 h). Périodes par défaut ; désactivables via WORKERS=off.
   ...((process.env['WORKERS'] ?? '').toLowerCase() === 'off' ? {} : { workers: { enabled: true } }),

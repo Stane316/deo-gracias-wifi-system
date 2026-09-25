@@ -367,7 +367,11 @@ export class FakeRepo implements BackendRepo {
   createdBatches: CreatedBackendBatch[] = [];
   /** IMP-21 — file mikrotik_sync en mémoire (état complet, comme en base). */
   syncOps: SyncOpRecord[] = [];
-  async createBackendBatch(input: { offerId: string; quantity: number }): Promise<CreatedBackendBatch> {
+  async createBackendBatch(input: {
+    offerId: string;
+    quantity: number;
+    vaultKey?: Buffer;
+  }): Promise<CreatedBackendBatch> {
     const plan = await this.getActivePlanByOffer(input.offerId);
     if (!plan) throw new Error(`offre sans plan actif : ${input.offerId}`);
     const seq = this.backendBatchSeq;
@@ -395,6 +399,16 @@ export class FakeRepo implements BackendRepo {
       });
     }
     return batch;
+  }
+
+  /** IMP-26 UX6 — pas de tickets individuels en mémoire : révélation testée sur base réelle (pg). */
+  async getTicketForReveal(_ticketId: string): Promise<{
+    id: string;
+    dbState: string;
+    codeCipher: string | null;
+    orderId: string | null;
+  } | null> {
+    return null;
   }
 
   // IMP-21 — claim / résolution / requeue de la file (miroir mémoire du PgRepo).
