@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { appRoute, replaceBrowserPath } from '../admin-route.js';
 import {
   api,
   storage,
@@ -50,6 +51,14 @@ interface BatchCreateResponse {
 
 type AdminTab = 'dashboard' | 'orders' | 'payments' | 'tickets' | 'batches' | 'incidents' | 'audit' | 'reconciliation';
 
+const ADMIN_FILTERS: Partial<Record<AdminTab, { label: string; values: string[] }>> = {
+  orders: { label: 'État commande', values: ['CREATED', 'PAYMENT_PENDING', 'PAID', 'TICKET_ALLOCATED', 'DELIVERED', 'FAILED', 'CANCELLED', 'EXPIRED'] },
+  payments: { label: 'État paiement', values: ['CREATED', 'INITIATED', 'PENDING', 'CONFIRMED', 'FAILED', 'CANCELLED', 'EXPIRED', 'REFUNDED'] },
+  tickets: { label: 'État ticket', values: ['AVAILABLE', 'RESERVED', 'RELEASED', 'SOLD', 'USED', 'EXPIRED'] },
+  batches: { label: 'Source', values: ['backend', 'mikmon-manual'] },
+  incidents: { label: 'État incident', values: ['OPEN', 'INVESTIGATING', 'RESOLVED'] },
+};
+
 const supabaseConfig = browserSupabaseConfig();
 const supabaseAuth = supabaseConfig ? new SupabaseAuthClient(supabaseConfig) : null;
 
@@ -88,6 +97,7 @@ export function Admin() {
   const [audits, setAudits] = useState<AdminPage<AdminAuditSummary> | null>(null);
   const [offers, setOffers] = useState<Offer[]>([]);
   const [search, setSearch] = useState('');
+  const [stateFilter, setStateFilter] = useState('');
   const [pageOffset, setPageOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,7 +119,14 @@ export function Admin() {
       storage.setAdminToken(null);
     }
     setConnected(false);
+    replaceBrowserPath('/admin/login');
   }, [usesSupabase]);
+
+  useEffect(() => {
+    const current = appRoute(window.location.pathname, window.location.hash);
+    if (connected && current === 'admin-login') replaceBrowserPath('/admin');
+    if (!connected && current === 'admin') replaceBrowserPath('/admin/login');
+  }, [connected]);
 
   const check = useCallback(async () => {
     if (!token) {
@@ -164,6 +181,7 @@ export function Admin() {
   const listUrl = (path: string): string => {
     const params = new URLSearchParams({ limit: '25', offset: String(pageOffset) });
     if (search.trim()) params.set('search', search.trim());
+    if (stateFilter.trim()) params.set('state', stateFilter.trim());
     return `${path}?${params.toString()}`;
   };
 
@@ -214,9 +232,10 @@ export function Admin() {
     } finally {
       setLoading(false);
     }
-  }, [pageOffset, search, tab, token]);
+  }, [pageOffset, search, stateFilter, tab, token]);
 
-  useEffect(() => { setPageOffset(0); }, [search, tab]);
+  useEffect(() => { setPageOffset(0); setStateFilter(''); }, [tab]);
+  useEffect(() => { setPageOffset(0); }, [search, stateFilter]);
   useEffect(() => { if (connected) void load(); }, [connected, load]);
 
   const login = async () => {
@@ -320,21 +339,48 @@ export function Admin() {
     ['batches', 'Lots'], ['incidents', 'Incidents'], ['audit', 'Audit'], ['reconciliation', 'Réconciliation'],
   ];
 
-  return (
-    <div>
-      <div className="tabs admin-tabs">
-        {tabs.map(([id, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}
-        <button className="ghost right" onClick={() => void logout()}>Déconnexion</button>
-      </div>
-      {error ? <p className="err" role="alert">{error}</p> : null}
-      {loading ? <p className="hint" role="status">Chargement des données…</p> : null}
+  const filter = ADMIN_FILTERS[tab];
 
-      {tab !== 'dashboard' && tab !== 'reconciliation' ? (
-        <div className="card admin-toolbar">
-          <input value={search} onChange={(e) => { setPageOffset(0); setSearch(e.target.value); }} placeholder="Rechercher…" aria-label="Rechercher dans la liste" />
-          <button className="btn small" onClick={() => void load()}>Actualiser</button>
+  return (
+    <div className="admin-shell">
+      <aside className="admin-sidebar" aria-label="Navigation administration">
+        <div className="admin-sidebar-heading">
+          <span className="admin-kicker">Espace privé</span>
+          <strong>Administration</strong>
         </div>
-      ) : null}
+        <nav className="admin-nav" aria-label="Sections admin">
+          {tabs.map(([id, label]) => (
+            <button
+              key={id}
+              className={tab === id ? 'active' : ''}
+              aria-current={tab === id ? 'page' : undefined}
+              onClick={() => setTab(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+        <button className="ghost admin-logout" onClick={() => void logout()}>Déconnexion</button>
+      </aside>
+      <section className="admin-main">
+        {error ? <p className="err" role="alert">{error}</p> : null}
+        {loading ? <p className="hint" role="status">Chargement des données…</p> : null}
+
+        {tab !== 'dashboard' && tab !== 'reconciliation' ? (
+          <div className="card admin-toolbar">
+            <input value={search} onChange={(e) => { setPageOffset(0); setSearch(e.target.value); }} placeholder="Rechercher…" aria-label="Rechercher dans la liste" />
+            {filter ? (
+              <label className="admin-filter">
+                <span>{filter.label}</span>
+                <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)} aria-label={filter.label}>
+                  <option value="">Tous</option>
+                  {filter.values.map((value) => <option key={value} value={value}>{value}</option>)}
+                </select>
+              </label>
+            ) : null}
+            <button className="btn small" onClick={() => void load()}>Actualiser</button>
+          </div>
+        ) : null}
 
       {tab === 'dashboard' && dashboard ? (
         <div className="grid">
@@ -408,6 +454,7 @@ export function Admin() {
         <section className="card"><h2>Alertes ouvertes ({recon.open_alerts.length})</h2>{recon.open_alerts.length === 0 ? <p className="ok">Aucune alerte de réconciliation ouverte.</p> : <AdminTable><thead><tr><th>Règle</th><th>Sévérité</th><th>Créée le</th><th>Action</th></tr></thead><tbody>{recon.open_alerts.map((a) => <tr key={a.id}><td>{a.rule}</td><td>{stateBadge(a.severity)}</td><td>{formatDateTime(a.created_at)}</td><td><button className="btn small" onClick={() => void ack(a.id)} disabled={ackPending !== null}>{ackPending === a.id ? 'Acquittement…' : 'Acquitter'}</button></td></tr>)}</tbody></AdminTable>}</section>
         <section className="card"><h2>Runs ({recon.runs.length})</h2>{recon.runs.length === 0 ? <p className="hint">Aucun run enregistré.</p> : <AdminTable><thead><tr><th>Début</th><th>Statut</th><th>Attendu</th><th>Vu</th><th>Violations</th><th>Anomalies</th></tr></thead><tbody>{recon.runs.map((r) => <tr key={r.id}><td>{formatDateTime(r.started_at)}</td><td>{stateBadge(r.status)}</td><td>{r.router_total_expected ?? '—'}</td><td>{r.router_total_seen ?? '—'}</td><td>{r.violations.length > 0 ? r.violations.join(', ') : '—'}</td><td>{r.anomalies_count}</td></tr>)}</tbody></AdminTable>}</section>
       </div> : null}
+      </section>
     </div>
   );
 }
