@@ -16,6 +16,16 @@ export const createBatchBodySchema = z.object({
   quantity: z.number().int().min(1).max(200),
 }).strict();
 
+/** IMP-27 — pagination et filtres des listes admin ; bornes côté serveur. */
+export const adminListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+  search: z.string().trim().max(100).optional(),
+  state: z.string().trim().max(40).optional(),
+}).strict();
+
+export const adminIdParamsSchema = z.object({ id: z.string().uuid() }).strict();
+
 /**
  * Téléphone Bénin (identification minimale, doc 06 §06) : 10 chiffres commençant
  * par 01 (plan de numérotation national), préfixe international +229 toléré et

@@ -51,6 +51,92 @@ export interface CreatedBackendBatch {
   specs: GeneratedTicketSpec[];
 }
 
+/** IMP-27 — listes admin paginées : aucune liste historique n'est chargée en bloc. */
+export interface AdminListOptions {
+  limit: number;
+  offset: number;
+  search?: string;
+  state?: string;
+}
+
+export interface AdminPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface AdminOrderSummary {
+  id: string;
+  phone: string;
+  state: string;
+  offerId: string;
+  priceFcfa: number;
+  paymentState: string | null;
+  ticketState: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminPaymentSummary {
+  id: string;
+  orderId: string;
+  phone: string;
+  provider: string;
+  providerRef: string | null;
+  amountFcfa: number;
+  state: string;
+  confirmedAt: string | null;
+  createdAt: string;
+}
+
+export interface AdminOrderDetail extends AdminOrderSummary {
+  payment: AdminPaymentSummary | null;
+  ticket: AdminTicketSummary | null;
+}
+
+export interface AdminTicketSummary {
+  id: string;
+  batchId: string;
+  offerId: string;
+  source: string;
+  dbState: string;
+  routerState: string;
+  orderId: string | null;
+  codePrefixHint: string | null;
+  soldAt: string | null;
+  activationDeadline: string | null;
+}
+
+export interface AdminBatchSummary {
+  id: string;
+  source: string;
+  quantity: number;
+  generatedAt: string;
+  createdAt: string;
+  notes: string | null;
+}
+
+export interface AdminAuditSummary {
+  id: string;
+  actor: string;
+  action: string;
+  entity: string;
+  entityId: string | null;
+  at: string;
+}
+
+export interface AdminIncidentSummary {
+  id: string;
+  type: string;
+  severity: string;
+  state: string;
+  details: Record<string, unknown>;
+  openedAt: string;
+  closedAt: string | null;
+  createdAt: string;
+}
+
 export interface BackendRepo {
   /** Sonde de disponibilité (readyz). */
   ping(): Promise<void>;
@@ -213,6 +299,14 @@ export interface BackendRepo {
   getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats>;
   /** IMP-17 — inventaire par offre active (doc 09 §12.1). */
   getTicketsStatsByOffer(): Promise<Array<{ offerId: string; priceFcfa: number; states: Record<string, number> }>>;
+  /** IMP-27 — listes opérationnelles protégées et paginées. */
+  listAdminOrders(options: AdminListOptions): Promise<AdminPage<AdminOrderSummary>>;
+  getAdminOrderById(id: string): Promise<AdminOrderDetail | null>;
+  listAdminPayments(options: AdminListOptions): Promise<AdminPage<AdminPaymentSummary>>;
+  listAdminTickets(options: AdminListOptions): Promise<AdminPage<AdminTicketSummary>>;
+  listAdminBatches(options: AdminListOptions): Promise<AdminPage<AdminBatchSummary>>;
+  listAdminAuditLogs(options: AdminListOptions): Promise<AdminPage<AdminAuditSummary>>;
+  listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>>;
   /** IMP-17 — reconnaissance d'alerte, atomique et idempotente (doc 09 §4.E). */
   acknowledgeAlert(id: string): Promise<AlertAckRecord | null>;
 
@@ -1176,6 +1270,237 @@ export class PgRepo implements BackendRepo {
       [now],
     );
     return res.rows.map((r) => String(r['id']));
+  }
+
+  /** IMP-27 — listes admin : projections minimales, sans code ticket ni payload webhook. */
+  async listAdminOrders(options: AdminListOptions): Promise<AdminPage<AdminOrderSummary>> {
+    const search = options.search?.trim() ?? '';
+    const state = options.state?.trim() ?? '';
+    const res = await this.pool.query(
+      `SELECT o.id, c.phone, o.state,
+              COALESCE(p.offer_id, o.plan_snapshot->>'offer_id', '') AS offer_id,
+              COALESCE((o.plan_snapshot->>'price_snapshot')::int, 0) AS price_fcfa,
+              pay.state AS payment_state, tk.db_state AS ticket_state,
+              o.created_at, o.updated_at,
+              count(*) OVER()::int AS total
+       FROM public.orders o
+       JOIN public.customers c ON c.id = o.customer_id
+       LEFT JOIN public.plans p ON p.id = o.plan_id
+       LEFT JOIN LATERAL (
+         SELECT state FROM public.payments WHERE order_id = o.id ORDER BY created_at DESC LIMIT 1
+       ) pay ON true
+       LEFT JOIN LATERAL (
+         SELECT db_state FROM public.tickets WHERE order_id = o.id ORDER BY sold_at DESC NULLS LAST LIMIT 1
+       ) tk ON true
+       WHERE ($1 = '' OR o.id::text ILIKE '%' || $1 || '%' OR c.phone ILIKE '%' || $1 || '%'
+              OR COALESCE(p.offer_id, o.plan_snapshot->>'offer_id', '') ILIKE '%' || $1 || '%')
+         AND ($2 = '' OR o.state = $2)
+       ORDER BY o.created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [search, state, options.limit, options.offset],
+    );
+    return {
+      items: res.rows.map((r) => ({
+        id: String(r['id']), phone: String(r['phone']), state: String(r['state']),
+        offerId: String(r['offer_id']), priceFcfa: Number(r['price_fcfa']),
+        paymentState: r['payment_state'] == null ? null : String(r['payment_state']),
+        ticketState: r['ticket_state'] == null ? null : String(r['ticket_state']),
+        createdAt: new Date(r['created_at'] as string).toISOString(),
+        updatedAt: new Date(r['updated_at'] as string).toISOString(),
+      })),
+      total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
+      limit: options.limit, offset: options.offset,
+    };
+  }
+
+  async getAdminOrderById(id: string): Promise<AdminOrderDetail | null> {
+    const res = await this.pool.query(
+      `SELECT o.id, c.phone, o.state,
+              COALESCE(pl.offer_id, o.plan_snapshot->>'offer_id', '') AS offer_id,
+              COALESCE((o.plan_snapshot->>'price_snapshot')::int, 0) AS price_fcfa,
+              o.created_at, o.updated_at,
+              pay.id AS payment_id, pay.provider AS payment_provider, pay.provider_ref,
+              pay.amount_fcfa AS payment_amount, pay.state AS payment_state,
+              pay.confirmed_at AS payment_confirmed_at, pay.created_at AS payment_created_at,
+              tk.id AS ticket_id, tk.batch_id, tk.offer_id AS ticket_offer_id, tk.source AS ticket_source,
+              tk.db_state, tk.router_state, tk.order_id AS ticket_order_id, tk.code_prefix_hint,
+              tk.sold_at, tk.activation_deadline
+       FROM public.orders o
+       JOIN public.customers c ON c.id = o.customer_id
+       LEFT JOIN public.plans pl ON pl.id = o.plan_id
+       LEFT JOIN LATERAL (
+         SELECT p.id, p.provider, p.provider_ref, p.amount_fcfa, p.state, p.confirmed_at, p.created_at
+         FROM public.payments p WHERE p.order_id = o.id ORDER BY p.created_at DESC LIMIT 1
+       ) pay ON true
+       LEFT JOIN LATERAL (
+         SELECT t.id, t.batch_id, p2.offer_id, b.source, t.db_state, t.router_state, t.order_id,
+                t.code_prefix_hint, t.sold_at, t.activation_deadline
+         FROM public.tickets t
+         JOIN public.ticket_batches b ON b.id = t.batch_id
+         JOIN public.plans p2 ON p2.id = t.plan_id
+         WHERE t.order_id = o.id ORDER BY t.sold_at DESC NULLS LAST LIMIT 1
+       ) tk ON true
+       WHERE o.id = $1`,
+      [id],
+    );
+    const r = res.rows[0];
+    if (!r) return null;
+    const payment = r['payment_id'] == null ? null : {
+      id: String(r['payment_id']), orderId: id, phone: String(r['phone']), provider: String(r['payment_provider']),
+      providerRef: r['provider_ref'] == null ? null : String(r['provider_ref']), amountFcfa: Number(r['payment_amount']),
+      state: String(r['payment_state']), confirmedAt: r['payment_confirmed_at'] == null ? null : new Date(r['payment_confirmed_at'] as string).toISOString(),
+      createdAt: new Date(r['payment_created_at'] as string).toISOString(),
+    } satisfies AdminPaymentSummary;
+    const ticket = r['ticket_id'] == null ? null : {
+      id: String(r['ticket_id']), batchId: String(r['batch_id']), offerId: String(r['ticket_offer_id']), source: String(r['ticket_source']),
+      dbState: String(r['db_state']), routerState: String(r['router_state']), orderId: r['ticket_order_id'] == null ? null : String(r['ticket_order_id']),
+      codePrefixHint: r['code_prefix_hint'] == null ? null : String(r['code_prefix_hint']), soldAt: r['sold_at'] == null ? null : new Date(r['sold_at'] as string).toISOString(),
+      activationDeadline: r['activation_deadline'] == null ? null : new Date(r['activation_deadline'] as string).toISOString(),
+    } satisfies AdminTicketSummary;
+    return {
+      id: String(r['id']), phone: String(r['phone']), state: String(r['state']), offerId: String(r['offer_id']), priceFcfa: Number(r['price_fcfa']),
+      paymentState: payment?.state ?? null, ticketState: ticket?.dbState ?? null,
+      createdAt: new Date(r['created_at'] as string).toISOString(), updatedAt: new Date(r['updated_at'] as string).toISOString(), payment, ticket,
+    };
+  }
+
+  async listAdminPayments(options: AdminListOptions): Promise<AdminPage<AdminPaymentSummary>> {
+    const search = options.search?.trim() ?? '';
+    const state = options.state?.trim() ?? '';
+    const res = await this.pool.query(
+      `SELECT p.id, p.order_id, c.phone, p.provider, p.provider_ref, p.amount_fcfa,
+              p.state, p.confirmed_at, p.created_at, count(*) OVER()::int AS total
+       FROM public.payments p
+       JOIN public.orders o ON o.id = p.order_id
+       JOIN public.customers c ON c.id = o.customer_id
+       WHERE ($1 = '' OR p.id::text ILIKE '%' || $1 || '%' OR p.order_id::text ILIKE '%' || $1 || '%'
+              OR c.phone ILIKE '%' || $1 || '%' OR COALESCE(p.provider_ref, '') ILIKE '%' || $1 || '%')
+         AND ($2 = '' OR p.state = $2)
+       ORDER BY p.created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [search, state, options.limit, options.offset],
+    );
+    return {
+      items: res.rows.map((r) => ({
+        id: String(r['id']), orderId: String(r['order_id']), phone: String(r['phone']),
+        provider: String(r['provider']), providerRef: r['provider_ref'] == null ? null : String(r['provider_ref']),
+        amountFcfa: Number(r['amount_fcfa']), state: String(r['state']),
+        confirmedAt: r['confirmed_at'] == null ? null : new Date(r['confirmed_at'] as string).toISOString(),
+        createdAt: new Date(r['created_at'] as string).toISOString(),
+      })),
+      total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
+      limit: options.limit, offset: options.offset,
+    };
+  }
+
+  async listAdminTickets(options: AdminListOptions): Promise<AdminPage<AdminTicketSummary>> {
+    const search = options.search?.trim() ?? '';
+    const state = options.state?.trim() ?? '';
+    const res = await this.pool.query(
+      `SELECT t.id, t.batch_id, p.offer_id, b.source, t.db_state, t.router_state, t.order_id,
+              t.code_prefix_hint, t.sold_at, t.activation_deadline,
+              count(*) OVER()::int AS total
+       FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       JOIN public.plans p ON p.id = t.plan_id
+       WHERE ($1 = '' OR t.id::text ILIKE '%' || $1 || '%' OR t.batch_id::text ILIKE '%' || $1 || '%'
+              OR p.offer_id ILIKE '%' || $1 || '%')
+         AND ($2 = '' OR t.db_state = $2)
+       ORDER BY t.created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [search, state, options.limit, options.offset],
+    );
+    return {
+      items: res.rows.map((r) => ({
+        id: String(r['id']), batchId: String(r['batch_id']), offerId: String(r['offer_id']),
+        source: String(r['source']), dbState: String(r['db_state']), routerState: String(r['router_state']),
+        orderId: r['order_id'] == null ? null : String(r['order_id']),
+        codePrefixHint: r['code_prefix_hint'] == null ? null : String(r['code_prefix_hint']),
+        soldAt: r['sold_at'] == null ? null : new Date(r['sold_at'] as string).toISOString(),
+        activationDeadline: r['activation_deadline'] == null ? null : new Date(r['activation_deadline'] as string).toISOString(),
+      })),
+      total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
+      limit: options.limit, offset: options.offset,
+    };
+  }
+
+  async listAdminBatches(options: AdminListOptions): Promise<AdminPage<AdminBatchSummary>> {
+    const search = options.search?.trim() ?? '';
+    const source = options.state?.trim() ?? '';
+    const res = await this.pool.query(
+      `SELECT id, source, quantity, generated_at, created_at, notes, count(*) OVER()::int AS total
+       FROM public.ticket_batches
+       WHERE ($1 = '' OR id::text ILIKE '%' || $1 || '%' OR COALESCE(notes, '') ILIKE '%' || $1 || '%')
+         AND ($2 = '' OR source = $2)
+       ORDER BY generated_at DESC
+       LIMIT $3 OFFSET $4`,
+      [search, source, options.limit, options.offset],
+    );
+    return {
+      items: res.rows.map((r) => ({
+        id: String(r['id']), source: String(r['source']), quantity: Number(r['quantity']),
+        generatedAt: new Date(r['generated_at'] as string).toISOString(),
+        createdAt: new Date(r['created_at'] as string).toISOString(),
+        notes: r['notes'] == null ? null : String(r['notes']),
+      })),
+      total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
+      limit: options.limit, offset: options.offset,
+    };
+  }
+
+  async listAdminAuditLogs(options: AdminListOptions): Promise<AdminPage<AdminAuditSummary>> {
+    const search = options.search?.trim() ?? '';
+    const res = await this.pool.query(
+      `SELECT id, actor, action, entity, entity_id, at, count(*) OVER()::int AS total
+       FROM public.audit_logs
+       WHERE ($1 = '' OR actor ILIKE '%' || $1 || '%' OR action ILIKE '%' || $1 || '%'
+              OR entity ILIKE '%' || $1 || '%' OR COALESCE(entity_id, '') ILIKE '%' || $1 || '%')
+       ORDER BY at DESC
+       LIMIT $2 OFFSET $3`,
+      [search, options.limit, options.offset],
+    );
+    return {
+      items: res.rows.map((r) => ({
+        id: String(r['id']), actor: String(r['actor']), action: String(r['action']),
+        entity: String(r['entity']), entityId: r['entity_id'] == null ? null : String(r['entity_id']),
+        at: new Date(r['at'] as string).toISOString(),
+      })),
+      total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
+      limit: options.limit, offset: options.offset,
+    };
+  }
+
+  async listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>> {
+    const search = options.search?.trim() ?? '';
+    const state = options.state?.trim() ?? '';
+    const res = await this.pool.query(
+      `SELECT id, type, severity, state,
+              jsonb_build_object(
+                'code', COALESCE(details->>'code', ''),
+                'message', COALESCE(details->>'message', ''),
+                'source', COALESCE(details->>'source', '')
+              ) AS details,
+              opened_at, closed_at, created_at,
+              count(*) OVER()::int AS total
+       FROM public.incidents
+       WHERE ($1 = '' OR id::text ILIKE '%' || $1 || '%' OR type ILIKE '%' || $1 || '%'
+              OR severity ILIKE '%' || $1 || '%')
+         AND ($2 = '' OR state = $2)
+       ORDER BY opened_at DESC
+       LIMIT $3 OFFSET $4`,
+      [search, state, options.limit, options.offset],
+    );
+    return {
+      items: res.rows.map((r) => ({
+        id: String(r['id']), type: String(r['type']), severity: String(r['severity']), state: String(r['state']),
+        details: (r['details'] ?? {}) as Record<string, unknown>,
+        openedAt: new Date(r['opened_at'] as string).toISOString(),
+        closedAt: r['closed_at'] == null ? null : new Date(r['closed_at'] as string).toISOString(),
+        createdAt: new Date(r['created_at'] as string).toISOString(),
+      })),
+      total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
+      limit: options.limit, offset: options.offset,
+    };
   }
 
   async getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats> {

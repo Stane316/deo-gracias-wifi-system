@@ -217,6 +217,21 @@ pre {
   border-radius: 50%; animation: dg-spin 0.9s linear infinite;
 }
 @keyframes dg-spin { to { transform: rotate(360deg); } }
+/* UX 6 — code dominant, copiable (§19/20) */
+.code-box {
+  display: flex; flex-direction: column; gap: 4px; align-items: center;
+  background: var(--panel-2); border: 2px solid var(--green); border-radius: 6px;
+  padding: 14px 10px;
+}
+.code-label { font-size: 12px; font-weight: 800; letter-spacing: 1px; color: var(--muted); }
+.code-value {
+  font-size: 30px; font-weight: 800; letter-spacing: 6px; color: #23282c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.howto { background: #fff; border: 1px solid var(--border); border-radius: 5px; padding: 10px 14px; }
+.howto ol { margin: 6px 0 2px; padding-left: 18px; }
+.howto li { margin: 3px 0; }
+.code-inline { font-weight: 800; letter-spacing: 2px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .dev-banner {
   border: 1px dashed var(--yellow); border-radius: 5px;
   background: #fff8e1; padding: 10px 12px; display: flex;
@@ -228,4 +243,20 @@ pre {
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+
+/* IMP-27 — listes admin : lecture mobile, filtres et pagination bornée. */
+.admin-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; padding-top: 12px; padding-bottom: 12px; }
+.admin-toolbar input { text-align: left; max-width: 520px; }
+.table-wrap { overflow-x: auto; padding-left: 0; padding-right: 0; }
+.admin-pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 12px; color: var(--muted); font-size: 12px; }
+.order-detail { margin: 16px 0; }
+.order-detail h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; }
+select { width: 100%; padding: 9px 12px; border-radius: 3px; border: 1px solid var(--border); background: #fff; color: var(--text); font-size: 14px; }
+button:disabled { cursor: not-allowed; opacity: 0.6; }
+@media (max-width: 700px) {
+  .admin-tabs { gap: 5px; }
+  .admin-tabs button { padding: 6px 8px; font-size: 12px; }
+  .admin-toolbar { align-items: stretch; flex-direction: column; }
+  .admin-toolbar .btn { width: 100%; }
 }

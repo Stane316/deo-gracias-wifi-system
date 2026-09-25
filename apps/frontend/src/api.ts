@@ -16,21 +16,26 @@ export async function api<T>(
   const headers: Record<string, string> = { ...(options.headers ?? {}) };
   if (options.body !== undefined) headers['content-type'] = 'application/json';
   if (options.token) headers['authorization'] = `Bearer ${options.token}`;
-  const res = await fetch(`/api${path}`, {
-    method: options.method ?? 'GET',
-    ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-    headers,
-  });
-  const text = await res.text();
-  let body: T | null = null;
-  if (text.length > 0) {
-    try {
-      body = JSON.parse(text) as T;
-    } catch {
-      body = null;
+  try {
+    const res = await fetch(`/api${path}`, {
+      method: options.method ?? 'GET',
+      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+      headers,
+    });
+    const text = await res.text();
+    let body: T | null = null;
+    if (text.length > 0) {
+      try {
+        body = JSON.parse(text) as T;
+      } catch {
+        body = null;
+      }
     }
+    return { status: res.status, ok: res.ok, body };
+  } catch {
+    // L'UI traite status 0 comme panne réseau ; aucune exception brute ne casse l'écran admin.
+    return { status: 0, ok: false, body: null };
   }
-  return { status: res.status, ok: res.ok, body };
 }
 
 export interface Offer {
@@ -57,6 +62,84 @@ export interface TicketView {
   router_state: string;
   sold_at: string | null;
   code_prefix_hint: string | null;
+}
+
+export interface AdminPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface AdminOrderSummary {
+  id: string;
+  phone: string;
+  state: string;
+  offer_id: string;
+  price_fcfa: number;
+  payment_state: string | null;
+  ticket_state: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminPaymentSummary {
+  id: string;
+  order_id: string;
+  phone: string;
+  provider: string;
+  provider_ref: string | null;
+  amount_fcfa: number;
+  state: string;
+  confirmed_at: string | null;
+  created_at: string;
+}
+
+export interface AdminOrderDetail extends AdminOrderSummary {
+  payment: AdminPaymentSummary | null;
+  ticket: AdminTicketSummary | null;
+}
+
+export interface AdminTicketSummary {
+  id: string;
+  batch_id: string;
+  offer_id: string;
+  source: string;
+  db_state: string;
+  router_state: string;
+  order_id: string | null;
+  code_prefix_hint: string | null;
+  sold_at: string | null;
+  activation_deadline: string | null;
+}
+
+export interface AdminBatchSummary {
+  id: string;
+  source: string;
+  quantity: number;
+  generated_at: string;
+  created_at: string;
+  notes: string | null;
+}
+
+export interface AdminAuditSummary {
+  id: string;
+  actor: string;
+  action: string;
+  entity: string;
+  entity_id: string | null;
+  at: string;
+}
+
+export interface AdminIncidentSummary {
+  id: string;
+  type: string;
+  severity: string;
+  state: string;
+  details: Record<string, unknown>;
+  opened_at: string;
+  closed_at: string | null;
+  created_at: string;
 }
 
 export interface ReconciliationView {

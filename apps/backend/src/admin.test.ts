@@ -241,3 +241,70 @@ describe('IMP-17 — POST /admin/alerts/:id/ack', () => {
     await app.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// IMP-27 — listes opérationnelles paginées du Dashboard Admin
+// ---------------------------------------------------------------------------
+describe('IMP-27 — listes admin paginées et sans secrets', () => {
+  it('protège chaque nouvelle liste par authentification + rôle', async () => {
+    const { app } = await adminApp();
+    expect((await app.inject({ method: 'GET', url: '/admin/orders' })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/admin/payments', headers: { authorization: 'Bearer tok-user' } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: '/admin/tickets', headers: { authorization: 'Bearer tok-user' } })).statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('retourne commandes, paiements, tickets, lots, audit et incidents sans code clair', async () => {
+    const { repo, app } = await adminApp();
+    const customerId = await repo.findOrCreateCustomer('0197000001');
+    const created = await repo.createOrder({
+      customerId,
+      planId: 'plan-0',
+      planSnapshot: { offer_id: '5-HEURES', price_snapshot: 100 },
+      idempotencyKey: 'imp27-admin-order-1',
+    });
+    await repo.createPayment(created.order.id, 100);
+    repo.seedTicket('5-HEURES', 'AB');
+    await repo.createBackendBatch({ offerId: '5-HEURES', quantity: 1 });
+    await repo.logAudit({ actor: 'admin:sub-admin', action: 'imp27_test', entity: 'orders', entityId: created.order.id });
+    repo.adminIncidents.push({
+      id: 'incident-1', type: 'sync_blocked', severity: 'WARNING', state: 'OPEN', details: { message: 'test' },
+      openedAt: new Date().toISOString(), closedAt: null, createdAt: new Date().toISOString(),
+    });
+
+    const headers = { authorization: 'Bearer tok-admin' };
+    const urls = ['/admin/orders?limit=1', '/admin/payments?limit=1', '/admin/tickets?limit=1',
+      '/admin/batches?limit=1', '/admin/audit-logs?limit=1', '/admin/incidents?limit=1'];
+    for (const url of urls) {
+      const res = await app.inject({ method: 'GET', url, headers });
+      expect(res.statusCode, url).toBe(200);
+      const body = JSON.parse(res.body) as { items: unknown[]; total: number; limit: number; offset: number };
+      expect(body.limit).toBe(1);
+      expect(body.offset).toBe(0);
+      expect(Array.isArray(body.items)).toBe(true);
+      expect(body.total).toBeGreaterThanOrEqual(0);
+    }
+    const system = await app.inject({ method: 'GET', url: '/admin/system/status', headers });
+    expect(system.statusCode).toBe(200);
+    expect(system.json()).toMatchObject({ connector_state: expect.any(String), sync_state: expect.anything() });
+    const detail = await app.inject({ method: 'GET', url: `/admin/orders/${created.order.id}`, headers });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({ id: created.order.id, payment: { order_id: created.order.id } });
+    expect(detail.body).not.toContain('clientCode');
+    expect(detail.body).not.toContain('password');
+    const invalidDetail = await app.inject({ method: 'GET', url: '/admin/orders/not-an-uuid', headers });
+    expect(invalidDetail.statusCode).toBe(400);
+    const tickets = await app.inject({ method: 'GET', url: '/admin/tickets', headers });
+    expect(tickets.body).not.toContain('clientCode');
+    expect(tickets.body).not.toContain('password');
+    await app.close();
+  });
+
+  it('refuse une pagination hors bornes avec un problème générique', async () => {
+    const { app } = await adminApp();
+    const res = await app.inject({ method: 'GET', url: '/admin/orders?limit=101', headers: { authorization: 'Bearer tok-admin' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ title: 'Paramètres invalides' });
+    await app.close();
+  });
+});

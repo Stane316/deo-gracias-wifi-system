@@ -20,12 +20,15 @@ import {
   bearerToken,
   OtpStore,
   SessionStore,
+  type AuthIdentity,
   type AuthVerifier,
   type OtpConfig,
 } from './auth.js';
 import {
   authPhoneRequestSchema,
   authPhoneVerifySchema,
+  adminIdParamsSchema,
+  adminListQuerySchema,
   connectorClaimBodySchema,
   connectorInventoryReportSchema,
   devApproveBodySchema,
@@ -39,7 +42,7 @@ import {
   problem,
   type OrderView,
 } from './schemas.js';
-import { buildPlanSnapshot, type BackendRepo, type OrderRecord, type SyncOpRecord } from './repo.js';
+import { buildPlanSnapshot, type AdminListOptions, type BackendRepo, type OrderRecord, type SyncOpRecord } from './repo.js';
 import { allocateAndDeliver } from './tickets.js';
 import { buildDashboardPayload, startOfBusinessDay } from './admin.js';
 import { startWorkers, type StartWorkersOptions } from './workers.js';
@@ -1133,6 +1136,177 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         created_at: a.createdAt,
         run_id: (a.payload['run_id'] as string | undefined) ?? null,
       })),
+    };
+  });
+
+  // ---------------------------------------------------------------------------
+  // IMP-27 — listes opérationnelles du Dashboard Admin.
+  // Toutes sont paginées, authentifiées côté serveur et sans secret de ticket,
+  // payload webhook ou détail de synchronisation sensible.
+  // ---------------------------------------------------------------------------
+  const requireAdminImp27 = async (req: FastifyRequest, reply: FastifyReply): Promise<AuthIdentity | null> => {
+    if (!verifier) {
+      await reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Auth admin non configurée', 'SUPABASE_URL et SUPABASE_ANON_KEY sont requises (blueprint §7).'));
+      return null;
+    }
+    const token = bearerToken(req);
+    const identity = token ? await verifier.verify(token) : null;
+    if (!identity) {
+      await repo.logAudit({ actor: 'anonymous', action: 'admin_auth_denied', entity: 'auth' });
+      await reply.status(401).type('application/problem+json')
+        .send(problem(401, 'Authentification échouée', GENERIC_401));
+      return null;
+    }
+    if (!identity.role || !ADMIN_ROLES.includes(identity.role)) {
+      await repo.logAudit({ actor: `admin:${identity.sub}`, action: 'admin_auth_denied', entity: 'auth', entityId: identity.sub });
+      await reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Accès refusé', 'Rôle administrateur requis.'));
+      return null;
+    }
+    return identity;
+  };
+
+  const parseAdminListOptions = (req: FastifyRequest, reply: FastifyReply): AdminListOptions | null => {
+    const parsed = adminListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      void reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Paramètres invalides', 'La pagination ou le filtre demandé est invalide.'));
+      return null;
+    }
+    return {
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+      ...(parsed.data.search ? { search: parsed.data.search } : {}),
+      ...(parsed.data.state ? { state: parsed.data.state } : {}),
+    };
+  };
+
+  app.get('/admin/system/status', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const now = new Date();
+    const stats = await repo.getAdminDashboardStats(startOfBusinessDay(now));
+    const plans = await repo.listActivePlans();
+    const payload = buildDashboardPayload(stats, Array.from(new Set(plans.map((plan) => plan.offerId))), now);
+    return {
+      generated_at: payload.generated_at,
+      timezone: payload.timezone,
+      connector_state: payload.system.connector_state,
+      sync_state: payload.system.sync_state,
+      incidents_open: payload.system.incidents_open,
+    };
+  });
+
+  app.get('/admin/orders/:id', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const parsed = adminIdParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Identifiant invalide', 'L’identifiant de commande doit être un UUID.'));
+    }
+    const order = await repo.getAdminOrderById(parsed.data.id);
+    if (!order) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Commande introuvable', 'Aucune commande ne correspond à cet identifiant.'));
+    }
+    return {
+      id: order.id, phone: order.phone, state: order.state, offer_id: order.offerId, price_fcfa: order.priceFcfa,
+      payment_state: order.paymentState, ticket_state: order.ticketState, created_at: order.createdAt, updated_at: order.updatedAt,
+      payment: order.payment ? {
+        id: order.payment.id, order_id: order.payment.orderId, provider: order.payment.provider,
+        provider_ref: order.payment.providerRef, amount_fcfa: order.payment.amountFcfa, state: order.payment.state,
+        confirmed_at: order.payment.confirmedAt, created_at: order.payment.createdAt,
+      } : null,
+      ticket: order.ticket ? {
+        id: order.ticket.id, batch_id: order.ticket.batchId, offer_id: order.ticket.offerId, source: order.ticket.source,
+        db_state: order.ticket.dbState, router_state: order.ticket.routerState, order_id: order.ticket.orderId,
+        code_prefix_hint: order.ticket.codePrefixHint, sold_at: order.ticket.soldAt, activation_deadline: order.ticket.activationDeadline,
+      } : null,
+    };
+  });
+
+  app.get('/admin/orders', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const options = parseAdminListOptions(req, reply);
+    if (!options) return;
+    const page = await repo.listAdminOrders(options);
+    return {
+      items: page.items.map((o) => ({
+        id: o.id, phone: o.phone, state: o.state, offer_id: o.offerId, price_fcfa: o.priceFcfa,
+        payment_state: o.paymentState, ticket_state: o.ticketState, created_at: o.createdAt, updated_at: o.updatedAt,
+      })),
+      total: page.total, limit: page.limit, offset: page.offset,
+    };
+  });
+
+  app.get('/admin/payments', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const options = parseAdminListOptions(req, reply);
+    if (!options) return;
+    const page = await repo.listAdminPayments(options);
+    return {
+      items: page.items.map((p) => ({
+        id: p.id, order_id: p.orderId, phone: p.phone, provider: p.provider, provider_ref: p.providerRef,
+        amount_fcfa: p.amountFcfa, state: p.state, confirmed_at: p.confirmedAt, created_at: p.createdAt,
+      })),
+      total: page.total, limit: page.limit, offset: page.offset,
+    };
+  });
+
+  app.get('/admin/tickets', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const options = parseAdminListOptions(req, reply);
+    if (!options) return;
+    const page = await repo.listAdminTickets(options);
+    return {
+      items: page.items.map((t) => ({
+        id: t.id, batch_id: t.batchId, offer_id: t.offerId, source: t.source, db_state: t.dbState,
+        router_state: t.routerState, order_id: t.orderId, code_prefix_hint: t.codePrefixHint,
+        sold_at: t.soldAt, activation_deadline: t.activationDeadline,
+      })),
+      total: page.total, limit: page.limit, offset: page.offset,
+    };
+  });
+
+  app.get('/admin/batches', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const options = parseAdminListOptions(req, reply);
+    if (!options) return;
+    const page = await repo.listAdminBatches(options);
+    return {
+      items: page.items.map((b) => ({
+        id: b.id, source: b.source, quantity: b.quantity, generated_at: b.generatedAt,
+        created_at: b.createdAt, notes: b.notes,
+      })),
+      total: page.total, limit: page.limit, offset: page.offset,
+    };
+  });
+
+  app.get('/admin/audit-logs', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const options = parseAdminListOptions(req, reply);
+    if (!options) return;
+    const page = await repo.listAdminAuditLogs(options);
+    return {
+      items: page.items.map((a) => ({
+        id: a.id, actor: a.actor, action: a.action, entity: a.entity,
+        entity_id: a.entityId, at: a.at,
+      })),
+      total: page.total, limit: page.limit, offset: page.offset,
+    };
+  });
+
+  app.get('/admin/incidents', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const options = parseAdminListOptions(req, reply);
+    if (!options) return;
+    const page = await repo.listAdminIncidents(options);
+    return {
+      items: page.items.map((i) => ({
+        id: i.id, type: i.type, severity: i.severity, state: i.state,
+        opened_at: i.openedAt, closed_at: i.closedAt, created_at: i.createdAt,
+      })),
+      total: page.total, limit: page.limit, offset: page.offset,
     };
   });
 

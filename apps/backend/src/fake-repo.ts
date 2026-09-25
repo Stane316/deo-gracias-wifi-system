@@ -9,6 +9,15 @@ import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs } from './ticketgen.js';
 import type { CreatedBackendBatch } from './repo.js';
 import type {
   ActivePlan,
+  AdminAuditSummary,
+  AdminBatchSummary,
+  AdminIncidentSummary,
+  AdminOrderDetail,
+  AdminListOptions,
+  AdminOrderSummary,
+  AdminPage,
+  AdminPaymentSummary,
+  AdminTicketSummary,
   AllocateResult,
   BackendRepo,
   CreateOrderInputDb,
@@ -516,6 +525,141 @@ export class FakeRepo implements BackendRepo {
     }
     a.acknowledgedAt = new Date();
     return { id: a.id, rule: a.rule, severity: a.severity, acknowledgedAt: a.acknowledgedAt, alreadyAcknowledged: false };
+  }
+
+  private pageAdmin<T>(items: T[], options: AdminListOptions): AdminPage<T> {
+    return {
+      items: items.slice(options.offset, options.offset + options.limit),
+      total: items.length,
+      limit: options.limit,
+      offset: options.offset,
+    };
+  }
+
+  private adminMatches(search: string, values: Array<string | null>): boolean {
+    const q = search.trim().toLowerCase();
+    return q === '' || values.some((value) => value?.toLowerCase().includes(q) === true);
+  }
+
+  async listAdminOrders(options: AdminListOptions): Promise<AdminPage<AdminOrderSummary>> {
+    const rows: AdminOrderSummary[] = [];
+    for (const order of this.orders.values()) {
+      const customer = await this.getCustomerById(order.customerId);
+      const payment = [...this.payments.values()].filter((p) => p.orderId === order.id).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+      const ticket = [...this.tickets.values()].find((t) => t.orderId === order.id);
+      const row: AdminOrderSummary = {
+        id: order.id,
+        phone: customer?.phone ?? '',
+        state: order.state,
+        offerId: String(order.planSnapshot['offer_id'] ?? ''),
+        priceFcfa: Number(order.planSnapshot['price_snapshot'] ?? 0),
+        paymentState: payment?.state ?? null,
+        ticketState: ticket?.dbState ?? null,
+        createdAt: order.createdAt.toISOString(),
+        updatedAt: order.updatedAt.toISOString(),
+      };
+      if ((options.state ?? '') !== '' && row.state !== options.state) continue;
+      if (!this.adminMatches(options.search ?? '', [row.id, row.phone, row.offerId])) continue;
+      rows.push(row);
+    }
+    rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return this.pageAdmin(rows, options);
+  }
+
+  async getAdminOrderById(id: string): Promise<AdminOrderDetail | null> {
+    const page = await this.listAdminOrders({ limit: 100, offset: 0, search: id });
+    const summary = page.items.find((item) => item.id === id);
+    if (!summary) return null;
+    const paymentRecord = [...this.payments.values()].filter((payment) => payment.orderId === id).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+    const ticketRecord = [...this.tickets.values()].find((ticket) => ticket.orderId === id);
+    const order = this.orders.get(id);
+    const plan = order ? this.plans.find((candidate) => candidate.planId === order.planId) : undefined;
+    const payment = paymentRecord ? {
+      id: paymentRecord.id, orderId: id, phone: summary.phone, provider: paymentRecord.provider,
+      providerRef: paymentRecord.providerRef, amountFcfa: paymentRecord.amountFcfa, state: paymentRecord.state,
+      confirmedAt: paymentRecord.confirmedAt?.toISOString() ?? null, createdAt: paymentRecord.createdAt.toISOString(),
+    } satisfies AdminPaymentSummary : null;
+    const ticket = ticketRecord ? {
+      id: ticketRecord.id, batchId: ticketRecord.batchId, offerId: plan?.offerId ?? '', source: 'backend',
+      dbState: ticketRecord.dbState, routerState: ticketRecord.routerState, orderId: ticketRecord.orderId,
+      codePrefixHint: ticketRecord.codePrefixHint, soldAt: ticketRecord.soldAt?.toISOString() ?? null,
+      activationDeadline: ticketRecord.activationDeadline?.toISOString() ?? null,
+    } satisfies AdminTicketSummary : null;
+    return { ...summary, payment, ticket };
+  }
+
+  async listAdminPayments(options: AdminListOptions): Promise<AdminPage<AdminPaymentSummary>> {
+    const rows: AdminPaymentSummary[] = [];
+    for (const payment of this.payments.values()) {
+      const order = this.orders.get(payment.orderId);
+      const customer = order ? await this.getCustomerById(order.customerId) : null;
+      const row: AdminPaymentSummary = {
+        id: payment.id, orderId: payment.orderId, phone: customer?.phone ?? '', provider: payment.provider,
+        providerRef: payment.providerRef, amountFcfa: payment.amountFcfa, state: payment.state,
+        confirmedAt: payment.confirmedAt?.toISOString() ?? null, createdAt: payment.createdAt.toISOString(),
+      };
+      if ((options.state ?? '') !== '' && row.state !== options.state) continue;
+      if (!this.adminMatches(options.search ?? '', [row.id, row.orderId, row.phone, row.providerRef])) continue;
+      rows.push(row);
+    }
+    rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return this.pageAdmin(rows, options);
+  }
+
+  async listAdminTickets(options: AdminListOptions): Promise<AdminPage<AdminTicketSummary>> {
+    const rows: AdminTicketSummary[] = [];
+    for (const ticket of this.tickets.values()) {
+      const plan = this.plans.find((p) => p.planId === ticket.planId);
+      const row: AdminTicketSummary = {
+        id: ticket.id, batchId: ticket.batchId, offerId: plan?.offerId ?? '', source: 'backend',
+        dbState: ticket.dbState, routerState: ticket.routerState, orderId: ticket.orderId,
+        codePrefixHint: ticket.codePrefixHint, soldAt: ticket.soldAt?.toISOString() ?? null,
+        activationDeadline: ticket.activationDeadline?.toISOString() ?? null,
+      };
+      if ((options.state ?? '') !== '' && row.dbState !== options.state) continue;
+      if (!this.adminMatches(options.search ?? '', [row.id, row.batchId, row.offerId])) continue;
+      rows.push(row);
+    }
+    return this.pageAdmin(rows, options);
+  }
+
+  async listAdminBatches(options: AdminListOptions): Promise<AdminPage<AdminBatchSummary>> {
+    const rows = this.createdBatches.map((batch) => ({
+      id: batch.batchId, source: 'backend', quantity: batch.quantity,
+      generatedAt: batch.generatedAt.toISOString(), createdAt: batch.generatedAt.toISOString(),
+      notes: `backend-gen seq ${batch.seq} (${batch.offerId}, IMP-18)`,
+    } satisfies AdminBatchSummary));
+    const filtered = rows.filter((row) =>
+      ((options.state ?? '') === '' || row.source === options.state) &&
+      this.adminMatches(options.search ?? '', [row.id, row.notes]),
+    );
+    filtered.sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+    return this.pageAdmin(filtered, options);
+  }
+
+  async listAdminAuditLogs(options: AdminListOptions): Promise<AdminPage<AdminAuditSummary>> {
+    const rows: AdminAuditSummary[] = this.audits.map((audit, index) => ({
+      id: `fake-audit-${index + 1}`, actor: audit.actor, action: audit.action, entity: audit.entity,
+      entityId: audit.entityId ?? null, at: new Date(Date.now() - index).toISOString(),
+    }));
+    const filtered = rows.filter((row) => this.adminMatches(options.search ?? '', [row.actor, row.action, row.entity, row.entityId]));
+    return this.pageAdmin(filtered, options);
+  }
+
+  adminIncidents: AdminIncidentSummary[] = [];
+  async listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>> {
+    const filtered = this.adminIncidents.filter((row) =>
+      ((options.state ?? '') === '' || row.state === options.state) &&
+      this.adminMatches(options.search ?? '', [row.id, row.type, row.severity]),
+    ).map((row) => ({
+      ...row,
+      details: {
+        code: typeof row.details['code'] === 'string' ? row.details['code'] : '',
+        message: typeof row.details['message'] === 'string' ? row.details['message'] : '',
+        source: typeof row.details['source'] === 'string' ? row.details['source'] : '',
+      },
+    }));
+    return this.pageAdmin(filtered, options);
   }
 
   async close(): Promise<void> {}
