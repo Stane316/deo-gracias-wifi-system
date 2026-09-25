@@ -37,6 +37,8 @@ jobs:
         run: npm run typecheck
       - name: Tests
         run: npm test
+      - name: Build
+        run: npm run build
 
   db-migrations:
     # IMP-09 : migrations SQL testées sur Postgres éphémère (service container),
