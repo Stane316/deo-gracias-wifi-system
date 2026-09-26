@@ -147,3 +147,61 @@ describe('UX 1 — machine à états du parcours d’achat', () => {
     expect(r.phone).toBe('');
   });
 });
+
+describe('IMP-27 — reprise et états backend', () => {
+  it('409/rejeu rattache commande et conserve payment_id/provider_ref', () => {
+    const processing = run([
+      { type: 'START_PURCHASE' },
+      { type: 'SELECT_PLAN', offer: OFFER, idempotencyKey: 'imp27-409' },
+      { type: 'CONFIRM_PLAN' },
+      { type: 'CHOOSE_METHOD', method: 'Mobile Money' },
+      { type: 'SUBMIT_PHONE', phone: '0197123456' },
+      { type: 'LAUNCH_PAYMENT' },
+    ]);
+    const recovered = checkoutReducer(processing, {
+      type: 'ATTACH_PAYMENT',
+      orderId: 'order-409',
+      paymentId: 'payment-409',
+      providerRef: 'provider-409',
+    });
+    expect(recovered).toMatchObject({
+      orderId: 'order-409',
+      paymentId: 'payment-409',
+      providerRef: 'provider-409',
+      step: 'PAYMENT_PROCESSING',
+    });
+  });
+
+  it('rafraîchissement reprend les identifiants persistés', () => {
+    const resumed = checkoutReducer(initialCheckoutState, {
+      type: 'RESUME',
+      orderId: 'order-refresh',
+      offer: OFFER,
+      phone: '0197123456',
+      paymentId: 'payment-refresh',
+      providerRef: 'provider-refresh',
+    });
+    expect(resumed).toMatchObject({
+      step: 'PAYMENT_PENDING',
+      orderId: 'order-refresh',
+      paymentId: 'payment-refresh',
+      providerRef: 'provider-refresh',
+    });
+  });
+
+  it('état inconnu reste récupérable et ne devient pas un succès local', () => {
+    const pending = run([
+      { type: 'START_PURCHASE' },
+      { type: 'SELECT_PLAN', offer: OFFER, idempotencyKey: 'imp27-unknown' },
+      { type: 'CONFIRM_PLAN' },
+      { type: 'CHOOSE_METHOD', method: 'Mobile Money' },
+      { type: 'SUBMIT_PHONE', phone: '0197123456' },
+      { type: 'LAUNCH_PAYMENT' },
+      { type: 'PAYMENT_PENDING_SEEN' },
+    ]);
+    const unknown = checkoutReducer(pending, { type: 'ORDER_STATE_UNKNOWN' });
+    expect(unknown.step).toBe('PAYMENT_PENDING');
+    expect(unknown.step).not.toBe('PAYMENT_SUCCESS');
+    expect(unknown.message).toContain('état inhabituel');
+  });
+});

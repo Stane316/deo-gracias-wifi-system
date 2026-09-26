@@ -97,7 +97,7 @@ const port = Number(process.env['PORT'] ?? 3000);
     if (health.missing.length > 0) {
       app.log.warn(
         { database_target: databaseTarget, missing: health.missing },
-        'BASE NON MIGRÉE : appliquez les 13 migrations sur cette base (GUIDE-10 §4) ou corrigez DATABASE_URL.',
+        'BASE NON MIGRÉE : appliquez les 14 migrations sur cette base (GUIDE-10 §4) ou corrigez DATABASE_URL.',
       );
     } else {
       app.log.info({ database_target: databaseTarget, tables: health.present }, 'Schéma complet détecté');
