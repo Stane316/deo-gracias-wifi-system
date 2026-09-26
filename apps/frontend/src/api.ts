@@ -129,11 +129,18 @@ export interface AdminTicketSummary {
   batch_id: string;
   offer_id: string;
   source: string;
+  /** IMP-32 — destination du lot (DIGITAL/PHYSICAL, doc 09 §28). */
+  destination: string;
+  /** IMP-32 — le code est révélable uniquement si un sceau coffre existe. */
+  revealable: boolean;
   db_state: string;
   router_state: string;
   order_id: string | null;
   code_prefix_hint: string | null;
   sold_at: string | null;
+  reserved_at: string | null;
+  created_at: string | null;
+  mikrotik_comment: string | null;
   activation_deadline: string | null;
 }
 
@@ -141,9 +148,69 @@ export interface AdminBatchSummary {
   id: string;
   source: string;
   quantity: number;
+  destination: string;
+  offer_id: string | null;
   generated_at: string;
   created_at: string;
   notes: string | null;
+  manifest_sha256: string | null;
+  /** IMP-32 — compteurs doc 09 §30 (calculés côté serveur). */
+  available_count: number;
+  reserved_count: number;
+  reserved_stale_count: number;
+  sold_count: number;
+  used_count: number;
+  expired_count: number;
+  released_count: number;
+  tickets_count: number;
+}
+
+export interface TicketStatsOffer {
+  offer_id: string;
+  price_fcfa: number;
+  available: number;
+  reserved: number;
+  reserved_stale: number;
+  sold: number;
+  expired: number;
+  total: number;
+}
+
+export interface TicketStatsTotals {
+  available: number;
+  reserved: number;
+  reserved_stale: number;
+  sold: number;
+  expired: number;
+  total: number;
+}
+
+/** IMP-32 — GET /admin/tickets/stats (doc 09 §12.1/§28). */
+export interface TicketStatsView {
+  offers: TicketStatsOffer[];
+  totals: TicketStatsTotals;
+  by_destination: Array<Omit<TicketStatsOffer, 'price_fcfa'> & { destination: string }>;
+}
+
+/** IMP-32 — POST /admin/tickets/import/preview (doc 09 §33, lecture seule). */
+export interface TicketImportPreview {
+  offer_id: string;
+  destination: string;
+  analyzed: number;
+  valid: number;
+  invalid: number;
+  can_import: boolean;
+  rows: Array<{ line: number; code_hint: string; valid: boolean; reason: string | null }>;
+}
+
+/** IMP-32 — GET /admin/tickets/reconciliation (manifeste IMP-06). */
+export interface TicketStockReconciliation {
+  manifest_id: string;
+  generated_at: string;
+  expected_total: number;
+  actual_total: number;
+  ok: boolean;
+  items: Array<{ batch_note: string; offer_id: string; expected: number; actual: number; status: 'OK' | 'DIVERGENT' | 'MISSING' }>;
 }
 
 export interface AdminAuditSummary {

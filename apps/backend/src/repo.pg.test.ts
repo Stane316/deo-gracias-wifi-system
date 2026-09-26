@@ -2105,3 +2105,258 @@ describeDb('IMP-31 — projections PostgreSQL du Dashboard Admin', () => {
     }
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// IMP-32 — tickets, lots, import, révélation et réconciliation (Postgres réel)
+// Doc 09 §20/§28-35 : destination, secret du code, import transactionnel,
+// réconciliation du manifeste IMP-06.
+// ---------------------------------------------------------------------------
+describeDb('IMP-32 — tickets/lots/import sur Postgres réel (DATABASE_URL)', () => {
+  const pool32 = new Pool({ connectionString: DATABASE_URL });
+  const repo32 = new PgRepo(pool32);
+  const verifier32 = new FakeVerifier();
+  const ADMIN32 = { authorization: 'Bearer tok-imp32-admin' };
+  const vault32 = deriveVaultKey('itest-imp32-pg-vault');
+  let app32: Awaited<ReturnType<typeof buildApp>>;
+  let plan24_32 = '';
+  const batchIds32: string[] = [];
+
+  const cleanup32 = async (): Promise<void> => {
+    await pool32.query(`ALTER TABLE public.tickets DISABLE TRIGGER tickets_state_guard`);
+    if (batchIds32.length > 0) {
+      await pool32.query(`DELETE FROM public.tickets WHERE batch_id = ANY($1)`, [batchIds32]);
+    }
+    await pool32.query(
+      `DELETE FROM public.tickets WHERE order_id IN (SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp32-%')`,
+    );
+    await pool32.query(`ALTER TABLE public.tickets ENABLE TRIGGER tickets_state_guard`);
+    await pool32.query(
+      `DELETE FROM public.payments WHERE order_id IN (SELECT id FROM public.orders WHERE idempotency_key LIKE 'itest-imp32-%')`,
+    );
+    await pool32.query(`DELETE FROM public.orders WHERE idempotency_key LIKE 'itest-imp32-%'`);
+    if (batchIds32.length > 0) {
+      await pool32.query(`DELETE FROM public.ticket_batches WHERE id = ANY($1)`, [batchIds32]);
+      batchIds32.length = 0;
+    }
+    await pool32.query(`DELETE FROM public.customers WHERE phone LIKE '019732%'`);
+  };
+
+  const paidOrder32 = async (key: string, phone: string): Promise<string> => {
+    const res = await app32.inject({
+      method: 'POST', url: '/orders',
+      headers: { 'idempotency-key': key },
+      payload: { offer_id: '24-HEURES', customer_phone: phone },
+    });
+    const orderId = (res.json() as Record<string, unknown>)['id'] as string;
+    await pool32.query(`UPDATE public.orders SET state = 'PAYMENT_PENDING' WHERE id = $1`, [orderId]);
+    await pool32.query(`UPDATE public.orders SET state = 'PAID' WHERE id = $1`, [orderId]);
+    return orderId;
+  };
+
+  beforeAll(async () => {
+    verifier32.identities.set('tok-imp32-admin', { sub: 'sub-imp32-admin', phone: null, email: 'imp32@dg.bj', role: 'ADMIN' });
+    // Isolation : le stock mikmon seedé 0010 (AVAILABLE) ne doit pas polluer
+    // l'allocation testée ici (même parade que le describe IMP-15).
+    await parkMikmonStock(pool32);
+    await cleanup32();
+    const plans = await pool32.query(
+      `SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`,
+    );
+    plan24_32 = String(plans.rows[0]?.['id']);
+    app32 = await buildApp({
+      repo: repo32,
+      auth: { devMode: true, verifier: verifier32, rateLimits: { requestMax: 1000, verifyMax: 1000 } },
+      ticketVaultKey: vault32,
+    });
+  });
+  afterAll(async () => {
+    await cleanup32();
+    await unParkMikmonStock(pool32);
+    await app32.close();
+    await pool32.end();
+  });
+
+  it('garde de destination : un ticket PHYSICAL n’est jamais alloué', async () => {
+    const batch = await pool32.query(
+      `INSERT INTO public.ticket_batches (source, destination, quantity, notes)
+       VALUES ('backend', 'PHYSICAL', 1, 'itest-imp32-phys') RETURNING id`,
+    );
+    const physBatch = String(batch.rows[0]?.['id']);
+    batchIds32.push(physBatch);
+    await pool32.query(
+      `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id)
+       VALUES ($1, 'imp32-phys-hash', 'IM32', $2)`,
+      [physBatch, plan24_32],
+    );
+    const orderId = await paidOrder32('itest-imp32-pg-phys', '0197320001');
+    const outcome = await repo32.allocateTicketForOrder(orderId);
+    expect(outcome).toEqual({ status: 'no-stock' });
+    const state = await pool32.query(`SELECT db_state, order_id FROM public.tickets WHERE batch_id = $1`, [physBatch]);
+    expect(state.rows[0]).toMatchObject({ db_state: 'AVAILABLE', order_id: null });
+  });
+
+  it('réconciliation 660/660 (seed 0010), stats by_destination, liste filtrée sans secret', async () => {
+    const recon = await app32.inject({ method: 'GET', url: '/admin/tickets/reconciliation', headers: ADMIN32 });
+    expect(recon.statusCode).toBe(200);
+    const r = recon.json() as {
+      manifest_id: string; expected_total: number; actual_total: number; ok: boolean;
+      items: Array<{ batch_note: string; status: string }>;
+    };
+    expect({ manifest_id: r.manifest_id, expected_total: r.expected_total, actual_total: r.actual_total, ok: r.ok })
+      .toEqual({ manifest_id: 'stock-manifest-2026-09-17', expected_total: 660, actual_total: 660, ok: true });
+    expect(r.items).toHaveLength(6);
+    expect(r.items.every((i) => i.status === 'OK')).toBe(true);
+
+    const stats = await app32.inject({ method: 'GET', url: '/admin/tickets/stats', headers: ADMIN32 });
+    expect(stats.statusCode).toBe(200);
+    const s = stats.json() as {
+      offers: Array<Record<string, unknown>>;
+      totals: Record<string, number>;
+      by_destination: Array<Record<string, unknown>>;
+    };
+    expect(typeof s.totals['reserved_stale']).toBe('number');
+    expect(Array.isArray(s.by_destination)).toBe(true);
+    const byDestSum = s.by_destination.reduce((acc, d) => acc + Number(d['total']), 0);
+    const offersSum = s.offers.reduce((acc, o) => acc + Number(o['total']), 0);
+    expect(byDestSum).toBe(offersSum);
+
+    const list = await app32.inject({ method: 'GET', url: '/admin/tickets?destination=DIGITAL&limit=5', headers: ADMIN32 });
+    expect(list.statusCode).toBe(200);
+    const l = list.json() as { items: Array<Record<string, unknown>>; total: number };
+    expect(l.items.length).toBeGreaterThan(0);
+    expect(l.items.length).toBeLessThanOrEqual(5);
+    expect(l.items.every((i) => i['destination'] === 'DIGITAL' && typeof i['revealable'] === 'boolean')).toBe(true);
+    for (const item of l.items) {
+      expect(Object.keys(item)).not.toEqual(expect.arrayContaining(['code', 'code_hash', 'code_cipher']));
+    }
+    const bad = await app32.inject({ method: 'GET', url: '/admin/tickets?destination=VOITURE', headers: ADMIN32 });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it('révélation : 409 stock seedé sans sceau, 200 lot scellé, audit SANS le code', async () => {
+    // Stock seedé 0010 : hashé sans sceau => voucher papier, jamais affiché en ligne.
+    const seeded = await pool32.query(
+      `SELECT t.id FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE b.source = 'mikmon-manual' AND t.code_cipher IS NULL LIMIT 1`,
+    );
+    const seededId = String(seeded.rows[0]?.['id']);
+    const c409 = await app32.inject({
+      method: 'POST', url: `/admin/tickets/${seededId}/reveal`, headers: ADMIN32,
+      payload: { reason: 'Vérification du stock seedé, sans sceau coffre.' },
+    });
+    expect(c409.statusCode).toBe(409);
+    expect((await pool32.query(
+      `SELECT count(*)::int AS n FROM public.audit_logs WHERE action = 'admin_ticket_reveal_denied' AND entity_id = $1`,
+      [seededId],
+    )).rows[0]?.['n']).toBe(1);
+
+    // Lot créé avec sceau => révélation possible, audité, code jamais journalisé.
+    const batch = await repo32.createBackendBatch({ offerId: '24-HEURES', quantity: 1, vaultKey: vault32 });
+    batchIds32.push(batch.batchId);
+    const spec = batch.specs[0];
+    expect(spec).toBeDefined();
+    const tick = await pool32.query(`SELECT id FROM public.tickets WHERE batch_id = $1`, [batch.batchId]);
+    const ticketId = String(tick.rows[0]?.['id']);
+    const ok = await app32.inject({
+      method: 'POST', url: `/admin/tickets/${ticketId}/reveal`, headers: ADMIN32,
+      payload: { reason: 'Demande support : code perdu par le client.' },
+    });
+    expect(ok.statusCode).toBe(200);
+    const okBody = ok.json() as { code: string; destination: string; db_state: string };
+    expect({ code: okBody.code, destination: okBody.destination, db_state: okBody.db_state })
+      .toEqual({ code: spec?.clientCode, destination: 'DIGITAL', db_state: 'AVAILABLE' });
+    const audit = await pool32.query(
+      `SELECT after FROM public.audit_logs WHERE action = 'admin_ticket_code_revealed' AND entity_id = $1`,
+      [ticketId],
+    );
+    expect(audit.rows).toHaveLength(1);
+    expect(JSON.stringify(audit.rows[0])).not.toContain(spec?.clientCode);
+
+    // Raison trop courte => 400 (la révélation est une opération justifiée).
+    const short = await app32.inject({
+      method: 'POST', url: `/admin/tickets/${ticketId}/reveal`, headers: ADMIN32,
+      payload: { reason: 'court' },
+    });
+    expect(short.statusCode).toBe(400);
+    // Inconnu => 404 audité.
+    const nf = await app32.inject({
+      method: 'POST', url: '/admin/tickets/00000000-0000-4000-8000-000000000000/reveal', headers: ADMIN32,
+      payload: { reason: 'Recherche d’un ticket déclaré introuvable.' },
+    });
+    expect(nf.statusCode).toBe(404);
+  });
+
+  it('import : preview pur, transaction 201 scellée, rejeu idempotent, doublon DB => 422 sans écriture', async () => {
+    const codes = ['imp32aa1', 'imp32bb2', 'imp32cc3'];
+    // Preview (lecture seule) : le résultat ne porte que des hints.
+    const preview = await repo32.previewTicketImport({ offerId: '24-HEURES', destination: 'DIGITAL', codes });
+    expect({ analyzed: preview.analyzed, valid: preview.valid, invalid: preview.invalid, canImport: preview.canImport })
+      .toEqual({ analyzed: 3, valid: 3, invalid: 0, canImport: true });
+    expect(preview.rows.every((r) => r.codeHint !== null && !r.codeHint.includes('imp32'))).toBe(true);
+
+    const res = await app32.inject({
+      method: 'POST', url: '/admin/tickets/import',
+      headers: { ...ADMIN32, 'idempotency-key': 'itest-imp32-pg-ok' },
+      payload: { offer_id: '24-HEURES', destination: 'DIGITAL', codes },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { batch_id: string; created: boolean; imported: number; rejected: number };
+    expect({ created: body.created, imported: body.imported, rejected: body.rejected })
+      .toEqual({ created: true, imported: 3, rejected: 0 });
+    batchIds32.push(body.batch_id);
+
+    // Base : sha256 + sceau AES-GCM, jamais le clair ; lot mikmon-manual + destination.
+    const rows = await pool32.query(
+      `SELECT t.id, t.db_state, t.code_hash, t.code_cipher, t.mikrotik_comment
+       FROM public.tickets t WHERE t.batch_id = $1`,
+      [body.batch_id],
+    );
+    expect(rows.rows).toHaveLength(3);
+    for (const r of rows.rows) {
+      expect(r['db_state']).toBe('AVAILABLE');
+      expect(String(r['code_hash'])).toMatch(/^[a-f0-9]{64}$/);
+      expect(r['code_cipher']).toBeTruthy();
+      expect(JSON.stringify(r)).not.toContain('imp32aa1'); // zéro clair en base
+    }
+    const batchRow = await pool32.query(
+      `SELECT source, destination, idempotency_key, quantity FROM public.ticket_batches WHERE id = $1`,
+      [body.batch_id],
+    );
+    expect(batchRow.rows[0]).toMatchObject({ source: 'mikmon-manual', destination: 'DIGITAL', quantity: 3, idempotency_key: 'itest-imp32-pg-ok' });
+
+    // Rejeu idempotent : même clé => même lot, AUCUNE réécriture.
+    const replay = await app32.inject({
+      method: 'POST', url: '/admin/tickets/import',
+      headers: { ...ADMIN32, 'idempotency-key': 'itest-imp32-pg-ok' },
+      payload: { offer_id: '24-HEURES', destination: 'DIGITAL', codes },
+    });
+    expect(replay.statusCode).toBe(200);
+    const rbody = replay.json() as { created: boolean; import_performed: boolean; batch_id: string };
+    expect({ created: rbody.created, import_performed: rbody.import_performed, batch_id: rbody.batch_id })
+      .toEqual({ created: false, import_performed: true, batch_id: body.batch_id });
+    const count = await pool32.query(
+      `SELECT count(*)::int AS n FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE b.idempotency_key = 'itest-imp32-pg-ok'`,
+    );
+    expect(count.rows[0]?.['n']).toBe(3);
+
+    // Doublon en base (nouvelle clé) : 422 explicite, ZÉRO écriture (doc 09 §34).
+    const dup = await app32.inject({
+      method: 'POST', url: '/admin/tickets/import',
+      headers: { ...ADMIN32, 'idempotency-key': 'itest-imp32-pg-dup' },
+      payload: { offer_id: '24-HEURES', destination: 'DIGITAL', codes: ['imp32aa1', 'imp32dd4'] },
+    });
+    expect(dup.statusCode).toBe(422);
+    expect((dup.json() as { detail: string }).detail).toContain('aucun import partiel silencieux');
+    const dupCount = await pool32.query(
+      `SELECT count(*)::int AS n FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE b.idempotency_key = 'itest-imp32-pg-dup'`,
+    );
+    expect(dupCount.rows[0]?.['n']).toBe(0);
+    expect((await pool32.query(`SELECT count(*)::int AS n FROM public.ticket_batches WHERE idempotency_key = 'itest-imp32-pg-dup'`)).rows[0]?.['n']).toBe(0);
+  });
+});

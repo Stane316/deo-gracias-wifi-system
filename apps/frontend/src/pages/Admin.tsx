@@ -13,6 +13,9 @@ import {
   type AdminTicketSummary,
   type Offer,
   type ReconciliationView,
+  type TicketImportPreview,
+  type TicketStatsView,
+  type TicketStockReconciliation,
 } from '../api.js';
 import { backendUnreachableMessage, formatDateTime, formatFcfa, problemDetail } from '../format.js';
 import {
@@ -61,12 +64,6 @@ interface DashboardPayload {
     sync_success: number;
     incidents_open: number;
   };
-}
-
-interface TicketsStats {
-  total?: number;
-  by_state?: Record<string, number>;
-  [key: string]: unknown;
 }
 
 interface BatchExportLine {
@@ -119,8 +116,9 @@ export function Admin() {
 
   const [tab, setTab] = useState<AdminTab>('dashboard');
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
-  const [stats, setStats] = useState<TicketsStats | null>(null);
+  const [stats, setStats] = useState<TicketStatsView | null>(null);
   const [recon, setRecon] = useState<ReconciliationView | null>(null);
+  const [stockRecon, setStockRecon] = useState<TicketStockReconciliation | null>(null);
   const [orders, setOrders] = useState<AdminPage<AdminOrderSummary> | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<AdminOrderDetail | null>(null);
   const [payments, setPayments] = useState<AdminPage<AdminPaymentSummary> | null>(null);
@@ -133,6 +131,7 @@ export function Admin() {
   const [stateFilter, setStateFilter] = useState('');
   const [paymentStateFilter, setPaymentStateFilter] = useState('');
   const [ticketStateFilter, setTicketStateFilter] = useState('');
+  const [destinationFilter, setDestinationFilter] = useState('');
   const [offerFilter, setOfferFilter] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
@@ -149,6 +148,21 @@ export function Admin() {
   const [correctionReason, setCorrectionReason] = useState('');
   const [correctionPending, setCorrectionPending] = useState(false);
   const [correctionMessage, setCorrectionMessage] = useState<string | null>(null);
+  // IMP-32 — révélation contrôlée d'un code (doc 09 §20) : raison obligatoire,
+  // code affiché une seule fois, jamais persisté côté navigateur.
+  const [revealTarget, setRevealTarget] = useState<AdminTicketSummary | null>(null);
+  const [revealReason, setRevealReason] = useState('');
+  const [revealResult, setRevealResult] = useState<{ ok: boolean; code?: string; message: string } | null>(null);
+  const [revealPending, setRevealPending] = useState(false);
+  // IMP-32 — import de codes : preview → validation → import transactionnel (§33-34).
+  const [importOffer, setImportOffer] = useState('');
+  const [importDestination, setImportDestination] = useState<'DIGITAL' | 'PHYSICAL'>('DIGITAL');
+  const [importCodes, setImportCodes] = useState('');
+  const [importNotes, setImportNotes] = useState('');
+  const [importPreview, setImportPreview] = useState<TicketImportPreview | null>(null);
+  const [importResult, setImportResult] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importPending, setImportPending] = useState(false);
 
   const usesSupabase = supabaseAuth !== null;
   const token = usesSupabase ? (supabaseSession?.access_token ?? null) : storage.adminToken();
@@ -228,6 +242,8 @@ export function Admin() {
     const params = new URLSearchParams({ limit: '25', offset: String(pageOffset) });
     if (search.trim()) params.set('search', search.trim());
     if (stateFilter.trim()) params.set('state', stateFilter.trim());
+    // IMP-32 — filtre de destination (lot DIGITAL/PHYSICAL, doc 09 §28).
+    if ((tab === 'tickets' || tab === 'batches') && destinationFilter.trim()) params.set('destination', destinationFilter.trim());
     if (tab === 'orders' && offerFilter.trim()) params.set('offer_id', offerFilter.trim());
     if (tab === 'orders' && paymentStateFilter.trim()) params.set('payment_state', paymentStateFilter.trim());
     if (tab === 'orders' && ticketStateFilter.trim()) params.set('ticket_state', ticketStateFilter.trim());
@@ -258,7 +274,7 @@ export function Admin() {
         else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
       } else if (tab === 'tickets') {
         const [statsRes, listRes] = await Promise.all([
-          api<TicketsStats>('/admin/tickets/stats', { token }),
+          api<TicketStatsView>('/admin/tickets/stats', { token }),
           api<AdminPage<AdminTicketSummary>>(listUrl('/admin/tickets'), { token }),
         ]);
         if (statsRes.ok && statsRes.body) setStats(statsRes.body);
@@ -280,17 +296,22 @@ export function Admin() {
         if (res.ok && res.body) setAudits(res.body);
         else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
       } else {
-        const res = await api<ReconciliationView>('/admin/reconciliation', { token });
+        // IMP-32 — réconciliation routeur (runs/alertes) + stock vs manifeste IMP-06.
+        const [res, stockRes] = await Promise.all([
+          api<ReconciliationView>('/admin/reconciliation', { token }),
+          api<TicketStockReconciliation>('/admin/tickets/reconciliation', { token }),
+        ]);
         if (res.ok && res.body) setRecon(res.body);
-        else setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
+        if (stockRes.ok && stockRes.body) setStockRecon(stockRes.body);
+        if (!res.ok) setError(backendUnreachableMessage(res.status, res.body) ?? problemDetail(res.body));
       }
     } finally {
       setLoading(false);
     }
-  }, [fromDate, offerFilter, pageOffset, paymentStateFilter, search, stateFilter, tab, ticketStateFilter, toDate, token]);
+  }, [destinationFilter, fromDate, offerFilter, pageOffset, paymentStateFilter, search, stateFilter, tab, ticketStateFilter, toDate, token]);
 
-  useEffect(() => { setPageOffset(0); setStateFilter(''); setPaymentStateFilter(''); setTicketStateFilter(''); setOfferFilter(''); setFromDate(''); setToDate(''); }, [tab]);
-  useEffect(() => { setPageOffset(0); }, [fromDate, offerFilter, paymentStateFilter, search, stateFilter, ticketStateFilter, toDate]);
+  useEffect(() => { setPageOffset(0); setStateFilter(''); setPaymentStateFilter(''); setTicketStateFilter(''); setDestinationFilter(''); setOfferFilter(''); setFromDate(''); setToDate(''); setRevealTarget(null); setRevealResult(null); setImportPreview(null); setImportResult(null); setImportError(null); }, [tab]);
+  useEffect(() => { setPageOffset(0); }, [destinationFilter, fromDate, offerFilter, paymentStateFilter, search, stateFilter, ticketStateFilter, toDate]);
   useEffect(() => { if (connected) void load(); }, [connected, load]);
 
   const login = async () => {
@@ -402,6 +423,92 @@ export function Admin() {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // IMP-32 — révélation contrôlée d'un code (doc 09 §20)
+  // ---------------------------------------------------------------------------
+  const openReveal = (ticket: AdminTicketSummary) => {
+    setRevealTarget(ticket);
+    setRevealReason('');
+    setRevealResult(null);
+  };
+
+  const submitReveal = async () => {
+    if (!revealTarget || revealPending || revealReason.trim().length < 20) return;
+    setRevealPending(true);
+    setRevealResult(null);
+    try {
+      const res = await api<{ ticket_id: string; code: string; destination: string; db_state: string; message: string }>(
+        `/admin/tickets/${revealTarget.id}/reveal`,
+        { method: 'POST', token, body: { reason: revealReason.trim() } },
+      );
+      if (res.ok && res.body) setRevealResult({ ok: true, code: res.body.code, message: res.body.message });
+      else setRevealResult({ ok: false, message: problemDetail(res.body) ?? `Échec de la révélation (HTTP ${res.status}).` });
+    } finally {
+      setRevealPending(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // IMP-32 — import de codes : preview → validation → transaction (§33-34)
+  // ---------------------------------------------------------------------------
+  const parseImportCodes = (): string[] =>
+    importCodes.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+
+  const previewImport = async () => {
+    const codes = parseImportCodes();
+    if (!importOffer || codes.length === 0) {
+      setImportError('Choisissez une offre et au moins un code (un par ligne).');
+      return;
+    }
+    if (codes.length > 200) {
+      setImportError(`200 codes maximum par import (${codes.length} saisis).`);
+      return;
+    }
+    setImportError(null);
+    setImportResult(null);
+    setImportPreview(null);
+    const res = await api<TicketImportPreview>('/admin/tickets/import/preview', {
+      method: 'POST', token,
+      body: {
+        offer_id: importOffer, destination: importDestination, codes,
+        ...(importNotes.trim() ? { notes: importNotes.trim() } : {}),
+      },
+    });
+    if (res.ok && res.body) setImportPreview(res.body);
+    else setImportError(problemDetail(res.body) ?? `Échec de la prévisualisation (HTTP ${res.status}).`);
+  };
+
+  const confirmImport = async () => {
+    // Anti-double-clic + idempotence : clé fraîche par tentative de confirmation.
+    if (importPending || !importPreview?.can_import) return;
+    const codes = parseImportCodes();
+    if (!importOffer || codes.length === 0) return;
+    setImportPending(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const res = await api<{ batch_id: string | null; created: boolean; imported: number; rejected: number; import_performed: boolean; message: string }>(
+        '/admin/tickets/import',
+        {
+          method: 'POST', token,
+          headers: { 'Idempotency-Key': `admin-import-${globalThis.crypto.randomUUID()}` },
+          body: {
+            offer_id: importOffer, destination: importDestination, codes,
+            ...(importNotes.trim() ? { notes: importNotes.trim() } : {}),
+          },
+        },
+      );
+      if (res.ok && res.body) {
+        setImportResult(res.body.message);
+        setImportPreview(null);
+        setImportCodes('');
+        await load();
+      } else setImportError(problemDetail(res.body) ?? `Échec de l'import (HTTP ${res.status}).`);
+    } finally {
+      setImportPending(false);
+    }
+  };
+
   if (!connected) {
     return (
       <section className="card narrow">
@@ -473,6 +580,9 @@ export function Admin() {
                   {filter.values.map((value) => <option key={value} value={value}>{value}</option>)}
                 </select>
               </label>
+            ) : null}
+            {(tab === 'tickets' || tab === 'batches') ? (
+              <label className="admin-filter"><span>Destination</span><select value={destinationFilter} onChange={(e) => setDestinationFilter(e.target.value)} aria-label="Filtrer par destination"><option value="">Toutes</option><option value="DIGITAL">DIGITAL</option><option value="PHYSICAL">PHYSICAL</option></select></label>
             ) : null}
             {tab === 'orders' ? (
               <>
@@ -576,12 +686,63 @@ export function Admin() {
       </AdminTable>{payments && payments.items.length === 0 ? <p className="hint">Aucun paiement trouvé.</p> : null}<AdminPager page={payments} offset={pageOffset} onOffsetChange={setPageOffset} /></section> : null}
 
       {tab === 'tickets' ? <div className="grid">
-        <section className="card"><h2>Inventaire par offre</h2><pre>{JSON.stringify(stats, null, 2)}</pre></section>
+        <section className="card"><h2>Inventaire par offre</h2>
+          {stats ? (
+            <>
+              <AdminTable>
+                <thead><tr><th>Offre</th><th>Prix</th><th>Dispo</th><th>Réservés</th><th>Stale</th><th>Vendus</th><th>Expirés</th><th>Total</th></tr></thead>
+                <tbody>{stats.offers.map((o) => <tr key={o.offer_id}><td>{o.offer_id}</td><td>{formatFcfa(o.price_fcfa)}</td><td>{o.available}</td><td>{o.reserved}</td><td>{o.reserved_stale > 0 ? <strong className="count-stale" title="Réservations au-delà du TTL de 15 min (libérées par le worker)">{o.reserved_stale}</strong> : '0'}</td><td>{o.sold}</td><td>{o.expired}</td><td>{o.total}</td></tr>)}</tbody>
+              </AdminTable>
+              <h3 className="admin-subheading">Stock par plan × destination</h3>
+              <AdminTable>
+                <thead><tr><th>Offre</th><th>Destination</th><th>Dispo</th><th>Réservés</th><th>Stale</th><th>Vendus</th><th>Expirés</th><th>Total</th></tr></thead>
+                <tbody>{stats.by_destination.map((d) => <tr key={`${d.offer_id}-${d.destination}`}><td>{d.offer_id}</td><td><span className={`badge dest-badge ${d.destination === 'PHYSICAL' ? 'dest-physical' : 'dest-digital'}`}>{d.destination}</span></td><td>{d.available}</td><td>{d.reserved}</td><td>{d.reserved_stale > 0 ? <strong className="count-stale">{d.reserved_stale}</strong> : '0'}</td><td>{d.sold}</td><td>{d.expired}</td><td>{d.total}</td></tr>)}</tbody>
+              </AdminTable>
+            </>
+          ) : <p className="hint">Chargement de l’inventaire…</p>}
+        </section>
         <section className="card"><h2>Tickets ({tickets?.total ?? 0})</h2><AdminTable>
-          <thead><tr><th>Ticket</th><th>Offre</th><th>Source</th><th>État</th><th>Routeur</th><th>Préfixe</th><th>Vendu le</th></tr></thead>
-          <tbody>{pageItems(tickets).map((t) => <tr key={t.id}><td><code>{t.id.slice(0, 8)}…</code></td><td>{t.offer_id}</td><td>{t.source}</td><td>{stateBadge(t.db_state)}</td><td>{stateBadge(t.router_state)}</td><td>{t.code_prefix_hint ?? '—'}</td><td>{t.sold_at ? formatDateTime(t.sold_at) : '—'}</td></tr>)}</tbody>
+          <thead><tr><th>Ticket</th><th>Offre</th><th>Destination</th><th>État</th><th>Routeur</th><th>Préfixe</th><th>Révéler</th><th>Vendu le</th></tr></thead>
+          <tbody>{pageItems(tickets).map((t) => <tr key={t.id}><td><code>{t.id.slice(0, 8)}…</code></td><td>{t.offer_id}</td><td><span className={`badge dest-badge ${t.destination === 'PHYSICAL' ? 'dest-physical' : 'dest-digital'}`}>{t.destination}</span></td><td>{stateBadge(t.db_state)}</td><td>{stateBadge(t.router_state)}</td><td>{t.code_prefix_hint ?? '—'}</td><td>{t.revealable ? <button className="btn small ghost" onClick={() => openReveal(t)} title="Révélation contrôlée, audité, raison obligatoire">Révéler</button> : <span className="hint" title="Lot sans sceau coffre : le code figure sur le voucher papier">—</span>}</td><td>{t.sold_at ? formatDateTime(t.sold_at) : '—'}</td></tr>)}</tbody>
         </AdminTable>{tickets && tickets.items.length === 0 ? <p className="hint">Aucun ticket trouvé.</p> : null}<AdminPager page={tickets} offset={pageOffset} onOffsetChange={setPageOffset} /></section>
       </div> : null}
+
+      {revealTarget ? (
+        <section className="card reveal-box">
+          <h2>Révélation contrôlée — ticket {revealTarget.id.slice(0, 8)}…</h2>
+          <p className="hint">
+            Opération réservée au besoin réel (doc 09 §20) : chaque révélation est auditée (acteur, raison, état du ticket).
+            Le code n’est affiché qu’une fois ici, jamais journalisé ni conservé par l’interface.
+          </p>
+          {revealResult?.ok ? (
+            <div className="code-box">
+              <span className="code-label">Code du ticket ({revealTarget.destination})</span>
+              <span className="code-value">{revealResult.code}</span>
+              <p className="hint" role="status">{revealResult.message}</p>
+            </div>
+          ) : (
+            <div className="stack">
+              <textarea
+                value={revealReason}
+                onChange={(e) => setRevealReason(e.target.value)}
+                minLength={20}
+                maxLength={1000}
+                placeholder="Raison opérationnelle (20 caractères minimum) : pourquoi ce code doit-il être révélé ?"
+                aria-label="Raison de la révélation"
+              />
+              <div>
+                <button className="btn" onClick={() => void submitReveal()} disabled={revealPending || revealReason.trim().length < 20}>
+                  {revealPending ? 'Révélation…' : 'Révéler le code'}
+                </button>
+              </div>
+              {revealResult && !revealResult.ok ? <p className="err" role="alert">{revealResult.message}</p> : null}
+            </div>
+          )}
+          <div className="stack">
+            <button className="ghost" onClick={() => { setRevealTarget(null); setRevealResult(null); setRevealReason(''); }}>Fermer</button>
+          </div>
+        </section>
+      ) : null}
 
       {tab === 'batches' ? <div className="grid">
         <section className="card"><h2>Créer un lot digital</h2><p className="hint">Les codes ne sont affichés qu’à cette création. Archivez-les immédiatement dans le coffre prévu.</p><div className="stack">
@@ -591,9 +752,53 @@ export function Admin() {
           {batchError ? <p className="err" role="alert">{batchError}</p> : null}
         </div></section>
         <section className="card"><h2>Lots ({batches?.total ?? 0})</h2><AdminTable>
-          <thead><tr><th>Lot</th><th>Source</th><th>Quantité</th><th>Généré le</th><th>Notes</th></tr></thead>
-          <tbody>{pageItems(batches).map((b) => <tr key={b.id}><td><code>{b.id.slice(0, 8)}…</code></td><td>{b.source}</td><td>{b.quantity}</td><td>{formatDateTime(b.generated_at)}</td><td>{b.notes ?? '—'}</td></tr>)}</tbody>
+          <thead><tr><th>Lot</th><th>Source</th><th>Destination</th><th>Offre</th><th>Qté</th><th>Dispo</th><th>Rés.</th><th>Stale</th><th>Vendus</th><th>Util.</th><th>Exp.</th><th>Lib.</th><th>Généré le</th><th>Notes</th></tr></thead>
+          <tbody>{pageItems(batches).map((b) => <tr key={b.id} title={b.notes ?? undefined}><td><code>{b.id.slice(0, 8)}…</code></td><td>{b.source}</td><td><span className={`badge dest-badge ${b.destination === 'PHYSICAL' ? 'dest-physical' : 'dest-digital'}`}>{b.destination}</span></td><td>{b.offer_id ?? '—'}</td><td>{b.quantity}</td><td>{b.available_count}</td><td>{b.reserved_count}</td><td>{b.reserved_stale_count > 0 ? <strong className="count-stale" title="Réservations au-delà du TTL de 15 min">{b.reserved_stale_count}</strong> : '0'}</td><td>{b.sold_count}</td><td>{b.used_count}</td><td>{b.expired_count}</td><td>{b.released_count}</td><td>{formatDateTime(b.generated_at)}</td><td>{b.notes ? <span title={b.notes}>{b.notes.length > 18 ? `${b.notes.slice(0, 18)}…` : b.notes}</span> : '—'}</td></tr>)}</tbody>
         </AdminTable>{batches && batches.items.length === 0 ? <p className="hint">Aucun lot trouvé.</p> : null}<AdminPager page={batches} offset={pageOffset} onOffsetChange={setPageOffset} /></section>
+        <section className="card"><h2>Importer un lot de codes</h2>
+          <p className="hint">
+            Flux obligatoire : prévisualisation → validation → import transactionnel. Aucun import partiel silencieux :
+            la moindre ligne invalide signifie que rien n’est écrit, et le résultat l’annonce explicitement (doc 09 §33-34).
+          </p>
+          <div className="stack">
+            <select value={importOffer} onChange={(e) => { setImportOffer(e.target.value); setImportPreview(null); }} aria-label="Offre du lot importé">
+              <option value="" disabled>Choisir une offre</option>
+              {offers.map((o) => <option key={o.id} value={o.id}>{o.id} — {formatFcfa(o.priceFcfa)}</option>)}
+            </select>
+            <select value={importDestination} onChange={(e) => { setImportDestination(e.target.value as 'DIGITAL' | 'PHYSICAL'); setImportPreview(null); }} aria-label="Destination du lot importé">
+              <option value="DIGITAL">DIGITAL — vendable en ligne (scellé coffre)</option>
+              <option value="PHYSICAL">PHYSICAL — voucher papier (jamais alloué à une vente digitale)</option>
+            </select>
+            <textarea
+              className="import-codes"
+              rows={6}
+              value={importCodes}
+              onChange={(e) => { setImportCodes(e.target.value); setImportPreview(null); }}
+              placeholder={'Un code par ligne, 8 caractères [0-9a-z], 1 à 200 codes\nex. : a1b2c3d4\ne5f6g7h8'}
+              aria-label="Codes à importer, un par ligne"
+            />
+            <input value={importNotes} onChange={(e) => { setImportNotes(e.target.value); setImportPreview(null); }} maxLength={200} placeholder="Notes internes du lot (optionnel, 200 car. max)" aria-label="Notes internes du lot" />
+            <div className="admin-filter-row">
+              <button className="btn small" onClick={() => void previewImport()} disabled={importPending}>{importPending ? '…' : 'Prévisualiser'}</button>
+              <button className="btn" onClick={() => void confirmImport()} disabled={importPending || !importPreview?.can_import}>{importPending ? 'Import en cours…' : 'Confirmer l’import'}</button>
+            </div>
+            {importError ? <p className="err" role="alert">{importError}</p> : null}
+            {importResult ? <p className="ok" role="status">{importResult}</p> : null}
+          </div>
+          {importPreview ? (
+            <div className="import-preview">
+              <p className={importPreview.can_import ? 'ok' : 'err'} role="status">
+                {importPreview.analyzed} analysée(s) · {importPreview.valid} valide(s) · {importPreview.invalid} invalide(s) — {importPreview.can_import ? 'import possible' : 'import non possible'}
+              </p>
+              {importPreview.invalid > 0 ? (
+                <AdminTable>
+                  <thead><tr><th>Ligne</th><th>Préfixe</th><th>Motif de rejet</th></tr></thead>
+                  <tbody>{importPreview.rows.filter((r) => !r.valid).map((r) => <tr key={r.line}><td>{r.line}</td><td><code>{r.code_hint}</code></td><td>{r.reason ?? '—'}</td></tr>)}</tbody>
+                </AdminTable>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
         {batchExport ? <section className="card"><h2>Export ponctuel du lot</h2><p className="hint">{batchExport.export_warning}</p><details open><summary>{batchExport.code_export.length} codes à archiver</summary><pre>{batchExport.code_export.map((line) => `${line.router_name}\t${line.code}\t${line.comment}`).join('\n')}</pre></details></section> : null}
       </div> : null}
 
@@ -608,6 +813,18 @@ export function Admin() {
       </AdminTable>{audits && audits.items.length === 0 ? <p className="hint">Aucun événement d’audit trouvé.</p> : null}<AdminPager page={audits} offset={pageOffset} onOffsetChange={setPageOffset} /></section> : null}
 
       {tab === 'reconciliation' && recon ? <div className="grid">
+        {stockRecon ? (
+          <section className="card">
+            <h2>Stock vs manifeste IMP-06</h2>
+            <p className={stockRecon.ok ? 'ok' : 'err'} role="status">
+              {stockRecon.actual_total} / {stockRecon.expected_total} tickets ({stockRecon.manifest_id}) — {stockRecon.ok ? 'conforme' : 'DIVERGENCE'}
+            </p>
+            <AdminTable>
+              <thead><tr><th>Lot</th><th>Offre</th><th>Attendu</th><th>Constaté</th><th>Statut</th></tr></thead>
+              <tbody>{stockRecon.items.map((i) => <tr key={i.batch_note}><td>{i.batch_note}</td><td>{i.offer_id}</td><td>{i.expected}</td><td>{i.actual}</td><td><span className={`badge stock-${i.status.toLowerCase()}`}>{i.status}</span></td></tr>)}</tbody>
+            </AdminTable>
+          </section>
+        ) : null}
         <section className="card"><h2>Alertes ouvertes ({recon.open_alerts.length})</h2>{recon.open_alerts.length === 0 ? <p className="ok">Aucune alerte de réconciliation ouverte.</p> : <AdminTable><thead><tr><th>Règle</th><th>Sévérité</th><th>Créée le</th><th>Action</th></tr></thead><tbody>{recon.open_alerts.map((a) => <tr key={a.id}><td>{a.rule}</td><td>{stateBadge(a.severity)}</td><td>{formatDateTime(a.created_at)}</td><td><button className="btn small" onClick={() => void ack(a.id)} disabled={ackPending !== null}>{ackPending === a.id ? 'Acquittement…' : 'Acquitter'}</button></td></tr>)}</tbody></AdminTable>}</section>
         <section className="card"><h2>Runs ({recon.runs.length})</h2>{recon.runs.length === 0 ? <p className="hint">Aucun run enregistré.</p> : <AdminTable><thead><tr><th>Début</th><th>Statut</th><th>Attendu</th><th>Vu</th><th>Violations</th><th>Anomalies</th></tr></thead><tbody>{recon.runs.map((r) => <tr key={r.id}><td>{formatDateTime(r.started_at)}</td><td>{stateBadge(r.status)}</td><td>{r.router_total_expected ?? '—'}</td><td>{r.router_total_seen ?? '—'}</td><td>{r.violations.length > 0 ? r.violations.join(', ') : '—'}</td><td>{r.anomalies_count}</td></tr>)}</tbody></AdminTable>}</section>
       </div> : null}

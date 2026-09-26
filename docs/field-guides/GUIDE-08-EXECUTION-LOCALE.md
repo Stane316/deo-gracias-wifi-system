@@ -114,13 +114,13 @@ Toujours dans Git Bash, à la racine du repo :
 
 ```bash
 export DATABASE_URL="postgres://postgres:VOTRE_MDP_LOCAL@127.0.0.1:5432/deo_gracias"
-bash tools/db-migrate.sh up       # applique 0001→0014 (idempotent : déjà jouées = no-op)
+bash tools/db-migrate.sh up       # applique 0001→0015 (idempotent : déjà jouées = no-op)
 bash tools/db-migrate.sh smoke    # contrat de schéma (17 tables…)
 bash tools/db-migrate.sh rls      # matrice RLS anon/authenticated/service_role
 bash tools/db-migrate.sh states   # gardes de transitions + audit (IMP-11)
 ```
 
-Attendu : `OK: up (14 migrations appliquées)`, `OK: smoke`, `OK: rls`,
+Attendu : `OK: up (15 migrations appliquées)`, `OK: smoke`, `OK: rls`,
 `OK: states` (NOTICE « transitions interdites refusées, chaînes valides acceptées,
 audit alimenté (14) »). En cas d'échec : `bash tools/db-migrate.sh reset` (down+up
 complets) puis relancer smoke/rls/states.

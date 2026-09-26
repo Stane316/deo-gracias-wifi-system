@@ -13,7 +13,7 @@
 ```text
 supabase/
 ├── config.toml          # config Supabase CLI (project_id = PLACEHOLDER, à lier)
-├── migrations/          # 14 migrations OFFICIELLES, ordonnées 0001→0014
+├── migrations/          # 15 migrations OFFICIELLES, ordonnées 0001→0015
 └── down/                # 12 rollbacks (jamais exécutés pour installer ;
                          # servent à `tools/db-migrate.sh down` / reset)
 tools/
@@ -25,7 +25,7 @@ tools/
 ```
 
 Il n'existe **AUCUN** dossier `supabase/tables/` ni de SQL dupliqués : chaque
-table est créée **exactement une fois** dans les 14 migrations (vérifié par
+table est créée **exactement une fois** dans les 15 migrations (vérifié par
 analyse : customers, plans, orders, payments, payment_events, tickets,
 ticket_batches, mikrotik_sync, access_sessions, reconciliation_runs,
 audit_logs, incidents, alerts, settings, state_transitions = 1 création chacune).
@@ -60,7 +60,7 @@ migrations.
 
 1. `customers` est créé **une seule fois**, dans `0002` (ligne 6).
 2. L'erreur signifie : au moment où 0002 a été lancé, la table existait DÉJÀ.
-3. Sur une base neuve, la chaîne 0001→0014 s'exécute sans erreur (prouvé :
+3. Sur une base neuve, la chaîne 0001→0015 s'exécute sans erreur (prouvé :
    base vide → up → smoke → down → up → rls → states, tout vert ; CI GitHub
    idem sur Postgres 16 et 17).
 4. Conclusion : l'erreur vient d'une **exécution manuelle répétée ou
@@ -154,7 +154,7 @@ mot de passe, TLS) en message actionnable au lieu d'une erreur brute (IMP-25.5/2
 
 ---
 
-## Étape 4 — Appliquer les 14 migrations (au choix)
+## Étape 4 — Appliquer les 15 migrations (au choix)
 
 ### Méthode CLI (RECOMMANDÉE : historique + idempotence)
 
@@ -185,7 +185,7 @@ Sur la base RÉINITIALISÉE (étape 2), ouvrir CHAQUE fichier de
 une nouvelle requête, **Run UNE SEULE FOIS**, attendre `Success` avant le
 suivant. Ne JAMAIS recliquer Run sur un fichier déjà passé, même « pour voir ».
 
-Après 0014 : Table Editor → vous devez voir 17 tables `public` :
+Après 0015 : Table Editor → vous devez voir 17 tables `public` :
 `customers, plans, orders, payments, payment_events, tickets, ticket_batches,
 mikrotik_sync, access_sessions, reconciliation_runs, audit_logs, incidents,
 alerts, settings, state_transitions`.
@@ -346,6 +346,6 @@ DATABASE_URL par l'URI Supabase (étape 3) et redémarrez le backend.
 ## Ordre résumé
 
 ```text
-npm install → .env → reset schéma public (ét.2) → migrations 0001→0014 (ét.4)
+npm install → .env → reset schéma public (ét.2) → migrations 0001→0015 (ét.4)
 → vérifs SELECT → backend → frontend → parcours visuel → tests
 ```

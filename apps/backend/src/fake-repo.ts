@@ -3,10 +3,20 @@
  * Les tests d'intégration réels utilisent PgRepo (repo.pg.test.ts).
  */
 import { OFFERS } from '@dg/shared';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AdminDashboardDbStats, AlertAckRecord, ConnectorHeartbeat } from './admin.js';
 import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs } from './ticketgen.js';
+import { sealCode } from './ticketvault.js';
+import { STOCK_MANIFEST_IMP06 } from './stock-manifest.js';
+import { DEFAULT_RESERVED_TTL_MS } from './workers.js';
 import type { CreatedBackendBatch } from './repo.js';
+import {
+  TICKET_CODE_FORMAT,
+  type TicketImportInput,
+  type TicketImportPreview,
+  type TicketImportResult,
+  type TicketReconciliation,
+} from './repo.js';
 import type {
   ActivePlan,
   AdminAuditSummary,
@@ -101,13 +111,60 @@ export class FakeRepo implements BackendRepo {
     return id;
   }
 
+  /** IMP-32 — offre d'un ticket : plan OFFERS, sinon lot (import), sinon planId dynamique. */
+  private ticketOfferId(ticket: TicketRecord): string {
+    const plan = this.plans.find((p) => p.planId === ticket.planId);
+    if (plan) return plan.offerId;
+    const batch = this.adminBatches.get(ticket.batchId);
+    if (batch?.offerId) return batch.offerId;
+    for (const [offerId, planId] of this.planIds) {
+      if (planId === ticket.planId) return offerId;
+    }
+    return 'INCONNU';
+  }
+
   tickets = new Map<string, TicketRecord>();
 
-  /** Fixture de test : ajoute un ticket AVAILABLE pour une offre. */
+  /** IMP-32 — lots de l'inventaire (destination, source, idempotence d'import). */
+  adminBatches = new Map<string, {
+    id: string;
+    source: 'backend' | 'mikmon-manual';
+    destination: 'DIGITAL' | 'PHYSICAL';
+    offerId: string | null;
+    quantity: number;
+    generatedAt: Date;
+    notes: string | null;
+    manifestSha256: string | null;
+    idempotencyKey: string | null;
+  }>();
+  /** IMP-32 — clé d'idempotence d'import → batchId (rejeu sans réécriture). */
+  importIdempotency = new Map<string, string>();
+
+  private registerBatch(batch: {
+    id: string;
+    source: 'backend' | 'mikmon-manual';
+    destination: 'DIGITAL' | 'PHYSICAL';
+    offerId: string | null;
+    quantity: number;
+    generatedAt: Date;
+    notes: string | null;
+    manifestSha256: string | null;
+    idempotencyKey: string | null;
+  }): void {
+    this.adminBatches.set(batch.id, batch);
+    if (batch.idempotencyKey) this.importIdempotency.set(batch.idempotencyKey, batch.id);
+  }
+
+  /** Fixture de test : ajoute un ticket AVAILABLE pour une offre (lot DIGITAL). */
   seedTicket(offerId: string, prefix = 'TEST'): TicketRecord {
+    const batchId = randomUUID();
+    this.registerBatch({
+      id: batchId, source: 'backend', destination: 'DIGITAL', offerId,
+      quantity: 1, generatedAt: new Date(), notes: `fixture ${offerId}`, manifestSha256: null, idempotencyKey: null,
+    });
     const ticket: TicketRecord = {
       id: randomUUID(),
-      batchId: randomUUID(),
+      batchId,
       planId: this.getOrCreatePlanId(offerId),
       dbState: 'AVAILABLE',
       routerState: 'UNUSED',
@@ -116,6 +173,10 @@ export class FakeRepo implements BackendRepo {
       soldAt: null,
       mikrotikComment: null,
       activationDeadline: null,
+      codeHash: null,
+      codeCipher: null,
+      reservedAt: null,
+      createdAt: new Date(),
     };
     this.tickets.set(ticket.id, ticket);
     return ticket;
@@ -133,13 +194,17 @@ export class FakeRepo implements BackendRepo {
         : { status: 'illegal' };
     }
     if (order.state !== 'PAID') return { status: 'illegal' };
+    // IMP-32 (doc 09 §28) : jamais un ticket d'un lot PHYSICAL pour une vente
+    // numérique (même garde que PgRepo.allocateTicketForOrder).
     const candidate = [...this.tickets.values()].find(
-      (t) => t.planId === order.planId && t.dbState === 'AVAILABLE',
+      (t) => t.planId === order.planId && t.dbState === 'AVAILABLE'
+        && (this.adminBatches.get(t.batchId)?.destination ?? 'DIGITAL') === 'DIGITAL',
     );
     if (!candidate) return { status: 'no-stock' };
     candidate.dbState = 'SOLD';
     candidate.orderId = orderId;
     candidate.soldAt = new Date();
+    candidate.reservedAt = candidate.soldAt;
     // IMP-19 : échéance = sold_at + validité de l'offre (snapshot §09).
     const validityHours = Number(order.planSnapshot['validity_duration_snapshot'] ?? 0);
     candidate.activationDeadline = new Date(candidate.soldAt.getTime() + validityHours * 3600_000);
@@ -401,6 +466,31 @@ export class FakeRepo implements BackendRepo {
       batchId: randomUUID(), seq, offerId: input.offerId, quantity: input.quantity, generatedAt: new Date(), specs,
     };
     this.createdBatches.push(batch);
+    this.registerBatch({
+      id: batch.batchId, source: 'backend', destination: 'DIGITAL', offerId: batch.offerId,
+      quantity: batch.quantity, generatedAt: batch.generatedAt,
+      notes: `backend-gen seq ${batch.seq} (${batch.offerId}, IMP-18)`, manifestSha256: null, idempotencyKey: null,
+    });
+    // IMP-32 — parité inventaire : les tickets générés existent en mémoire
+    // (empreinte + sceau si clé fournie), comme en base (createBackendBatch PG).
+    for (const spec of specs) {
+      this.tickets.set(spec.routerName, {
+        id: spec.routerName,
+        batchId: batch.batchId,
+        planId: plan.planId,
+        dbState: 'AVAILABLE',
+        routerState: 'UNUSED',
+        orderId: null,
+        codePrefixHint: spec.clientCode.slice(0, 2),
+        soldAt: null,
+        mikrotikComment: spec.mikrotikComment,
+        activationDeadline: null,
+        codeHash: createHash('sha256').update(spec.clientCode).digest('hex'),
+        codeCipher: input.vaultKey ? sealCode(input.vaultKey, spec.clientCode) : null,
+        reservedAt: null,
+        createdAt: batch.generatedAt,
+      });
+    }
     for (const spec of specs) {
       this.syncOps.push({
         id: randomUUID(),
@@ -421,14 +511,22 @@ export class FakeRepo implements BackendRepo {
     return batch;
   }
 
-  /** IMP-26 UX6 — pas de tickets individuels en mémoire : révélation testée sur base réelle (pg). */
-  async getTicketForReveal(_ticketId: string): Promise<{
+  /** IMP-26 UX6 — révélation client (parité PgRepo) ; les codes importés/portés par
+   * les fixtures ont un sceau => révélables, les fixtures seedTicket non. */
+  async getTicketForReveal(ticketId: string): Promise<{
     id: string;
     dbState: string;
     codeCipher: string | null;
     orderId: string | null;
   } | null> {
-    return null;
+    const ticket = this.tickets.get(ticketId);
+    if (!ticket) return null;
+    return {
+      id: ticket.id,
+      dbState: ticket.dbState,
+      codeCipher: ticket.codeCipher ?? null,
+      orderId: ticket.orderId,
+    };
   }
 
   // IMP-21 — claim / résolution / requeue de la file (miroir mémoire du PgRepo).
@@ -621,10 +719,17 @@ export class FakeRepo implements BackendRepo {
       providerRef: paymentRecord.providerRef, amountFcfa: paymentRecord.amountFcfa, state: paymentRecord.state,
       confirmedAt: paymentRecord.confirmedAt?.toISOString() ?? null, createdAt: paymentRecord.createdAt.toISOString(),
     } satisfies AdminPaymentSummary : null;
+    const detailBatch = ticketRecord ? this.adminBatches.get(ticketRecord.batchId) : undefined;
     const ticket = ticketRecord ? {
-      id: ticketRecord.id, batchId: ticketRecord.batchId, offerId: plan?.offerId ?? '', source: 'backend',
+      id: ticketRecord.id, batchId: ticketRecord.batchId, offerId: plan?.offerId ?? '',
+      source: detailBatch?.source ?? 'backend', destination: detailBatch?.destination ?? 'DIGITAL',
       dbState: ticketRecord.dbState, routerState: ticketRecord.routerState, orderId: ticketRecord.orderId,
-      codePrefixHint: ticketRecord.codePrefixHint, soldAt: ticketRecord.soldAt?.toISOString() ?? null,
+      codePrefixHint: ticketRecord.codePrefixHint,
+      revealable: ticketRecord.codeCipher != null,
+      soldAt: ticketRecord.soldAt?.toISOString() ?? null,
+      reservedAt: ticketRecord.reservedAt?.toISOString() ?? null,
+      createdAt: (ticketRecord.createdAt ?? new Date()).toISOString(),
+      mikrotikComment: ticketRecord.mikrotikComment,
       activationDeadline: ticketRecord.activationDeadline?.toISOString() ?? null,
     } satisfies AdminTicketSummary : null;
     return { ...summary, payment, ticket, timeline: await this.getAdminOrderTimeline(id) };
@@ -718,37 +823,257 @@ export class FakeRepo implements BackendRepo {
   async listAdminTickets(options: AdminListOptions): Promise<AdminPage<AdminTicketSummary>> {
     const rows: AdminTicketSummary[] = [];
     for (const ticket of this.tickets.values()) {
-      const plan = this.plans.find((p) => p.planId === ticket.planId);
+      const batch = this.adminBatches.get(ticket.batchId);
       const row: AdminTicketSummary = {
-        id: ticket.id, batchId: ticket.batchId, offerId: plan?.offerId ?? '', source: 'backend',
+        id: ticket.id, batchId: ticket.batchId, offerId: this.ticketOfferId(ticket),
+        source: batch?.source ?? 'backend', destination: batch?.destination ?? 'DIGITAL',
         dbState: ticket.dbState, routerState: ticket.routerState, orderId: ticket.orderId,
-        codePrefixHint: ticket.codePrefixHint, soldAt: ticket.soldAt?.toISOString() ?? null,
+        codePrefixHint: ticket.codePrefixHint,
+        revealable: ticket.codeCipher != null,
+        soldAt: ticket.soldAt?.toISOString() ?? null,
+        reservedAt: ticket.reservedAt?.toISOString() ?? null,
+        createdAt: (ticket.createdAt ?? new Date()).toISOString(),
+        mikrotikComment: ticket.mikrotikComment,
         activationDeadline: ticket.activationDeadline?.toISOString() ?? null,
       };
       if ((options.state ?? '') !== '' && row.dbState !== options.state) continue;
       if ((options.offerId ?? '') !== '' && row.offerId !== options.offerId) continue;
-      if (options.from && row.soldAt && new Date(row.soldAt) < options.from) continue;
-      if (options.to && row.soldAt && new Date(row.soldAt) >= options.to) continue;
+      if ((options.destination ?? '') !== '' && row.destination !== options.destination) continue;
+      const createdAt = new Date(row.createdAt ?? new Date(0).toISOString());
+      if (options.from && createdAt < options.from) continue;
+      if (options.to && createdAt >= options.to) continue;
       if (!this.adminMatches(options.search ?? '', [row.id, row.batchId, row.offerId])) continue;
       rows.push(row);
     }
+    rows.sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
     return this.pageAdmin(rows, options);
   }
 
   async listAdminBatches(options: AdminListOptions): Promise<AdminPage<AdminBatchSummary>> {
-    const rows = this.createdBatches.map((batch) => ({
-      id: batch.batchId, source: 'backend', quantity: batch.quantity,
-      generatedAt: batch.generatedAt.toISOString(), createdAt: batch.generatedAt.toISOString(),
-      notes: `backend-gen seq ${batch.seq} (${batch.offerId}, IMP-18)`,
-    } satisfies AdminBatchSummary));
+    const staleBefore = Date.now() - DEFAULT_RESERVED_TTL_MS; // TTL D11 (workers)
+    const rows: AdminBatchSummary[] = [...this.adminBatches.values()].map((batch) => {
+      const tickets = [...this.tickets.values()].filter((t) => t.batchId === batch.id);
+      const countBy = (predicate: (t: TicketRecord) => boolean) => tickets.filter(predicate).length;
+      const reserved = tickets.filter((t) => t.dbState === 'RESERVED');
+      return {
+        id: batch.id, source: batch.source, quantity: batch.quantity, destination: batch.destination,
+        offerId: batch.offerId,
+        generatedAt: batch.generatedAt.toISOString(), createdAt: batch.generatedAt.toISOString(),
+        notes: batch.notes, manifestSha256: batch.manifestSha256,
+        availableCount: countBy((t) => t.dbState === 'AVAILABLE' || t.dbState === 'RELEASED'),
+        reservedCount: reserved.length,
+        reservedStaleCount: reserved.filter((t) => t.reservedAt != null && t.reservedAt.getTime() <= staleBefore).length,
+        soldCount: countBy((t) => t.dbState === 'SOLD'),
+        usedCount: countBy((t) => t.dbState === 'USED'),
+        expiredCount: countBy((t) => t.dbState === 'EXPIRED'),
+        releasedCount: countBy((t) => t.dbState === 'RELEASED'),
+        ticketsCount: tickets.length,
+      } satisfies AdminBatchSummary;
+    });
     const filtered = rows.filter((row) =>
       ((options.state ?? '') === '' || row.source === options.state) &&
+      ((options.destination ?? '') === '' || row.destination === options.destination) &&
       (!options.from || new Date(row.createdAt) >= options.from) &&
       (!options.to || new Date(row.createdAt) < options.to) &&
-      this.adminMatches(options.search ?? '', [row.id, row.notes]),
+      this.adminMatches(options.search ?? '', [row.id, row.notes ?? '']),
     );
     filtered.sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
     return this.pageAdmin(filtered, options);
+  }
+
+  /** IMP-32 — prévisualisation d'import (parité PgRepo, lecture seule). */
+  async previewTicketImport(input: TicketImportInput): Promise<TicketImportPreview> {
+    const plan = await this.getActivePlanByOffer(input.offerId);
+    const seen = new Set<string>();
+    let rows: Array<{ line: number; codeHint: string; valid: boolean; reason: string | null }> =
+      input.codes.map((code, i) => {
+        const hint = `${code.slice(0, 2)}••••`;
+        if (!TICKET_CODE_FORMAT.test(code)) {
+          return { line: i + 1, codeHint: hint, valid: false, reason: 'format attendu : 8 caractères [0-9a-z]' };
+        }
+        if (seen.has(code)) {
+          return { line: i + 1, codeHint: hint, valid: false, reason: 'doublon dans le lot importé' };
+        }
+        seen.add(code);
+        return { line: i + 1, codeHint: hint, valid: true, reason: null };
+      });
+    const existingHashes = new Set(
+      [...this.tickets.values()].map((t) => t.codeHash).filter((h): h is string => h != null),
+    );
+    if (existingHashes.size > 0) {
+      rows = rows.map((row) => {
+        if (!row.valid) return row;
+        const code = input.codes[row.line - 1];
+        if (!code) return row;
+        const hash = createHash('sha256').update(code).digest('hex');
+        return existingHashes.has(hash)
+          ? { ...row, valid: false, reason: 'déjà présent dans l’inventaire' }
+          : row;
+      });
+    }
+    if (!plan) {
+      rows = rows.map((row) => (row.valid ? { ...row, valid: false, reason: 'offre sans plan actif' } : row));
+    }
+    const invalid = rows.filter((r) => !r.valid).length;
+    return {
+      offerId: input.offerId,
+      destination: input.destination,
+      analyzed: rows.length,
+      valid: rows.length - invalid,
+      invalid,
+      rows,
+      canImport: invalid === 0 && rows.length > 0 && Boolean(plan),
+    };
+  }
+
+  /** IMP-32 — import transactionnel mémoire (parité PgRepo : tout-ou-rien + idempotence). */
+  async executeTicketImport(input: TicketImportInput, opts: {
+    vaultKey: Buffer;
+    idempotencyKey: string;
+  }): Promise<TicketImportResult> {
+    const existingId = this.importIdempotency.get(opts.idempotencyKey);
+    const existing = existingId ? this.adminBatches.get(existingId) : undefined;
+    if (existing) {
+      return {
+        created: false,
+        batchId: existing.id,
+        offerId: input.offerId,
+        destination: input.destination,
+        imported: existing.quantity,
+        rejected: 0,
+        importPerformed: true,
+        message: 'Rejeu idempotent : ce lot a déjà été importé, rien n’a été réécrit.',
+      };
+    }
+    const preview = await this.previewTicketImport(input);
+    if (preview.invalid > 0 || !preview.canImport) {
+      return {
+        created: false,
+        batchId: '',
+        offerId: input.offerId,
+        destination: input.destination,
+        imported: 0,
+        rejected: preview.invalid,
+        importPerformed: false,
+        message: `Import non effectué : ${preview.analyzed} lignes analysées, ${preview.valid} valides, ${preview.invalid} invalides (aucun import partiel silencieux, doc 09 §34).`,
+      };
+    }
+    const plan = await this.getActivePlanByOffer(input.offerId);
+    if (!plan) throw new Error(`offre sans plan actif : ${input.offerId}`);
+    const batchId = randomUUID();
+    this.registerBatch({
+      id: batchId, source: 'mikmon-manual', destination: input.destination, offerId: input.offerId,
+      quantity: input.codes.length, generatedAt: new Date(), notes: input.notes ?? null,
+      manifestSha256: input.manifestSha256 ?? null, idempotencyKey: opts.idempotencyKey,
+    });
+    for (const code of input.codes) {
+      const ticket: TicketRecord = {
+        id: randomUUID(),
+        batchId,
+        planId: plan.planId,
+        dbState: 'AVAILABLE',
+        routerState: 'UNUSED',
+        orderId: null,
+        codePrefixHint: code.slice(0, 2),
+        soldAt: null,
+        mikrotikComment: null,
+        activationDeadline: null,
+        codeHash: createHash('sha256').update(code).digest('hex'),
+        codeCipher: sealCode(opts.vaultKey, code),
+        reservedAt: null,
+        createdAt: new Date(),
+      };
+      this.tickets.set(ticket.id, ticket);
+    }
+    return {
+      created: true,
+      batchId,
+      offerId: input.offerId,
+      destination: input.destination,
+      imported: input.codes.length,
+      rejected: 0,
+      importPerformed: true,
+      message: `Import transactionnel effectué : ${input.codes.length} tickets (${input.destination}, ${input.offerId}).`,
+    };
+  }
+
+  /** IMP-32 — ticket + destination du lot pour la révélation admin contrôlée. */
+  async getAdminTicketForReveal(ticketId: string): Promise<{
+    id: string;
+    dbState: string;
+    codeCipher: string | null;
+    batchDestination: string;
+  } | null> {
+    const ticket = this.tickets.get(ticketId);
+    if (!ticket) return null;
+    return {
+      id: ticket.id,
+      dbState: ticket.dbState,
+      codeCipher: ticket.codeCipher ?? null,
+      batchDestination: this.adminBatches.get(ticket.batchId)?.destination ?? 'DIGITAL',
+    };
+  }
+
+  /** IMP-32 — inventaire par offre × destination (parité PgRepo). */
+  async getTicketInventoryBreakdown(): Promise<Array<{
+    offerId: string;
+    destination: string;
+    states: Record<string, number>;
+    reservedStale: number;
+  }>> {
+    const staleBefore = Date.now() - DEFAULT_RESERVED_TTL_MS; // TTL D11 (workers)
+    const entries = new Map<string, {
+      offerId: string;
+      destination: string;
+      states: Record<string, number>;
+      reservedStale: number;
+    }>();
+    for (const ticket of this.tickets.values()) {
+      const destination = this.adminBatches.get(ticket.batchId)?.destination ?? 'DIGITAL';
+      const offerId = this.ticketOfferId(ticket);
+      const key = `${offerId}:${destination}`;
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = { offerId, destination, states: {}, reservedStale: 0 };
+        entries.set(key, entry);
+      }
+      entry.states[ticket.dbState] = (entry.states[ticket.dbState] ?? 0) + 1;
+      if (ticket.dbState === 'RESERVED' && ticket.reservedAt != null && ticket.reservedAt.getTime() <= staleBefore) {
+        entry.reservedStale += 1;
+      }
+    }
+    return [...entries.values()];
+  }
+
+  /** IMP-32 — réconciliation avec le manifeste IMP-06 (parité PgRepo). */
+  async getTicketReconciliation(): Promise<TicketReconciliation> {
+    const byOffer = new Map<string, number>();
+    let actualTotal = 0;
+    for (const ticket of this.tickets.values()) {
+      const batch = this.adminBatches.get(ticket.batchId);
+      if (batch?.source !== 'mikmon-manual') continue;
+      if (batch.offerId == null) continue;
+      byOffer.set(batch.offerId, (byOffer.get(batch.offerId) ?? 0) + 1);
+      actualTotal += 1;
+    }
+    const rows = STOCK_MANIFEST_IMP06.batches.map((batch) => {
+      const n = byOffer.get(batch.offerId) ?? 0;
+      return {
+        batchNote: batch.note,
+        offerId: batch.offerId,
+        expected: batch.quantity,
+        actual: n,
+        status: n === 0 ? 'MISSING' : n === batch.quantity ? 'OK' : 'DIVERGENT',
+      } as const;
+    });
+    return {
+      manifestId: STOCK_MANIFEST_IMP06.id,
+      generatedAt: STOCK_MANIFEST_IMP06.generatedAt,
+      expectedTotal: STOCK_MANIFEST_IMP06.totalQuantity,
+      actualTotal,
+      ok: rows.every((r) => r.status === 'OK'),
+      rows,
+    };
   }
 
   async listAdminAuditLogs(options: AdminListOptions): Promise<AdminPage<AdminAuditSummary>> {

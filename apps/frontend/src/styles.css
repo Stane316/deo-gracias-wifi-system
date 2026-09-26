@@ -297,6 +297,20 @@ pre {
 .admin-filter-row textarea { min-width: 280px; min-height: 70px; flex: 1; }
 select { width: 100%; padding: 9px 12px; border-radius: 3px; border: 1px solid var(--border); background: #fff; color: var(--text); font-size: 14px; }
 button:disabled { cursor: not-allowed; opacity: 0.6; }
+/* IMP-32 — tickets/lots : révélation contrôlée, import preview→confirm, compteurs. */
+.reveal-box { margin-top: 16px; }
+.reveal-box textarea { min-height: 74px; }
+.import-codes {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; text-align: left; min-height: 120px;
+}
+.import-preview { margin: 12px 0 0; }
+.count-stale { color: #b42318; }
+.badge.stock-ok { background: var(--green); color: #fff; }
+.badge.stock-divergent, .badge.stock-missing { background: var(--red); color: #fff; }
+.dest-digital { background: var(--cyan); color: #23282c; }
+.dest-physical { background: var(--yellow); color: #23282c; }
+
 @media (max-width: 700px) {
   .admin-shell { grid-template-columns: 1fr; }
   .admin-sidebar { min-height: auto; position: static; }

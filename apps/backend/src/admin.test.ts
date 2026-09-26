@@ -233,17 +233,29 @@ describe('IMP-17 — GET /admin/tickets/stats', () => {
       { offerId: '5-HEURES', priceFcfa: 100, states: { AVAILABLE: 298, RELEASED: 2, SOLD: 5, USED: 1, EXPIRED: 3 } },
       { offerId: '1-MOIS', priceFcfa: 4000, states: { AVAILABLE: 40 } },
     ];
+    // IMP-32 — breakdown plan × destination (doc 09 §12.1/§28) stubbé de façon déterministe.
+    repo.getTicketInventoryBreakdown = async () => [
+      { offerId: '5-HEURES', destination: 'DIGITAL', states: { AVAILABLE: 298, RELEASED: 2, SOLD: 5, USED: 1, EXPIRED: 3 }, reservedStale: 0 },
+      { offerId: '1-MOIS', destination: 'DIGITAL', states: { AVAILABLE: 39 }, reservedStale: 0 },
+      { offerId: '1-MOIS', destination: 'PHYSICAL', states: { AVAILABLE: 1 }, reservedStale: 1 },
+    ];
     const res = await app.inject({ method: 'GET', url: '/admin/tickets/stats', headers: { authorization: 'Bearer tok-admin' } });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body) as {
       offers: Array<Record<string, unknown>>;
       totals: Record<string, number>;
+      by_destination: Array<Record<string, unknown>>;
     };
     expect(body.offers).toEqual([
-      { offer_id: '5-HEURES', price_fcfa: 100, available: 300, reserved: 0, sold: 6, expired: 3, total: 309 },
-      { offer_id: '1-MOIS', price_fcfa: 4000, available: 40, reserved: 0, sold: 0, expired: 0, total: 40 },
+      { offer_id: '5-HEURES', price_fcfa: 100, available: 300, reserved: 0, reserved_stale: 0, sold: 6, expired: 3, total: 309 },
+      { offer_id: '1-MOIS', price_fcfa: 4000, available: 40, reserved: 0, reserved_stale: 1, sold: 0, expired: 0, total: 40 },
     ]);
-    expect(body.totals).toEqual({ available: 340, reserved: 0, sold: 6, expired: 3, total: 349 });
+    expect(body.totals).toEqual({ available: 340, reserved: 0, reserved_stale: 1, sold: 6, expired: 3, total: 349 });
+    expect(body.by_destination).toEqual([
+      { offer_id: '5-HEURES', destination: 'DIGITAL', available: 300, reserved: 0, reserved_stale: 0, sold: 6, expired: 3, total: 309 },
+      { offer_id: '1-MOIS', destination: 'DIGITAL', available: 39, reserved: 0, reserved_stale: 0, sold: 0, expired: 0, total: 39 },
+      { offer_id: '1-MOIS', destination: 'PHYSICAL', available: 1, reserved: 0, reserved_stale: 1, sold: 0, expired: 0, total: 1 },
+    ]);
     await app.close();
   });
 });

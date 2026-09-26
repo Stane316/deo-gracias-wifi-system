@@ -25,12 +25,28 @@ export const adminListQuerySchema = z.object({
   offer_id: z.string().trim().max(80).optional(),
   payment_state: z.string().trim().max(40).optional(),
   ticket_state: z.string().trim().max(40).optional(),
+  /** IMP-32 — destination du lot (doc 09 §28). */
+  destination: z.enum(['DIGITAL', 'PHYSICAL']).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
 }).strict().refine((query) => query.from == null || query.to == null || query.from <= query.to, {
   message: 'from doit être antérieur ou égal à to',
   path: ['from'],
 });
+
+/** IMP-32 — import de lot (doc 09 §33) : codes au format contrat Mikmon §3.4. */
+export const ticketImportBodySchema = z.object({
+  offer_id: z.enum(OFFER_IDS),
+  destination: z.enum(['DIGITAL', 'PHYSICAL']),
+  codes: z.array(z.string().trim().min(1).max(64)).min(1).max(200),
+  notes: z.string().trim().max(200).optional(),
+  manifest_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+}).strict();
+
+/** IMP-32 — révélation admin d'un code : raison obligatoire, auditée (doc 09 §20). */
+export const ticketRevealBodySchema = z.object({
+  reason: z.string().trim().min(20).max(1000),
+}).strict();
 
 /** IMP-31 — une demande de correction ne modifie jamais l'état du paiement. */
 export const adminOrderCorrectionBodySchema = z.object({

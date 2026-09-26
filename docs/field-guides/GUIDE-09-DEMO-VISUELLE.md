@@ -41,7 +41,7 @@ CONNECTOR_TOKEN=choisissez-un-autre-jeton
 ```
 
 Base locale : PostgreSQL installé selon GUIDE-08, puis `bash tools/db-migrate.sh up`
-(14 migrations, dont les seeds, le coffre 0012, le heartbeat Connector 0013 et les corrections admin 0014). `DATABASE_URL` = votre utilisateur/mot de passe local.
+(15 migrations, dont les seeds, le coffre 0012, le heartbeat Connector 0013, les corrections admin 0014 et la destination/idempotence des lots 0015). `DATABASE_URL` = votre utilisateur/mot de passe local.
 
 ### 2-B. Configuration « tout sur Supabase » (votre choix)
 

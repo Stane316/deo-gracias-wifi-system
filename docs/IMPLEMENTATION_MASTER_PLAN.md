@@ -21,19 +21,23 @@ PREVIOUS:
 IMP-28 — FROZEN : code-first complet, dépendances externes différées, Walled Garden no-write
 
 CURRENT:
-IMP-31 — slice code poussée (commit 3883533) ; CI #56 rouge (GRANT RLS 0014, 42P18 PG test, gitleaks) ;
-corrections faites et validées localement sur PostgreSQL 17 (chaîne complète + 212/212 + e2e 12/12) ;
-en attente du push du correctif et de la CI GitHub verte
+IMP-32 — tickets, lots et import — code COMPLET (migration 0015, garde DIGITAL/PHYSICAL,
+import preview→validation→transaction idempotent, révélation admin auditée, compteurs de lots,
+stats par destination, réconciliation manifeste IMP-06) ; validation locale PostgreSQL 17
+(15 migrations, backend 230/230 dont 54 tests PG réel, 4 workspaces verts) ;
+en attente du commit/push Stane et de la CI GitHub verte
 
 NEXT:
-IMP-32 — tickets, lots et import — uniquement après CI GitHub verte du correctif IMP-31
+CI GitHub de IMP-32, puis IMP-33 — incidents et récupération
 
 REMAINING:
-IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-32 → IMP-40
+IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-33 → IMP-40
 ```
 
 # JOURNAL DE PILOTAGE — 25/09/2026
 
+- **IMP-32 (26/09) — code complet + validé sur PostgreSQL 17** : migration `0015` (destination DIGITAL/PHYSICAL + idempotence d'import), garde d'allocation (jamais de PHYSICAL pour une vente digitale ; leçon `FOR UPDATE OF t` — un SKIP LOCKED sur JOIN verrouillait le lot), import preview→validation→transaction sans import partiel silencieux, révélation admin contrôlée et auditée (code jamais journalisé), 7 compteurs de lots, stats `by_destination` + réservations stales, réconciliation 660/660 du manifeste IMP-06. Validation locale : chaîne `down/up/smoke` OK (15 migrations), backend **230/230** dont 54 tests PostgreSQL réel (14 FakeRepo + 4 PG pour IMP-32), 4 workspaces verts (364 tests), typecheck OK. Rapport : `docs/IMP-32_IMPLEMENTATION.md`. En attente : commit/push Stane + CI GitHub.
+- **IMP-31 — CI #57 verte (commit `907917e`)** : correctif `3be4cce` validé sur GitHub ; le gate IMP-32 est levé.
 - **IMP-31 (26/09) — slice poussée, CI #56 rouge, corrections prêtes** : commit GitHub `3883533` validé par audit direct (fichiers identiques au workspace, à l'exception de contenus locaux en attente). Trois échecs CI reproduits et corrigés localement sur PostgreSQL 17 : GRANT manquant dans `0014` (RLS exit 3), paramètre SQL non typé dans le test PG (`42P18`), 5 faux positifs gitleaks (`// gitleaks:allow`). Validation locale : chaîne `up/smoke/down/up/smoke/rls/states` OK, 212/212 backend dont 50 tests PostgreSQL exécutés, typecheck/build OK, e2e 12/12, gitleaks 0 leak. En attente : push du correctif par Stane puis CI verte pour ouvrir IMP-32.
 - **IMP-27 — DONE** : stabilisation code/tests confirmée ; commit GitHub `2b90f0e`, CI verte.
 - **IMP-28 — FROZEN / PARTIAL / CODE COMPLETE / EXTERNAL DEPENDENCIES DEFERRED** : tests offline, backend indisponible, `503`, inventaire des domaines et protocole no-write documentés ; commit GitHub `7d6bd0df05313f828bdc0b455a43e851c536a45b`, quatre checks CI verts.
@@ -82,7 +86,7 @@ apps/frontend    React/Vite, espace public, checkout transactionnel, admin
 apps/connector   parsing RouterOS, dry-run, file de sync, client RouterOS classique,
                  réconciliation read-only
 packages/shared  Grille A, états et invariants métier partagés
-supabase/        14 migrations up + 14 rollbacks down
+supabase/        15 migrations up + 15 rollbacks down
 tools/           migrations, smoke, RLS, state guards, génération du seed stock
 .github/         CI typecheck/tests, PostgreSQL éphémère, gitleaks
 
@@ -155,7 +159,7 @@ Statuts autorisés : `DONE`, `PARTIAL`, `NOT STARTED`, `BLOCKED`, `NEEDS VERIFIC
 | IMP-29 | PARTIAL — CODE-FIRST SLICE COMPLETE / EXTERNAL VALIDATION DEFERRED | `admin-route.ts`, `Admin.tsx`, shell/sidebar, filtres serveur, E2E admin, `docs/IMP-29_IMPLEMENTATION.md` | Routes canoniques, route guard, shell, filtres et preuve navigateur réalisés ; Supabase distant, MFA réelle et production différés. |
 | IMP-30 | PARTIAL — CODE-FIRST SLICE COMPLETE / EXTERNAL VALIDATION DEFERRED | `admin.ts`, `/admin/dashboard`, `/admin/system/status`, heartbeat Connector, activité récente, KPI/UI, `docs/IMP-30_IMPLEMENTATION.md` | Overview, ventes par plan, inventaire/alertes, activité et santé sync/Connector codés ; heartbeat réel, MikroTik et Supabase distant restent différés. |
 | IMP-31 | PARTIAL — CODE-FIRST SLICE COMPLETE / POSTGRES VALIDATION DEFERRED | `repo.ts`, `fake-repo.ts`, `app.ts`, `Admin.tsx`, migration `0014`, `docs/IMP-31_IMPLEMENTATION.md` | Listes filtrées/paginées, détail sans secrets, timeline reconstruisible, correction `SUPER_ADMIN` idempotente avec raison/audit et tests unitaires codés ; PostgreSQL/RLS/smoke restent non exécutés faute d’environnement. |
-| IMP-32 | PARTIAL | `/admin/tickets`, `/admin/batches`, création digital, coffre et vues frontend | Inventaire et lot digital présents ; import preview→validation→transaction, compteurs complets, physique/digital exhaustif et réservations opérationnelles manquent. |
+| IMP-32 | DONE — CODE COMPLETE + POSTGRES VALIDATED | `migration 0015`, `stock-manifest.ts`, `repo.ts`, `fake-repo.ts`, `app.ts`, `Admin.tsx`, `admin-tickets.test.ts`, `docs/IMP-32_IMPLEMENTATION.md` | Garde DIGITAL/PHYSICAL à l'allocation, import preview→validation→transaction idempotent sans partiel silencieux, révélation admin auditée (code jamais journalisé), 7 compteurs de lots, stats par destination + réservations stales, réconciliation manifeste IMP-06 ; CI GitHub en attente du push. |
 | IMP-33 | PARTIAL | allocation admin, ack alertes, réconciliation et primitives d’audit | Primitives de récupération présentes ; centre d’incidents, fiche, retry/resync/resolve/reopen idempotents et scénario C complet manquent. |
 | IMP-34 | NOT STARTED | catalogue read-only `/offers` et plans SQL existants | Aucun CRUD plan/paramètre métier/audit commercial dédié ni protection grille complète. |
 | IMP-35 | PARTIAL | CI typecheck/tests/PostgreSQL/gitleaks, RLS et state tests | Hardening partiel ; rapport `docs/testing/SECURITY_TEST_REPORT.md`, P1-P7/I1-I5/M1-M6/A1-A4/S1-S10, npm audit, CSP et tests de charge manquent. |
@@ -257,7 +261,7 @@ aud itée et reclassée sans modifier la clôture indépendante d’IMP-27.
 | IMP-29 | Socle admin | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **routes, guard, shell, filtres et E2E réalisés ; validation externe différée** |
 | IMP-30 | Dashboard overview | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **overview, activité, inventaire et santé heartbeat codés ; CI/revue et externe différés** |
 | IMP-31 | Commandes / paiements admin | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **timeline, filtres serveur, correction idempotente/auditée codés ; PostgreSQL/RLS/smoke différés** |
-| IMP-32 | Tickets / lots / import | PARTIAL | FUTURE, primitives déjà présentes |
+| IMP-32 | Tickets / lots / import | **DONE** | **migration 0015, import, révélation, compteurs, réconciliation — PG validé** |
 | IMP-33 | Incidents / récupération | PARTIAL | FUTURE, primitives déjà présentes |
 | IMP-34 | Plans / paramètres / audit | NOT STARTED | FUTURE |
 | IMP-35 | Hardening / GO-NO-GO | PARTIAL | FUTURE |
@@ -426,6 +430,10 @@ Validation externe de Stane nécessaire pour les domaines et le portail. Aucune 
 - IDOR et intégration PostgreSQL.
 
 ## IMP-32 — tickets, lots et import
+
+### Statut : TERMINÉ le 26/09/2026 (code + validation PostgreSQL 17 locale)
+
+Rapport complet : `docs/IMP-32_IMPLEMENTATION.md`. CI GitHub en attente du commit/push.
 
 ### Périmètre
 

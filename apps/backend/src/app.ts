@@ -42,7 +42,9 @@ import {
   orderIdParamsSchema,
   phoneSchema,
   problem,
+  ticketImportBodySchema,
   ticketMineQuerySchema,
+  ticketRevealBodySchema,
   type OrderView,
 } from './schemas.js';
 import { buildPlanSnapshot, type AdminListOptions, type BackendRepo, type OrderRecord, type PaymentRecord, type SyncOpRecord } from './repo.js';
@@ -873,7 +875,10 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       return reply.status(403).type('application/problem+json')
         .send(problem(403, 'Accès refusé', 'Rôle administrateur requis.'));
     }
-    const rows = await repo.getTicketsStatsByOffer();
+    const [rows, breakdown] = await Promise.all([
+      repo.getTicketsStatsByOffer(),
+      repo.getTicketInventoryBreakdown(),
+    ]);
     const offers = rows.map((r) => {
       const states = r.states;
       const available = (states['AVAILABLE'] ?? 0) + (states['RELEASED'] ?? 0);
@@ -882,11 +887,16 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       const expired = Object.entries(states)
         .filter(([k]) => !['AVAILABLE', 'RELEASED', 'RESERVED', 'SOLD', 'USED'].includes(k))
         .reduce((acc, [, v]) => acc + v, 0);
+      // IMP-32 — réservations au-delà du TTL D11 : le worker les libèrera.
+      const reservedStale = breakdown
+        .filter((b) => b.offerId === r.offerId)
+        .reduce((acc, b) => acc + b.reservedStale, 0);
       return {
         offer_id: r.offerId,
         price_fcfa: r.priceFcfa,
         available,
         reserved,
+        reserved_stale: reservedStale,
         sold,
         expired,
         total: available + reserved + sold + expired,
@@ -896,13 +906,31 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       (acc, o) => ({
         available: acc.available + o.available,
         reserved: acc.reserved + o.reserved,
+        reserved_stale: acc.reserved_stale + o.reserved_stale,
         sold: acc.sold + o.sold,
         expired: acc.expired + o.expired,
         total: acc.total + o.total,
       }),
-      { available: 0, reserved: 0, sold: 0, expired: 0, total: 0 },
+      { available: 0, reserved: 0, reserved_stale: 0, sold: 0, expired: 0, total: 0 },
     );
-    return { offers, totals };
+    // IMP-32 — stock par plan × destination (doc 09 §12.1, §28).
+    const byDestination = breakdown.map((b) => {
+      const available = (b.states['AVAILABLE'] ?? 0) + (b.states['RELEASED'] ?? 0);
+      const reserved = b.states['RESERVED'] ?? 0;
+      const sold = (b.states['SOLD'] ?? 0) + (b.states['USED'] ?? 0);
+      const expired = (b.states['EXPIRED'] ?? 0) + (b.states['REFUNDED'] ?? 0);
+      return {
+        offer_id: b.offerId,
+        destination: b.destination,
+        available,
+        reserved,
+        reserved_stale: b.reservedStale,
+        sold,
+        expired,
+        total: available + reserved + sold + expired,
+      };
+    });
+    return { offers, totals, by_destination: byDestination };
   });
 
   // IMP-17 — Reconnaissance d'une alerte (doc 09 §4.E). Idempotent : re-ack => 200.
@@ -1257,6 +1285,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       ...(parsed.data.offer_id ? { offerId: parsed.data.offer_id } : {}),
       ...(parsed.data.payment_state ? { paymentState: parsed.data.payment_state } : {}),
       ...(parsed.data.ticket_state ? { ticketState: parsed.data.ticket_state } : {}),
+      ...(parsed.data.destination ? { destination: parsed.data.destination } : {}),
       ...(parsed.data.from ? { from: parsed.data.from } : {}),
       ...(parsed.data.to ? { to: parsed.data.to } : {}),
     };
@@ -1393,27 +1422,191 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     const options = parseAdminListOptions(req, reply);
     if (!options) return;
     const page = await repo.listAdminTickets(options);
+    // IMP-32 — projection sans secret (doc 09 §20) : jamais code_hash/code_cipher ;
+    // `revealable` signale si la révélation contrôlée est possible.
     return {
       items: page.items.map((t) => ({
-        id: t.id, batch_id: t.batchId, offer_id: t.offerId, source: t.source, db_state: t.dbState,
-        router_state: t.routerState, order_id: t.orderId, code_prefix_hint: t.codePrefixHint,
-        sold_at: t.soldAt, activation_deadline: t.activationDeadline,
+        id: t.id, batch_id: t.batchId, offer_id: t.offerId, source: t.source,
+        destination: t.destination, db_state: t.dbState, router_state: t.routerState,
+        order_id: t.orderId, code_prefix_hint: t.codePrefixHint, revealable: t.revealable,
+        sold_at: t.soldAt, reserved_at: t.reservedAt, created_at: t.createdAt,
+        mikrotik_comment: t.mikrotikComment, activation_deadline: t.activationDeadline,
       })),
       total: page.total, limit: page.limit, offset: page.offset,
     };
   });
 
-  app.get('/admin/batches', async (req, reply) => {
+  const adminBatchesHandler = async (req: FastifyRequest, reply: FastifyReply) => {
     if (!await requireAdminImp27(req, reply)) return;
     const options = parseAdminListOptions(req, reply);
     if (!options) return;
     const page = await repo.listAdminBatches(options);
+    // IMP-32 — compteurs doc 09 §30 calculés côté serveur.
     return {
       items: page.items.map((b) => ({
-        id: b.id, source: b.source, quantity: b.quantity, generated_at: b.generatedAt,
-        created_at: b.createdAt, notes: b.notes,
+        id: b.id, source: b.source, quantity: b.quantity, destination: b.destination,
+        offer_id: b.offerId, generated_at: b.generatedAt, created_at: b.createdAt,
+        notes: b.notes, manifest_sha256: b.manifestSha256,
+        available_count: b.availableCount, reserved_count: b.reservedCount,
+        reserved_stale_count: b.reservedStaleCount, sold_count: b.soldCount,
+        used_count: b.usedCount, expired_count: b.expiredCount, released_count: b.releasedCount,
+        tickets_count: b.ticketsCount,
       })),
       total: page.total, limit: page.limit, offset: page.offset,
+    };
+  };
+  // Route canonique doc 09 §29 ; /admin/batches conservé en alias (IMP-18).
+  app.get('/admin/tickets/batches', adminBatchesHandler);
+  app.get('/admin/batches', adminBatchesHandler);
+
+  // IMP-32 — réconciliation du stock mikmon-manual avec le manifeste IMP-06 (lecture seule).
+  app.get('/admin/tickets/reconciliation', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const report = await repo.getTicketReconciliation();
+    return {
+      manifest_id: report.manifestId,
+      generated_at: report.generatedAt,
+      expected_total: report.expectedTotal,
+      actual_total: report.actualTotal,
+      ok: report.ok,
+      items: report.rows.map((r) => ({
+        batch_note: r.batchNote, offer_id: r.offerId, expected: r.expected,
+        actual: r.actual, status: r.status,
+      })),
+    };
+  });
+
+  // IMP-32 — prévisualisation d'import (doc 09 §33) : lecture seule, rien n'est persisté.
+  app.post('/admin/tickets/import/preview', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const body = ticketImportBodySchema.safeParse(req.body);
+    if (!body.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Import invalide', 'offre_id, destination (DIGITAL/PHYSICAL) et codes [0-9a-z]{8} (1 à 200) attendus.'));
+    }
+    const preview = await repo.previewTicketImport({
+      offerId: body.data.offer_id,
+      destination: body.data.destination,
+      codes: body.data.codes,
+      ...(body.data.notes ? { notes: body.data.notes } : {}),
+      ...(body.data.manifest_sha256 ? { manifestSha256: body.data.manifest_sha256 } : {}),
+    });
+    return {
+      offer_id: preview.offerId,
+      destination: preview.destination,
+      analyzed: preview.analyzed,
+      valid: preview.valid,
+      invalid: preview.invalid,
+      can_import: preview.canImport,
+      rows: preview.rows.map((r) => ({
+        line: r.line, code_hint: r.codeHint, valid: r.valid, reason: r.reason,
+      })),
+    };
+  });
+
+  // IMP-32 — import transactionnel (doc 09 §33-34) : jamais d'import partiel
+  // silencieux ; idempotent sur Idempotency-Key ; codes scellés, jamais en clair.
+  app.post('/admin/tickets/import', async (req, reply) => {
+    const identity = await requireAdminImp27(req, reply);
+    if (!identity) return;
+    const actor = `admin:${identity.sub}`;
+    const body = ticketImportBodySchema.safeParse(req.body);
+    const rawKey = req.headers['idempotency-key'];
+    const idempotencyKey = typeof rawKey === 'string' ? rawKey : '';
+    const key = idempotencyKeySchema.safeParse(idempotencyKey);
+    if (!body.success || !key.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Import invalide', 'payload strict et en-tête Idempotency-Key (8 à 200 caractères) obligatoires.'));
+    }
+    if (!opts.ticketVaultKey) {
+      await repo.logAudit({ actor, action: 'admin_ticket_import_unavailable', entity: 'ticket_batches' });
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Import indisponible', 'TICKET_VAULT_KEY absente : les codes importés doivent être scellés en base, jamais stockés en clair.'));
+    }
+    const result = await repo.executeTicketImport({
+      offerId: body.data.offer_id,
+      destination: body.data.destination,
+      codes: body.data.codes,
+      ...(body.data.notes ? { notes: body.data.notes } : {}),
+      ...(body.data.manifest_sha256 ? { manifestSha256: body.data.manifest_sha256 } : {}),
+    }, { vaultKey: opts.ticketVaultKey, idempotencyKey });
+    if (!result.importPerformed) {
+      await repo.logAudit({
+        actor, action: 'admin_ticket_import_rejected', entity: 'ticket_batches',
+        after: { offer_id: result.offerId, destination: result.destination, rejected: result.rejected },
+      });
+      return reply.status(422).type('application/problem+json')
+        .send(problem(422, 'Import non effectué', result.message));
+    }
+    if (result.created) {
+      await repo.logAudit({
+        actor, action: 'admin_ticket_batch_imported', entity: 'ticket_batches', entityId: result.batchId,
+        after: { offer_id: result.offerId, destination: result.destination, quantity: result.imported },
+      });
+    }
+    return reply.status(result.created ? 201 : 200).send({
+      batch_id: result.batchId || null,
+      created: result.created,
+      imported: result.imported,
+      rejected: result.rejected,
+      import_performed: result.importPerformed,
+      message: result.message,
+    });
+  });
+
+  // IMP-32 — révélation admin d'un code (doc 09 §20) : uniquement si réellement
+  // nécessaire, raison obligatoire, audit systématique — le code n'est JAMAIS
+  // journalisé (ni dans audit_logs, ni dans le corps de la réponse de listes).
+  app.post('/admin/tickets/:id/reveal', async (req, reply) => {
+    const identity = await requireAdminImp27(req, reply);
+    if (!identity) return;
+    const actor = `admin:${identity.sub}`;
+    const params = adminIdParamsSchema.safeParse(req.params);
+    const body = ticketRevealBodySchema.safeParse(req.body);
+    if (!params.success || !body.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Révélation invalide', 'UUID de ticket et raison de 20 à 1000 caractères obligatoires.'));
+    }
+    const ticketId = params.data.id;
+    if (!opts.ticketVaultKey) {
+      await repo.logAudit({ actor, action: 'admin_ticket_reveal_unavailable', entity: 'tickets', entityId: ticketId });
+      return reply.status(503).type('application/problem+json')
+        .send(problem(503, 'Consultation non configurée', 'TICKET_VAULT_KEY absente : la consultation des codes est désactivée.'));
+    }
+    const ticket = await repo.getAdminTicketForReveal(ticketId);
+    if (!ticket) {
+      await repo.logAudit({ actor, action: 'admin_ticket_reveal_notfound', entity: 'tickets', entityId: ticketId });
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Ticket introuvable', 'Aucun ticket ne correspond à cet identifiant.'));
+    }
+    if (!ticket.codeCipher) {
+      await repo.logAudit({
+        actor, action: 'admin_ticket_reveal_denied', entity: 'tickets', entityId: ticketId,
+        after: { reason: body.data.reason, batch_destination: ticket.batchDestination, db_state: ticket.dbState, cause: 'no-seal' },
+      });
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'Code non affichable en ligne', 'Ce lot n’a pas de sceau coffre : le code figure sur le voucher papier (doc 09 §20).'));
+    }
+    const code = openCode(opts.ticketVaultKey, ticket.codeCipher);
+    if (!code) {
+      await repo.logAudit({
+        actor, action: 'admin_ticket_reveal_denied', entity: 'tickets', entityId: ticketId,
+        after: { reason: body.data.reason, batch_destination: ticket.batchDestination, db_state: ticket.dbState, cause: 'unreadable-seal' },
+      });
+      return reply.status(500).type('application/problem+json')
+        .send(problem(500, 'Coffre illisible', 'Le sceau de ce code ne correspond pas à la clé du coffre.'));
+    }
+    // Audit : raison + contexte, JAMAIS le code.
+    await repo.logAudit({
+      actor, action: 'admin_ticket_code_revealed', entity: 'tickets', entityId: ticketId,
+      after: { reason: body.data.reason, batch_destination: ticket.batchDestination, db_state: ticket.dbState },
+    });
+    return {
+      ticket_id: ticketId,
+      code,
+      destination: ticket.batchDestination,
+      db_state: ticket.dbState,
+      message: 'Révélation audité : ce code ne sera pas réaffiché ni stocké dans l’interface.',
     };
   });
 

@@ -13,6 +13,8 @@ import type {
   ConnectorHeartbeat,
 } from './admin.js';
 import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs, type GeneratedTicketSpec } from './ticketgen.js';
+import { STOCK_MANIFEST_IMP06 } from './stock-manifest.js';
+import { DEFAULT_RESERVED_TTL_MS } from './workers.js';
 
 
 export interface ActivePlan {
@@ -65,6 +67,8 @@ export interface AdminListOptions {
   offerId?: string;
   paymentState?: string;
   ticketState?: string;
+  /** IMP-32 — destination du lot (doc 09 §28). */
+  destination?: string;
   from?: Date;
   to?: Date;
 }
@@ -133,11 +137,18 @@ export interface AdminTicketSummary {
   batchId: string;
   offerId: string;
   source: string;
+  /** IMP-32 — destination du lot (doc 09 §28). */
+  destination: string;
   dbState: string;
   routerState: string;
   orderId: string | null;
   codePrefixHint: string | null;
+  /** IMP-32 — un ticket est révélable uniquement si un sceau coffre existe. */
+  revealable: boolean;
   soldAt: string | null;
+  reservedAt: string | null;
+  createdAt: string | null;
+  mikrotikComment: string | null;
   activationDeadline: string | null;
 }
 
@@ -145,9 +156,23 @@ export interface AdminBatchSummary {
   id: string;
   source: string;
   quantity: number;
+  /** IMP-32 — destination DIGITAL/PHYSICAL (doc 09 §28-30). */
+  destination: string;
+  offerId: string | null;
   generatedAt: string;
   createdAt: string;
   notes: string | null;
+  manifestSha256: string | null;
+  /** IMP-32 — compteurs doc 09 §30 (AVAILABLE+RELEASED = réallouables). */
+  availableCount: number;
+  reservedCount: number;
+  /** Réservations au-delà du TTL D11 : le worker order-expiry les libèrera. */
+  reservedStaleCount: number;
+  soldCount: number;
+  usedCount: number;
+  expiredCount: number;
+  releasedCount: number;
+  ticketsCount: number;
 }
 
 export interface AdminAuditSummary {
@@ -168,6 +193,67 @@ export interface AdminIncidentSummary {
   openedAt: string;
   closedAt: string | null;
   createdAt: string;
+}
+
+/** IMP-32 — format d'un code ticket (contrat Mikmon §3.4, seed 0010) : 8 caractères [0-9a-z]. */
+export const TICKET_CODE_FORMAT = /^[0-9a-z]{8}$/;
+
+/** IMP-32 — lot importé en attente de validation (doc 09 §33). */
+export interface TicketImportInput {
+  offerId: string;
+  destination: 'DIGITAL' | 'PHYSICAL';
+  codes: string[];
+  notes?: string;
+  manifestSha256?: string;
+}
+
+/** IMP-32 — résultat de validation d'une ligne ; le code n'est jamais renvoyé en clair. */
+export interface TicketImportRowResult {
+  line: number;
+  codeHint: string;
+  valid: boolean;
+  reason: string | null;
+}
+
+/** IMP-32 — prévisualisation d'import : lecture seule, rien n'est persisté (doc 09 §33). */
+export interface TicketImportPreview {
+  offerId: string;
+  destination: string;
+  analyzed: number;
+  valid: number;
+  invalid: number;
+  rows: TicketImportRowResult[];
+  canImport: boolean;
+}
+
+/** IMP-32 — résultat d'import ; jamais d'import partiel silencieux (doc 09 §34). */
+export interface TicketImportResult {
+  created: boolean;
+  batchId: string;
+  offerId: string;
+  destination: string;
+  imported: number;
+  rejected: number;
+  importPerformed: boolean;
+  message: string;
+}
+
+/** IMP-32 — réconciliation avec le manifeste du stock IMP-06. */
+export interface TicketReconciliationRow {
+  batchNote: string;
+  offerId: string;
+  expected: number;
+  actual: number;
+  status: 'OK' | 'DIVERGENT' | 'MISSING';
+}
+
+export interface TicketReconciliation {
+  manifestId: string;
+  generatedAt: string;
+  expectedTotal: number;
+  actualTotal: number;
+  ok: boolean;
+  rows: TicketReconciliationRow[];
 }
 
 export interface BackendRepo {
@@ -358,6 +444,29 @@ export interface BackendRepo {
   listAdminPayments(options: AdminListOptions): Promise<AdminPage<AdminPaymentSummary>>;
   listAdminTickets(options: AdminListOptions): Promise<AdminPage<AdminTicketSummary>>;
   listAdminBatches(options: AdminListOptions): Promise<AdminPage<AdminBatchSummary>>;
+  /** IMP-32 — inventaire par offre × destination (états + réservations au-delà du TTL). */
+  getTicketInventoryBreakdown(): Promise<Array<{
+    offerId: string;
+    destination: string;
+    states: Record<string, number>;
+    reservedStale: number;
+  }>>;
+  /** IMP-32 — prévisualisation d'import (lecture seule, doc 09 §33). */
+  previewTicketImport(input: TicketImportInput): Promise<TicketImportPreview>;
+  /** IMP-32 — import transactionnel tout-ou-rien, idempotent (doc 09 §33-34). */
+  executeTicketImport(input: TicketImportInput, opts: {
+    vaultKey: Buffer;
+    idempotencyKey: string;
+  }): Promise<TicketImportResult>;
+  /** IMP-32 — ticket + destination du lot, pour la révélation admin contrôlée. */
+  getAdminTicketForReveal(ticketId: string): Promise<{
+    id: string;
+    dbState: string;
+    codeCipher: string | null;
+    batchDestination: string;
+  } | null>;
+  /** IMP-32 — réconciliation du stock mikmon-manual avec le manifeste IMP-06. */
+  getTicketReconciliation(): Promise<TicketReconciliation>;
   listAdminAuditLogs(options: AdminListOptions): Promise<AdminPage<AdminAuditSummary>>;
   listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>>;
   /** IMP-17 — reconnaissance d'alerte, atomique et idempotente (doc 09 §4.E). */
@@ -449,6 +558,14 @@ export interface TicketRecord {
   mikrotikComment: string | null;
   /** IMP-19 (contrat §3.6) : échéance du premier login ; null = stock vierge. */
   activationDeadline: Date | null;
+  /** IMP-32 — empreinte sha256 du code (parité seed 0010 / import) ; null = fixture. */
+  codeHash?: string | null;
+  /** IMP-26/32 — sceau AES-256-GCM ; null = code non révélable en ligne. */
+  codeCipher?: string | null;
+  /** IMP-32 — date de réservation (doc 09 §26) ; null = jamais réservé. */
+  reservedAt?: Date | null;
+  /** IMP-32 — date de création du ticket en inventaire. */
+  createdAt?: Date | null;
 }
 
 export type AllocateResult =
@@ -668,12 +785,18 @@ export class PgRepo implements BackendRepo {
       if (String(order['state']) !== 'PAID') return { status: 'illegal' } as const;
       // Un seul ticket AVAILABLE du plan, verrouillé ; SKIP LOCKED = les allocations
       // concurrentes passent au ticket suivant sans se bloquer (blueprint §3.3).
+      // IMP-32 (doc 09 §28) : jamais un ticket d'un lot PHYSICAL pour une vente
+      // numérique — la destination est vérifiée sur le lot, pas seulement l'état.
+      // FOR UPDATE OF t : verrouiller UNIQUEMENT la ligne ticket. Verrouiller aussi
+      // la ligne lot (via le JOIN) ferait SKIP LOCKED les allocations concurrentes
+      // sur le même lot (régression CONCURRENCE IMP-15, leçon 26/09).
       const t = await q(
-        `SELECT id FROM public.tickets
-         WHERE plan_id = $1 AND db_state = 'AVAILABLE'
-         ORDER BY created_at
+        `SELECT t.id FROM public.tickets t
+         JOIN public.ticket_batches b ON b.id = t.batch_id
+         WHERE t.plan_id = $1 AND t.db_state = 'AVAILABLE' AND b.destination = 'DIGITAL'
+         ORDER BY t.created_at
          LIMIT 1
-         FOR UPDATE SKIP LOCKED`,
+         FOR UPDATE OF t SKIP LOCKED`,
         [String(order['plan_id'])],
       );
       const candidate = t.rows[0];
@@ -1153,6 +1276,245 @@ export class PgRepo implements BackendRepo {
     };
   }
 
+  /** IMP-32 — ticket + destination du lot pour la révélation admin contrôlée (doc 09 §20). */
+  async getAdminTicketForReveal(ticketId: string): Promise<{
+    id: string;
+    dbState: string;
+    codeCipher: string | null;
+    batchDestination: string;
+  } | null> {
+    const res = await this.pool.query(
+      `SELECT t.id, t.db_state, t.code_cipher, b.destination AS batch_destination
+       FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       WHERE t.id = $1`,
+      [ticketId],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      id: String(row['id']),
+      dbState: String(row['db_state']),
+      codeCipher: row['code_cipher'] == null ? null : String(row['code_cipher']),
+      batchDestination: String(row['batch_destination']),
+    };
+  }
+
+  /**
+   * IMP-32 — prévisualisation d'import (doc 09 §33) : lecture seule.
+   * Vérifications : plan actif, format du code, doublons dans le lot, doublons
+   * contre l'inventaire (empreintes). Aucun code n'est renvoyé : indice 2 caractères.
+   */
+  async previewTicketImport(input: TicketImportInput): Promise<TicketImportPreview> {
+    const plan = await this.getActivePlanByOffer(input.offerId);
+    const seen = new Set<string>();
+    let rows: TicketImportRowResult[] = input.codes.map((code, i) => {
+      const hint = `${code.slice(0, 2)}••••`;
+      if (!TICKET_CODE_FORMAT.test(code)) {
+        return { line: i + 1, codeHint: hint, valid: false, reason: 'format attendu : 8 caractères [0-9a-z]' };
+      }
+      if (seen.has(code)) {
+        return { line: i + 1, codeHint: hint, valid: false, reason: 'doublon dans le lot importé' };
+      }
+      seen.add(code);
+      return { line: i + 1, codeHint: hint, valid: true, reason: null };
+    });
+    const uniqueCodes = [...seen];
+    if (uniqueCodes.length > 0) {
+      const hashes = uniqueCodes.map((c) => createHash('sha256').update(c).digest('hex'));
+      const existing = await this.pool.query(
+        `SELECT code_hash FROM public.tickets WHERE code_hash = ANY($1)`,
+        [hashes],
+      );
+      const existingSet = new Set(existing.rows.map((r) => String(r['code_hash'])));
+      if (existingSet.size > 0) {
+        rows = rows.map((row) => {
+          if (!row.valid) return row;
+          const code = input.codes[row.line - 1];
+          if (!code) return row;
+          const hash = createHash('sha256').update(code).digest('hex');
+          return existingSet.has(hash)
+            ? { ...row, valid: false, reason: 'déjà présent dans l’inventaire' }
+            : row;
+        });
+      }
+    }
+    if (!plan) {
+      rows = rows.map((row) => row.valid
+        ? { ...row, valid: false, reason: 'offre sans plan actif' }
+        : row);
+    }
+    const invalid = rows.filter((r) => !r.valid).length;
+    return {
+      offerId: input.offerId,
+      destination: input.destination,
+      analyzed: rows.length,
+      valid: rows.length - invalid,
+      invalid,
+      rows,
+      canImport: invalid === 0 && rows.length > 0 && Boolean(plan),
+    };
+  }
+
+  /**
+   * IMP-32 — import transactionnel (doc 09 §33-34) : preview → validation →
+   * transaction → résultat. Jamais d'import partiel silencieux : la moindre
+   * ligne invalide => rien n'est écrit et le résultat est explicite.
+   * Idempotent sur `idempotency_key` (rejeu = même lot, aucune écriture).
+   * Les codes clairs ne vivent que dans la requête : sha256 + sceau AES-256-GCM en base.
+   */
+  async executeTicketImport(input: TicketImportInput, opts: {
+    vaultKey: Buffer;
+    idempotencyKey: string;
+  }): Promise<TicketImportResult> {
+    const existing = await this.pool.query(
+      `SELECT id, quantity FROM public.ticket_batches WHERE idempotency_key = $1`,
+      [opts.idempotencyKey],
+    );
+    if (existing.rows[0]) {
+      return {
+        created: false,
+        batchId: String(existing.rows[0]['id']),
+        offerId: input.offerId,
+        destination: input.destination,
+        imported: Number(existing.rows[0]['quantity']),
+        rejected: 0,
+        importPerformed: true,
+        message: 'Rejeu idempotent : ce lot a déjà été importé, rien n’a été réécrit.',
+      };
+    }
+    // Revalidation côté serveur : le preview n'est jamais une autorisation.
+    const preview = await this.previewTicketImport(input);
+    if (preview.invalid > 0 || !preview.canImport) {
+      return {
+        created: false,
+        batchId: '',
+        offerId: input.offerId,
+        destination: input.destination,
+        imported: 0,
+        rejected: preview.invalid,
+        importPerformed: false,
+        message: `Import non effectué : ${preview.analyzed} lignes analysées, ${preview.valid} valides, ${preview.invalid} invalides (aucun import partiel silencieux, doc 09 §34).`,
+      };
+    }
+    const plan = await this.getActivePlanByOffer(input.offerId);
+    if (!plan) throw new Error(`offre sans plan actif : ${input.offerId}`);
+    return this.withTx(async (q) => {
+      const batchRes = await q(
+        `INSERT INTO public.ticket_batches (source, quantity, destination, manifest_sha256, notes, idempotency_key)
+         VALUES ('mikmon-manual', $1, $2, $3, $4, $5)
+         RETURNING id`,
+        [input.codes.length, input.destination, input.manifestSha256 ?? null, input.notes ?? null, opts.idempotencyKey],
+      );
+      const batchId = String(batchRes.rows[0]?.['id']);
+      const ticketValues: string[] = [];
+      const ticketParams: unknown[] = [];
+      input.codes.forEach((code, i) => {
+        const t = i * 5;
+        ticketValues.push(`($${t + 1}, $${t + 2}, $${t + 3}, $${t + 4}, $${t + 5})`);
+        ticketParams.push(
+          batchId,
+          createHash('sha256').update(code).digest('hex'),
+          code.slice(0, 2),
+          plan.planId,
+          sealCode(opts.vaultKey, code),
+        );
+      });
+      await q(
+        `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id, code_cipher)
+         VALUES ${ticketValues.join(', ')}`,
+        ticketParams,
+      );
+      return {
+        created: true,
+        batchId,
+        offerId: input.offerId,
+        destination: input.destination,
+        imported: input.codes.length,
+        rejected: 0,
+        importPerformed: true,
+        message: `Import transactionnel effectué : ${input.codes.length} tickets (${input.destination}, ${input.offerId}).`,
+      } satisfies TicketImportResult;
+    });
+  }
+
+  /** IMP-32 — inventaire par offre × destination (stock par plan, doc 09 §12.1/25). */
+  async getTicketInventoryBreakdown(): Promise<Array<{
+    offerId: string;
+    destination: string;
+    states: Record<string, number>;
+    reservedStale: number;
+  }>> {
+    const staleMinutes = Math.round(DEFAULT_RESERVED_TTL_MS / 60000); // TTL D11 (workers)
+    const res = await this.pool.query(
+      `SELECT p.offer_id, b.destination, t.db_state,
+              count(*)::int AS n,
+              count(*) FILTER (WHERE t.db_state = 'RESERVED'
+                                AND t.reserved_at <= now() - make_interval(mins => $1))::int AS stale
+       FROM public.tickets t
+       JOIN public.ticket_batches b ON b.id = t.batch_id
+       JOIN public.plans p ON p.id = t.plan_id
+       GROUP BY p.offer_id, b.destination, t.db_state`,
+      [staleMinutes],
+    );
+    const entries = new Map<string, {
+      offerId: string;
+      destination: string;
+      states: Record<string, number>;
+      reservedStale: number;
+    }>();
+    for (const row of res.rows) {
+      const key = `${row['offer_id']}:${row['destination']}`;
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = { offerId: String(row['offer_id']), destination: String(row['destination']), states: {}, reservedStale: 0 };
+        entries.set(key, entry);
+      }
+      entry.states[String(row['db_state'])] = Number(row['n']);
+      if (row['db_state'] === 'RESERVED') entry.reservedStale = Number(row['stale']);
+    }
+    return [...entries.values()];
+  }
+
+  /** IMP-32 — réconciliation du stock `mikmon-manual` avec le manifeste IMP-06 (lecture seule). */
+  async getTicketReconciliation(): Promise<TicketReconciliation> {
+    const [byOffer, totalRes] = await Promise.all([
+      this.pool.query(
+        `SELECT p.offer_id, count(*)::int AS n
+         FROM public.tickets t
+         JOIN public.ticket_batches b ON b.id = t.batch_id
+         JOIN public.plans p ON p.id = t.plan_id
+         WHERE b.source = 'mikmon-manual'
+         GROUP BY p.offer_id`,
+      ),
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM public.tickets t
+         JOIN public.ticket_batches b ON b.id = t.batch_id
+         WHERE b.source = 'mikmon-manual'`,
+      ),
+    ]);
+    const actual = new Map(byOffer.rows.map((r) => [String(r['offer_id']), Number(r['n'])]));
+    const rows: TicketReconciliationRow[] = STOCK_MANIFEST_IMP06.batches.map((batch) => {
+      const n = actual.get(batch.offerId) ?? 0;
+      return {
+        batchNote: batch.note,
+        offerId: batch.offerId,
+        expected: batch.quantity,
+        actual: n,
+        status: n === 0 ? 'MISSING' : n === batch.quantity ? 'OK' : 'DIVERGENT',
+      };
+    });
+    const actualTotal = Number(totalRes.rows[0]?.['n'] ?? 0);
+    return {
+      manifestId: STOCK_MANIFEST_IMP06.id,
+      generatedAt: STOCK_MANIFEST_IMP06.generatedAt,
+      expectedTotal: STOCK_MANIFEST_IMP06.totalQuantity,
+      actualTotal,
+      ok: rows.every((r) => r.status === 'OK'),
+      rows,
+    };
+  }
+
   async expireStaleOrders(olderThan: Date): Promise<{ orderIds: string[]; paymentsExpired: number }> {
     const expired = await this.pool.query(
       `UPDATE public.orders SET state = 'EXPIRED'
@@ -1397,7 +1759,9 @@ export class PgRepo implements BackendRepo {
               pay.confirmed_at AS payment_confirmed_at, pay.created_at AS payment_created_at,
               tk.id AS ticket_id, tk.batch_id, tk.offer_id AS ticket_offer_id, tk.source AS ticket_source,
               tk.db_state, tk.router_state, tk.order_id AS ticket_order_id, tk.code_prefix_hint,
-              tk.sold_at, tk.activation_deadline
+              tk.sold_at, tk.activation_deadline, tk.batch_destination, tk.code_revealable,
+              tk.reserved_at AS ticket_reserved_at, tk.created_at AS ticket_created_at,
+              tk.mikrotik_comment AS ticket_mikrotik_comment
        FROM public.orders o
        JOIN public.customers c ON c.id = o.customer_id
        LEFT JOIN public.plans pl ON pl.id = o.plan_id
@@ -1407,7 +1771,9 @@ export class PgRepo implements BackendRepo {
        ) pay ON true
        LEFT JOIN LATERAL (
          SELECT t.id, t.batch_id, p2.offer_id, b.source, t.db_state, t.router_state, t.order_id,
-                t.code_prefix_hint, t.sold_at, t.activation_deadline
+                t.code_prefix_hint, t.sold_at, t.activation_deadline,
+                b.destination AS batch_destination, (t.code_cipher IS NOT NULL) AS code_revealable,
+                t.reserved_at, t.created_at, t.mikrotik_comment
          FROM public.tickets t
          JOIN public.ticket_batches b ON b.id = t.batch_id
          JOIN public.plans p2 ON p2.id = t.plan_id
@@ -1426,8 +1792,13 @@ export class PgRepo implements BackendRepo {
     } satisfies AdminPaymentSummary;
     const ticket = r['ticket_id'] == null ? null : {
       id: String(r['ticket_id']), batchId: String(r['batch_id']), offerId: String(r['ticket_offer_id']), source: String(r['ticket_source']),
+      destination: r['batch_destination'] == null ? 'DIGITAL' : String(r['batch_destination']),
+      revealable: Boolean(r['code_revealable']),
       dbState: String(r['db_state']), routerState: String(r['router_state']), orderId: r['ticket_order_id'] == null ? null : String(r['ticket_order_id']),
       codePrefixHint: r['code_prefix_hint'] == null ? null : String(r['code_prefix_hint']), soldAt: r['sold_at'] == null ? null : new Date(r['sold_at'] as string).toISOString(),
+      reservedAt: r['ticket_reserved_at'] == null ? null : new Date(r['ticket_reserved_at'] as string).toISOString(),
+      createdAt: r['ticket_created_at'] == null ? null : new Date(r['ticket_created_at'] as string).toISOString(),
+      mikrotikComment: r['ticket_mikrotik_comment'] == null ? null : String(r['ticket_mikrotik_comment']),
       activationDeadline: r['activation_deadline'] == null ? null : new Date(r['activation_deadline'] as string).toISOString(),
     } satisfies AdminTicketSummary;
     return {
@@ -1588,9 +1959,13 @@ export class PgRepo implements BackendRepo {
   async listAdminTickets(options: AdminListOptions): Promise<AdminPage<AdminTicketSummary>> {
     const search = options.search?.trim() ?? '';
     const state = options.state?.trim() ?? '';
+    // IMP-32 — projection sans secret : ni code_hash, ni code_cipher, ni payload ;
+    // `revealable` indique si la révélation contrôlée est possible (doc 09 §20/27).
+    const destination = options.destination?.trim() ?? '';
     const res = await this.pool.query(
-      `SELECT t.id, t.batch_id, p.offer_id, b.source, t.db_state, t.router_state, t.order_id,
-              t.code_prefix_hint, t.sold_at, t.activation_deadline,
+      `SELECT t.id, t.batch_id, p.offer_id, b.source, b.destination, t.db_state, t.router_state, t.order_id,
+              t.code_prefix_hint, (t.code_cipher IS NOT NULL) AS revealable,
+              t.sold_at, t.reserved_at, t.created_at, t.mikrotik_comment, t.activation_deadline,
               count(*) OVER()::int AS total
        FROM public.tickets t
        JOIN public.ticket_batches b ON b.id = t.batch_id
@@ -1599,19 +1974,25 @@ export class PgRepo implements BackendRepo {
               OR p.offer_id ILIKE '%' || $1 || '%')
          AND ($2 = '' OR t.db_state = $2)
          AND ($3 = '' OR p.offer_id = $3)
-         AND ($4::timestamptz IS NULL OR t.created_at >= $4)
-         AND ($5::timestamptz IS NULL OR t.created_at < $5)
+         AND ($4 = '' OR b.destination = $4)
+         AND ($5::timestamptz IS NULL OR t.created_at >= $5)
+         AND ($6::timestamptz IS NULL OR t.created_at < $6)
        ORDER BY t.created_at DESC
-       LIMIT $6 OFFSET $7`,
-      [search, state, options.offerId?.trim() ?? '', options.from ?? null, options.to ?? null, options.limit, options.offset],
+       LIMIT $7 OFFSET $8`,
+      [search, state, options.offerId?.trim() ?? '', destination, options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
         id: String(r['id']), batchId: String(r['batch_id']), offerId: String(r['offer_id']),
-        source: String(r['source']), dbState: String(r['db_state']), routerState: String(r['router_state']),
+        source: String(r['source']), destination: String(r['destination']),
+        dbState: String(r['db_state']), routerState: String(r['router_state']),
         orderId: r['order_id'] == null ? null : String(r['order_id']),
         codePrefixHint: r['code_prefix_hint'] == null ? null : String(r['code_prefix_hint']),
+        revealable: Boolean(r['revealable']),
         soldAt: r['sold_at'] == null ? null : new Date(r['sold_at'] as string).toISOString(),
+        reservedAt: r['reserved_at'] == null ? null : new Date(r['reserved_at'] as string).toISOString(),
+        createdAt: new Date(r['created_at'] as string).toISOString(),
+        mikrotikComment: r['mikrotik_comment'] == null ? null : String(r['mikrotik_comment']),
         activationDeadline: r['activation_deadline'] == null ? null : new Date(r['activation_deadline'] as string).toISOString(),
       })),
       total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
@@ -1622,23 +2003,54 @@ export class PgRepo implements BackendRepo {
   async listAdminBatches(options: AdminListOptions): Promise<AdminPage<AdminBatchSummary>> {
     const search = options.search?.trim() ?? '';
     const source = options.state?.trim() ?? '';
+    const destination = options.destination?.trim() ?? '';
+    // IMP-32 — compteurs doc 09 §30, calculés en base (jamais de décompte frontend).
+    const staleMinutes = Math.round(DEFAULT_RESERVED_TTL_MS / 60000); // TTL D11 (workers)
     const res = await this.pool.query(
-      `SELECT id, source, quantity, generated_at, created_at, notes, count(*) OVER()::int AS total
-       FROM public.ticket_batches
-       WHERE ($1 = '' OR id::text ILIKE '%' || $1 || '%' OR COALESCE(notes, '') ILIKE '%' || $1 || '%')
-         AND ($2 = '' OR source = $2)
-         AND ($3::timestamptz IS NULL OR created_at >= $3)
-         AND ($4::timestamptz IS NULL OR created_at < $4)
-       ORDER BY generated_at DESC
-       LIMIT $5 OFFSET $6`,
-      [search, source, options.from ?? null, options.to ?? null, options.limit, options.offset],
+      `SELECT b.id, b.source, b.quantity, b.destination, b.generated_at, b.created_at, b.notes,
+              b.manifest_sha256,
+              count(t.id) FILTER (WHERE t.db_state IN ('AVAILABLE','RELEASED'))::int AS available_count,
+              count(t.id) FILTER (WHERE t.db_state = 'RESERVED')::int AS reserved_count,
+              count(t.id) FILTER (WHERE t.db_state = 'RESERVED'
+                                   AND t.reserved_at <= now() - make_interval(mins => $3))::int AS reserved_stale_count,
+              count(t.id) FILTER (WHERE t.db_state = 'SOLD')::int AS sold_count,
+              count(t.id) FILTER (WHERE t.db_state = 'USED')::int AS used_count,
+              count(t.id) FILTER (WHERE t.db_state = 'EXPIRED')::int AS expired_count,
+              count(t.id) FILTER (WHERE t.db_state = 'RELEASED')::int AS released_count,
+              count(t.id)::int AS tickets_count,
+              (SELECT p.offer_id FROM public.plans p
+               JOIN public.tickets t2 ON t2.plan_id = p.id
+               WHERE t2.batch_id = b.id LIMIT 1) AS offer_id,
+              count(*) OVER()::int AS total
+       FROM public.ticket_batches b
+       LEFT JOIN public.tickets t ON t.batch_id = b.id
+       WHERE ($1 = '' OR b.id::text ILIKE '%' || $1 || '%' OR COALESCE(b.notes, '') ILIKE '%' || $1 || '%')
+         AND ($2 = '' OR b.source = $2)
+         AND ($4 = '' OR b.destination = $4)
+         AND ($5::timestamptz IS NULL OR b.created_at >= $5)
+         AND ($6::timestamptz IS NULL OR b.created_at < $6)
+       GROUP BY b.id
+       ORDER BY b.generated_at DESC
+       LIMIT $7 OFFSET $8`,
+      [search, source, staleMinutes, destination, options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
         id: String(r['id']), source: String(r['source']), quantity: Number(r['quantity']),
+        destination: String(r['destination']),
+        offerId: r['offer_id'] == null ? null : String(r['offer_id']),
         generatedAt: new Date(r['generated_at'] as string).toISOString(),
         createdAt: new Date(r['created_at'] as string).toISOString(),
         notes: r['notes'] == null ? null : String(r['notes']),
+        manifestSha256: r['manifest_sha256'] == null ? null : String(r['manifest_sha256']),
+        availableCount: Number(r['available_count']),
+        reservedCount: Number(r['reserved_count']),
+        reservedStaleCount: Number(r['reserved_stale_count']),
+        soldCount: Number(r['sold_count']),
+        usedCount: Number(r['used_count']),
+        expiredCount: Number(r['expired_count']),
+        releasedCount: Number(r['released_count']),
+        ticketsCount: Number(r['tickets_count']),
       })),
       total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
       limit: options.limit, offset: options.offset,
