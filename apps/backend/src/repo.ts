@@ -62,6 +62,11 @@ export interface AdminListOptions {
   offset: number;
   search?: string;
   state?: string;
+  offerId?: string;
+  paymentState?: string;
+  ticketState?: string;
+  from?: Date;
+  to?: Date;
 }
 
 export interface AdminPage<T> {
@@ -95,9 +100,32 @@ export interface AdminPaymentSummary {
   createdAt: string;
 }
 
+export interface AdminOrderTimelineEvent {
+  id: string;
+  entity: string;
+  entityId: string;
+  action: string;
+  fromState: string | null;
+  toState: string | null;
+  actor: string;
+  at: string;
+}
+
+export interface AdminCorrectionRequest {
+  id: string;
+  orderId: string;
+  requestedAction: 'REVIEW_PAYMENT' | 'REVIEW_ALLOCATION' | 'REVIEW_DELIVERY';
+  reason: string;
+  requestedBy: string;
+  state: 'OPEN' | 'REVIEWED' | 'REJECTED' | 'APPLIED';
+  idempotencyKey: string;
+  createdAt: string;
+}
+
 export interface AdminOrderDetail extends AdminOrderSummary {
   payment: AdminPaymentSummary | null;
   ticket: AdminTicketSummary | null;
+  timeline: AdminOrderTimelineEvent[];
 }
 
 export interface AdminTicketSummary {
@@ -198,6 +226,8 @@ export interface BackendRepo {
     action: string;
     entity: string;
     entityId?: string | null;
+    /** Projection auditée, sans secret ; utilisée par les demandes de correction. */
+    after?: Record<string, unknown>;
   }): Promise<void>;
   /** Lie un compte Supabase Auth au client (RLS « own rows » via auth_user_id, 0007). */
   linkCustomerAuth(customerId: string, authUserId: string): Promise<void>;
@@ -317,6 +347,14 @@ export interface BackendRepo {
   /** IMP-27 — listes opérationnelles protégées et paginées. */
   listAdminOrders(options: AdminListOptions): Promise<AdminPage<AdminOrderSummary>>;
   getAdminOrderById(id: string): Promise<AdminOrderDetail | null>;
+  getAdminOrderTimeline(id: string): Promise<AdminOrderTimelineEvent[]>;
+  createAdminCorrectionRequest(input: {
+    orderId: string;
+    requestedAction: AdminCorrectionRequest['requestedAction'];
+    reason: string;
+    requestedBy: string;
+    idempotencyKey: string;
+  }): Promise<{ request: AdminCorrectionRequest; created: boolean } | null>;
   listAdminPayments(options: AdminListOptions): Promise<AdminPage<AdminPaymentSummary>>;
   listAdminTickets(options: AdminListOptions): Promise<AdminPage<AdminTicketSummary>>;
   listAdminBatches(options: AdminListOptions): Promise<AdminPage<AdminBatchSummary>>;
@@ -868,11 +906,12 @@ export class PgRepo implements BackendRepo {
     action: string;
     entity: string;
     entityId?: string | null;
+    after?: Record<string, unknown>;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO public.audit_logs (actor, action, entity, entity_id)
-       VALUES ($1, $2, $3, $4)`,
-      [entry.actor, entry.action, entry.entity, entry.entityId ?? null],
+      `INSERT INTO public.audit_logs (actor, action, entity, entity_id, after)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [entry.actor, entry.action, entry.entity, entry.entityId ?? null, entry.after ? JSON.stringify(entry.after) : null],
     );
   }
 
@@ -1212,7 +1251,7 @@ export class PgRepo implements BackendRepo {
       'customers', 'plans', 'orders', 'payments', 'payment_events',
       'ticket_batches', 'tickets', 'mikrotik_sync', 'access_sessions',
       'reconciliation_runs', 'audit_logs', 'incidents', 'alerts', 'settings',
-      'state_transitions', 'connector_heartbeats',
+      'state_transitions', 'connector_heartbeats', 'admin_correction_requests',
     ];
     const res = await this.pool.query(
       `SELECT table_name FROM information_schema.tables
@@ -1323,9 +1362,15 @@ export class PgRepo implements BackendRepo {
        WHERE ($1 = '' OR o.id::text ILIKE '%' || $1 || '%' OR c.phone ILIKE '%' || $1 || '%'
               OR COALESCE(p.offer_id, o.plan_snapshot->>'offer_id', '') ILIKE '%' || $1 || '%')
          AND ($2 = '' OR o.state = $2)
+         AND ($3 = '' OR COALESCE(p.offer_id, o.plan_snapshot->>'offer_id', '') = $3)
+         AND ($4 = '' OR COALESCE(pay.state, '') = $4)
+         AND ($5 = '' OR COALESCE(tk.db_state, '') = $5)
+         AND ($6::timestamptz IS NULL OR o.created_at >= $6)
+         AND ($7::timestamptz IS NULL OR o.created_at < $7)
        ORDER BY o.created_at DESC
-       LIMIT $3 OFFSET $4`,
-      [search, state, options.limit, options.offset],
+       LIMIT $8 OFFSET $9`,
+      [search, state, options.offerId?.trim() ?? '', options.paymentState?.trim() ?? '', options.ticketState?.trim() ?? '',
+        options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
@@ -1389,6 +1434,121 @@ export class PgRepo implements BackendRepo {
       id: String(r['id']), phone: String(r['phone']), state: String(r['state']), offerId: String(r['offer_id']), priceFcfa: Number(r['price_fcfa']),
       paymentState: payment?.state ?? null, ticketState: ticket?.dbState ?? null,
       createdAt: new Date(r['created_at'] as string).toISOString(), updatedAt: new Date(r['updated_at'] as string).toISOString(), payment, ticket,
+      timeline: await this.getAdminOrderTimeline(id),
+    };
+  }
+
+  /** IMP-31 — timeline reconstruite à partir des horodatages métier et des audits d'état.
+   * La projection ne sélectionne jamais les payloads, codes, tokens ou credentials. */
+  async getAdminOrderTimeline(id: string): Promise<AdminOrderTimelineEvent[]> {
+    const res = await this.pool.query(
+      `WITH timeline AS (
+         SELECT 'order:' || o.id::text || ':created' AS id, 'orders' AS entity, o.id::text AS entity_id,
+                'order_created' AS action, NULL::text AS from_state, 'CREATED'::text AS to_state,
+                'system' AS actor, o.created_at AS at
+         FROM public.orders o WHERE o.id = $1
+         UNION ALL
+         SELECT 'payment:' || p.id::text || ':initiated', 'payments', p.id::text,
+                'payment_initiated', NULL::text, 'INITIATED'::text, 'system', p.created_at
+         FROM public.payments p
+         WHERE p.order_id = $1 AND p.state <> 'CREATED'
+         UNION ALL
+         SELECT 'ticket:' || t.id::text || ':assigned', 'tickets', t.id::text,
+                'ticket_assigned', NULL::text, 'SOLD'::text, 'system', t.sold_at
+         FROM public.tickets t
+         WHERE t.order_id = $1 AND t.sold_at IS NOT NULL
+         UNION ALL
+         SELECT 'session:' || s.id::text || ':started', 'access_sessions', s.id::text,
+                'ticket_used', NULL::text, s.state, 'connector', s.started_at
+         FROM public.access_sessions s
+         WHERE s.started_at IS NOT NULL
+           AND s.ticket_id IN (SELECT t.id FROM public.tickets t WHERE t.order_id = $1)
+         UNION ALL
+         SELECT a.id::text, a.entity, a.entity_id, CASE
+                  WHEN a.entity = 'payments' AND a.after->>'state' = 'CONFIRMED' THEN 'payment_confirmed'
+                  WHEN a.entity = 'payments' AND a.after->>'state' = 'FAILED' THEN 'payment_failed'
+                  WHEN a.entity = 'orders' AND a.after->>'state' = 'DELIVERED' THEN 'ticket_delivered'
+                  WHEN a.entity = 'mikrotik_sync' AND a.after->>'state' = 'SUCCESS' THEN 'sync_succeeded'
+                  WHEN a.entity = 'mikrotik_sync' AND a.after->>'state' IN ('FAILED','BLOCKED','MANUAL_REVIEW') THEN 'sync_failed'
+                  ELSE a.action
+                END,
+                CASE
+                  WHEN a.entity = 'orders' THEN a.before->>'state'
+                  WHEN a.entity = 'payments' THEN a.before->>'state'
+                  WHEN a.entity = 'tickets' THEN a.before->>'db_state'
+                  WHEN a.entity = 'mikrotik_sync' THEN a.before->>'state'
+                  WHEN a.entity = 'access_sessions' THEN a.before->>'state'
+                  ELSE NULL
+                END,
+                CASE
+                  WHEN a.entity = 'orders' THEN a.after->>'state'
+                  WHEN a.entity = 'payments' THEN a.after->>'state'
+                  WHEN a.entity = 'tickets' THEN a.after->>'db_state'
+                  WHEN a.entity = 'mikrotik_sync' THEN a.after->>'state'
+                  WHEN a.entity = 'access_sessions' THEN a.after->>'state'
+                  ELSE NULL
+                END,
+                a.actor, a.at
+         FROM public.audit_logs a
+         WHERE (a.entity = 'orders' AND a.entity_id = $1::text)
+            OR (a.entity = 'payments' AND a.entity_id IN (
+                 SELECT p.id::text FROM public.payments p WHERE p.order_id = $1
+               ))
+            OR (a.entity = 'tickets' AND a.entity_id IN (
+                 SELECT t.id::text FROM public.tickets t WHERE t.order_id = $1
+               ))
+            OR (a.entity = 'access_sessions' AND a.entity_id IN (
+                 SELECT s.id::text FROM public.access_sessions s
+                 WHERE s.ticket_id IN (SELECT t.id FROM public.tickets t WHERE t.order_id = $1)
+               ))
+            OR (a.entity = 'mikrotik_sync' AND a.entity_id IN (
+                 SELECT m.id::text FROM public.mikrotik_sync m
+                 WHERE m.payload->>'order_id' = $1::text
+                    OR m.payload->>'ticket_id' IN (SELECT t.id::text FROM public.tickets t WHERE t.order_id = $1)
+               ))
+       )
+       SELECT id, entity, entity_id, action, from_state, to_state, actor, at
+       FROM timeline
+       ORDER BY at ASC, id ASC`,
+      [id],
+    );
+    return res.rows.map((r) => ({
+      id: String(r['id']), entity: String(r['entity']), entityId: String(r['entity_id']), action: String(r['action']),
+      fromState: r['from_state'] == null ? null : String(r['from_state']), toState: r['to_state'] == null ? null : String(r['to_state']),
+      actor: String(r['actor']), at: new Date(r['at'] as string).toISOString(),
+    }));
+  }
+
+  async createAdminCorrectionRequest(input: {
+    orderId: string;
+    requestedAction: AdminCorrectionRequest['requestedAction'];
+    reason: string;
+    requestedBy: string;
+    idempotencyKey: string;
+  }): Promise<{ request: AdminCorrectionRequest; created: boolean } | null> {
+    const exists = await this.pool.query(`SELECT id FROM public.orders WHERE id = $1`, [input.orderId]);
+    if (!exists.rows[0]) return null;
+    const inserted = await this.pool.query(
+      `INSERT INTO public.admin_correction_requests
+         (order_id, requested_action, reason, requested_by, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (order_id, idempotency_key) DO NOTHING
+       RETURNING id, order_id, requested_action, reason, requested_by, state, idempotency_key, created_at`,
+      [input.orderId, input.requestedAction, input.reason, input.requestedBy, input.idempotencyKey],
+    );
+    const row = inserted.rows[0] ?? (await this.pool.query(
+      `SELECT id, order_id, requested_action, reason, requested_by, state, idempotency_key, created_at
+       FROM public.admin_correction_requests WHERE order_id = $1 AND idempotency_key = $2`,
+      [input.orderId, input.idempotencyKey],
+    )).rows[0];
+    if (!row) throw new Error('correction_request_not_persisted');
+    return {
+      created: inserted.rows.length > 0,
+      request: {
+        id: String(row['id']), orderId: String(row['order_id']), requestedAction: String(row['requested_action']) as AdminCorrectionRequest['requestedAction'],
+        reason: String(row['reason']), requestedBy: String(row['requested_by']), state: String(row['state']) as AdminCorrectionRequest['state'],
+        idempotencyKey: String(row['idempotency_key']), createdAt: new Date(row['created_at'] as string).toISOString(),
+      },
     };
   }
 
@@ -1401,12 +1561,16 @@ export class PgRepo implements BackendRepo {
        FROM public.payments p
        JOIN public.orders o ON o.id = p.order_id
        JOIN public.customers c ON c.id = o.customer_id
+       LEFT JOIN public.plans pl ON pl.id = o.plan_id
        WHERE ($1 = '' OR p.id::text ILIKE '%' || $1 || '%' OR p.order_id::text ILIKE '%' || $1 || '%'
               OR c.phone ILIKE '%' || $1 || '%' OR COALESCE(p.provider_ref, '') ILIKE '%' || $1 || '%')
          AND ($2 = '' OR p.state = $2)
+         AND ($3 = '' OR COALESCE(pl.offer_id, o.plan_snapshot->>'offer_id', '') = $3)
+         AND ($4::timestamptz IS NULL OR p.created_at >= $4)
+         AND ($5::timestamptz IS NULL OR p.created_at < $5)
        ORDER BY p.created_at DESC
-       LIMIT $3 OFFSET $4`,
-      [search, state, options.limit, options.offset],
+       LIMIT $6 OFFSET $7`,
+      [search, state, options.offerId?.trim() ?? '', options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
@@ -1434,9 +1598,12 @@ export class PgRepo implements BackendRepo {
        WHERE ($1 = '' OR t.id::text ILIKE '%' || $1 || '%' OR t.batch_id::text ILIKE '%' || $1 || '%'
               OR p.offer_id ILIKE '%' || $1 || '%')
          AND ($2 = '' OR t.db_state = $2)
+         AND ($3 = '' OR p.offer_id = $3)
+         AND ($4::timestamptz IS NULL OR t.created_at >= $4)
+         AND ($5::timestamptz IS NULL OR t.created_at < $5)
        ORDER BY t.created_at DESC
-       LIMIT $3 OFFSET $4`,
-      [search, state, options.limit, options.offset],
+       LIMIT $6 OFFSET $7`,
+      [search, state, options.offerId?.trim() ?? '', options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
@@ -1460,9 +1627,11 @@ export class PgRepo implements BackendRepo {
        FROM public.ticket_batches
        WHERE ($1 = '' OR id::text ILIKE '%' || $1 || '%' OR COALESCE(notes, '') ILIKE '%' || $1 || '%')
          AND ($2 = '' OR source = $2)
+         AND ($3::timestamptz IS NULL OR created_at >= $3)
+         AND ($4::timestamptz IS NULL OR created_at < $4)
        ORDER BY generated_at DESC
-       LIMIT $3 OFFSET $4`,
-      [search, source, options.limit, options.offset],
+       LIMIT $5 OFFSET $6`,
+      [search, source, options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
@@ -1483,9 +1652,11 @@ export class PgRepo implements BackendRepo {
        FROM public.audit_logs
        WHERE ($1 = '' OR actor ILIKE '%' || $1 || '%' OR action ILIKE '%' || $1 || '%'
               OR entity ILIKE '%' || $1 || '%' OR COALESCE(entity_id, '') ILIKE '%' || $1 || '%')
+         AND ($2::timestamptz IS NULL OR at >= $2)
+         AND ($3::timestamptz IS NULL OR at < $3)
        ORDER BY at DESC
-       LIMIT $2 OFFSET $3`,
-      [search, options.limit, options.offset],
+       LIMIT $4 OFFSET $5`,
+      [search, options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
@@ -1514,9 +1685,11 @@ export class PgRepo implements BackendRepo {
        WHERE ($1 = '' OR id::text ILIKE '%' || $1 || '%' OR type ILIKE '%' || $1 || '%'
               OR severity ILIKE '%' || $1 || '%')
          AND ($2 = '' OR state = $2)
+         AND ($3::timestamptz IS NULL OR opened_at >= $3)
+         AND ($4::timestamptz IS NULL OR opened_at < $4)
        ORDER BY opened_at DESC
-       LIMIT $3 OFFSET $4`,
-      [search, state, options.limit, options.offset],
+       LIMIT $5 OFFSET $6`,
+      [search, state, options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({

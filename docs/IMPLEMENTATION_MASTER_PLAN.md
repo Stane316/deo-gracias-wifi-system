@@ -20,10 +20,13 @@ PREVIOUS:
 IMP-28 — FROZEN : code-first complet, dépendances externes différées, Walled Garden no-write
 
 CURRENT:
+IMP-30 — code-first : overview, activité récente, inventaire/alertes et santé Connector/synchronisation
+
+PREVIOUS:
 IMP-29 — code-first : routes admin canoniques, route guard, shell/sidebar, filtres serveur et E2E contrôlé
 
 NEXT:
-IMP-30 — uniquement après validation du commit IMP-29 et feu vert explicite de Stane
+IMP-31 — uniquement après validation du commit IMP-30 et CI GitHub verte
 
 REMAINING:
 IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-29 → IMP-40
@@ -37,7 +40,7 @@ IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28,
 - **Gel** : IMP-28 est gelée ; aucune extension fonctionnelle ou intégration externe ne démarre. Décision détaillée dans `docs/decisions/DECISION-2026-09-25-IMP-28-FREEZE.md`.
 - **Audit IMP-29** : terminé le 25/09/2026 ; fondations et écarts consignés dans `docs/IMP-29_REPRISE_AUDIT.md`.
 - **IMP-29 code-first** : routes canoniques, route guard, shell/sidebar, filtres serveur et E2E contrôlé implémentés ; rapport dans `docs/IMP-29_IMPLEMENTATION.md`.
-- **Pilotage** : IMP-30 reste en attente de validation du commit IMP-29 et de feu vert explicite de Stane.
+- **Pilotage** : IMP-30 ouvert après validation du commit IMP-29 ; son code-first reste en attente de revue, commit et CI GitHub.
 
 Précision indispensable : les intégrations physiques et externes restent séparées du code.
 `IMP-27` est stabilisée dans GitHub sous le commit `2b90f0e` avec CI verte. `IMP-28` dispose
@@ -78,7 +81,7 @@ apps/frontend    React/Vite, espace public, checkout transactionnel, admin
 apps/connector   parsing RouterOS, dry-run, file de sync, client RouterOS classique,
                  réconciliation read-only
 packages/shared  Grille A, états et invariants métier partagés
-supabase/        12 migrations up + 12 rollbacks down
+supabase/        14 migrations up + 14 rollbacks down
 tools/           migrations, smoke, RLS, state guards, génération du seed stock
 .github/         CI typecheck/tests, PostgreSQL éphémère, gitleaks
 
@@ -149,8 +152,8 @@ Statuts autorisés : `DONE`, `PARTIAL`, `NOT STARTED`, `BLOCKED`, `NEEDS VERIFIC
 | IMP-27 | DONE | commit GitHub `2b90f0e`, `Checkout.tsx`, machine, polling, E2E, PostgreSQL réel, documentation | Parcours paiement → webhook/état backend → allocation → délivrance → récupération corrélée démontré ; les intégrations de production restent dans les dépendances externes différées. |
 | IMP-28 | FROZEN — CODE-FIRST COMPLET, EXTERNE DIFFÉRÉ | commit GitHub `7bb18db`, CI verte, `api.test.ts`, E2E offline/503, `IMP-28_VAGUE_4.md` | Aucun nouveau périmètre ; domaines publics, redirect FedaPay réel, portail captif et Walled Garden réel restent différés. |
 | IMP-29 | PARTIAL — CODE-FIRST SLICE COMPLETE / EXTERNAL VALIDATION DEFERRED | `admin-route.ts`, `Admin.tsx`, shell/sidebar, filtres serveur, E2E admin, `docs/IMP-29_IMPLEMENTATION.md` | Routes canoniques, route guard, shell, filtres et preuve navigateur réalisés ; Supabase distant, MFA réelle et production différés. |
-| IMP-30 | PARTIAL | `admin.ts`, `/admin/dashboard`, `/admin/system/status`, KPI/UI | KPI et santé v0 présents ; activité récente, santé MikroTik réelle, Connector ONLINE/OFFLINE et validation des six questions manquent. |
-| IMP-31 | PARTIAL | listes `/admin/orders`, détail, `/admin/payments`, tests et projections SQL non commités | Recherche/pagination/détail v0 présents ; timeline complète, correction exceptionnelle avec raison/permission/audit et intégration PG restent à valider. |
+| IMP-30 | PARTIAL — CODE-FIRST SLICE COMPLETE / EXTERNAL VALIDATION DEFERRED | `admin.ts`, `/admin/dashboard`, `/admin/system/status`, heartbeat Connector, activité récente, KPI/UI, `docs/IMP-30_IMPLEMENTATION.md` | Overview, ventes par plan, inventaire/alertes, activité et santé sync/Connector codés ; heartbeat réel, MikroTik et Supabase distant restent différés. |
+| IMP-31 | PARTIAL — CODE-FIRST SLICE COMPLETE / POSTGRES VALIDATION DEFERRED | `repo.ts`, `fake-repo.ts`, `app.ts`, `Admin.tsx`, migration `0014`, `docs/IMP-31_IMPLEMENTATION.md` | Listes filtrées/paginées, détail sans secrets, timeline reconstruisible, correction `SUPER_ADMIN` idempotente avec raison/audit et tests unitaires codés ; PostgreSQL/RLS/smoke restent non exécutés faute d’environnement. |
 | IMP-32 | PARTIAL | `/admin/tickets`, `/admin/batches`, création digital, coffre et vues frontend | Inventaire et lot digital présents ; import preview→validation→transaction, compteurs complets, physique/digital exhaustif et réservations opérationnelles manquent. |
 | IMP-33 | PARTIAL | allocation admin, ack alertes, réconciliation et primitives d’audit | Primitives de récupération présentes ; centre d’incidents, fiche, retry/resync/resolve/reopen idempotents et scénario C complet manquent. |
 | IMP-34 | NOT STARTED | catalogue read-only `/offers` et plans SQL existants | Aucun CRUD plan/paramètre métier/audit commercial dédié ni protection grille complète. |
@@ -251,8 +254,8 @@ aud itée et reclassée sans modifier la clôture indépendante d’IMP-27.
 | **IMP-27** | **Paiement, délivrance, récupération** | **DONE** | **code + CI validés ; externe différé** |
 | IMP-28 | Captif / états dégradés / WG | **FROZEN — CODE-FIRST COMPLET** | **externe différé ; no-write MikroTik** |
 | IMP-29 | Socle admin | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **routes, guard, shell, filtres et E2E réalisés ; validation externe différée** |
-| IMP-30 | Dashboard overview | PARTIAL | FUTURE, v0 déjà présent |
-| IMP-31 | Commandes / paiements admin | PARTIAL | FUTURE, code non commité présent |
+| IMP-30 | Dashboard overview | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **overview, activité, inventaire et santé heartbeat codés ; CI/revue et externe différés** |
+| IMP-31 | Commandes / paiements admin | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **timeline, filtres serveur, correction idempotente/auditée codés ; PostgreSQL/RLS/smoke différés** |
 | IMP-32 | Tickets / lots / import | PARTIAL | FUTURE, primitives déjà présentes |
 | IMP-33 | Incidents / récupération | PARTIAL | FUTURE, primitives déjà présentes |
 | IMP-34 | Plans / paramètres / audit | NOT STARTED | FUTURE |

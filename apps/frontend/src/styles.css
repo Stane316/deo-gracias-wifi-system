@@ -289,6 +289,12 @@ pre {
 .admin-pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 12px; color: var(--muted); font-size: 12px; }
 .order-detail { margin: 16px 0; }
 .order-detail h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; }
+.admin-timeline { list-style: none; margin: 0 0 14px; padding: 0 0 0 12px; border-left: 2px solid var(--border); }
+.admin-timeline li { display: grid; grid-template-columns: minmax(130px, auto) minmax(120px, 1fr) auto; gap: 10px; align-items: center; padding: 8px 0 8px 12px; }
+.admin-timeline small { color: var(--muted); white-space: nowrap; }
+.correction-box { margin: 16px 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--surface) 92%, var(--accent)); }
+.admin-filter-row { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+.admin-filter-row textarea { min-width: 280px; min-height: 70px; flex: 1; }
 select { width: 100%; padding: 9px 12px; border-radius: 3px; border: 1px solid var(--border); background: #fff; color: var(--text); font-size: 14px; }
 button:disabled { cursor: not-allowed; opacity: 0.6; }
 @media (max-width: 700px) {

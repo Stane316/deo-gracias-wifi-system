@@ -361,3 +361,72 @@ describe('IMP-27 — listes admin paginées et sans secrets', () => {
     await app.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// IMP-31 — timeline, filtres serveur et correction exceptionnelle
+// ---------------------------------------------------------------------------
+describe('IMP-31 — détail commande et correction exceptionnelle', () => {
+  it('expose une timeline reconstruite et des filtres serveur sans secret', async () => {
+    const { repo, app } = await adminApp();
+    const customerId = await repo.findOrCreateCustomer('0197000031');
+    const created = await repo.createOrder({
+      customerId, planId: 'plan-0',
+      planSnapshot: { offer_id: '5-HEURES', price_snapshot: 100 },
+      idempotencyKey: 'imp31-timeline-order-1',
+    });
+    const payment = await repo.createPayment(created.order.id, 100);
+    await repo.markPaymentAwaitingResult(payment.id, 'fp-imp31');
+    const detail = await app.inject({ method: 'GET', url: `/admin/orders/${created.order.id}`, headers: { authorization: 'Bearer tok-admin' } });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({
+      id: created.order.id,
+      timeline: expect.arrayContaining([
+        expect.objectContaining({ action: 'order_created', entity: 'orders' }),
+        expect.objectContaining({ action: 'payment_initiated', entity: 'payments' }),
+      ]),
+    });
+    expect(detail.body).not.toContain('password');
+    expect(detail.body).not.toContain('signature');
+
+    const filtered = await app.inject({ method: 'GET', url: '/admin/orders?offer_id=5-HEURES&payment_state=PENDING&limit=1', headers: { authorization: 'Bearer tok-admin' } });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json()).toMatchObject({ total: 1, limit: 1 });
+    const invalidRange = await app.inject({ method: 'GET', url: '/admin/orders?from=2026-09-27T00:00:00.000Z&to=2026-09-26T00:00:00.000Z', headers: { authorization: 'Bearer tok-admin' } });
+    expect(invalidRange.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('réserve la correction à SUPER_ADMIN, exige raison + idempotence et ne marque jamais payé', async () => {
+    const repo = new FakeRepo();
+    const verifier = new FakeVerifier();
+    verifier.identities.set('tok-admin', { sub: 'sub-admin', phone: null, email: 'admin@dg.bj', role: 'ADMIN' });
+    verifier.identities.set('tok-super', { sub: 'sub-super', phone: null, email: 'super@dg.bj', role: 'SUPER_ADMIN' });
+    const app = await buildApp({ repo, rateLimit: { max: 100000 }, auth: { verifier, rateLimits: looseLimits } });
+    const customerId = await repo.findOrCreateCustomer('0197000032');
+    const created = await repo.createOrder({
+      customerId, planId: 'plan-0',
+      planSnapshot: { offer_id: '5-HEURES', price_snapshot: 100 },
+      idempotencyKey: 'imp31-correction-order-1',
+    });
+    const path = `/admin/orders/${created.order.id}/correction-requests`;
+    const denied = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-admin', 'idempotency-key': 'imp31-denied-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Motif suffisamment détaillé pour le test.' } });
+    expect(denied.statusCode).toBe(403);
+
+    const missing = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'trop court' } });
+    expect(missing.statusCode).toBe(400);
+
+    const first = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Paiement confirmé côté fournisseur, vérification requise.' } });
+    expect(first.statusCode).toBe(201);
+    const firstBody = first.json() as { id: string; state: string };
+    expect(firstBody.state).toBe('OPEN');
+    const replay = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Autre texte ignoré au rejeu idempotent.' } });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toMatchObject({ id: firstBody.id, state: 'OPEN' });
+    expect((await repo.getOrderById(created.order.id))?.state).toBe('CREATED');
+    expect(repo.audits.filter((audit) => audit.action === 'admin_correction_requested')).toHaveLength(1);
+
+    const unknown = await app.inject({ method: 'POST', url: '/admin/orders/00000000-0000-4000-8000-000000000001/correction-requests', headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-2' }, payload: { requested_action: 'REVIEW_DELIVERY', reason: 'Commande absente à vérifier par la supervision.' } });
+    expect(unknown.statusCode).toBe(404);
+    await app.close();
+  });
+});

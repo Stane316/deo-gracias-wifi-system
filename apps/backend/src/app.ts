@@ -29,6 +29,7 @@ import {
   authPhoneVerifySchema,
   adminIdParamsSchema,
   adminListQuerySchema,
+  adminOrderCorrectionBodySchema,
   connectorClaimBodySchema,
   connectorHeartbeatBodySchema,
   connectorInventoryReportSchema,
@@ -197,7 +198,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           .status(503)
           .type('application/problem+json')
           .send(problem(503, 'Base non migrée',
-            `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 13 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
+            `Tables manquantes : ${health.missing.join(', ')}. Appliquez les 14 migrations dans l'ordre (GUIDE-10 §4) sur la base pointée par DATABASE_URL.`));
       }
       return { status: 'ready', schema_migrated: true };
     } catch (err) {
@@ -223,7 +224,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           .status(503)
           .type('application/problem+json')
           .send(problem(503, 'Base non migrée',
-            `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0013 sur CETTE base, ou corrigez DATABASE_URL.`));
+            `La base pointée par DATABASE_URL ne contient pas le schéma (manque : ${health.missing.slice(0, 5).join(', ')}…). Suivez GUIDE-10 §4 : appliquez 0001→0014 sur CETTE base, ou corrigez DATABASE_URL.`));
       }
       plans = await repo.listActivePlans();
     } catch (err) {
@@ -1253,6 +1254,11 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       offset: parsed.data.offset,
       ...(parsed.data.search ? { search: parsed.data.search } : {}),
       ...(parsed.data.state ? { state: parsed.data.state } : {}),
+      ...(parsed.data.offer_id ? { offerId: parsed.data.offer_id } : {}),
+      ...(parsed.data.payment_state ? { paymentState: parsed.data.payment_state } : {}),
+      ...(parsed.data.ticket_state ? { ticketState: parsed.data.ticket_state } : {}),
+      ...(parsed.data.from ? { from: parsed.data.from } : {}),
+      ...(parsed.data.to ? { to: parsed.data.to } : {}),
     };
   };
 
@@ -1307,7 +1313,51 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
         db_state: order.ticket.dbState, router_state: order.ticket.routerState, order_id: order.ticket.orderId,
         code_prefix_hint: order.ticket.codePrefixHint, sold_at: order.ticket.soldAt, activation_deadline: order.ticket.activationDeadline,
       } : null,
+      timeline: order.timeline.map((event) => ({
+        id: event.id, entity: event.entity, entity_id: event.entityId, action: event.action,
+        from_state: event.fromState, to_state: event.toState, actor: event.actor, at: event.at,
+      })),
     };
+  });
+
+  /** IMP-31 — demande de correction exceptionnelle : SUPER_ADMIN uniquement,
+   * raison obligatoire, idempotence obligatoire, et aucune mutation de paiement. */
+  app.post('/admin/orders/:id/correction-requests', async (req, reply) => {
+    const identity = await requireAdminImp27(req, reply);
+    if (!identity) return;
+    if (identity.role !== 'SUPER_ADMIN') {
+      await repo.logAudit({ actor: `admin:${identity.sub}`, action: 'admin_correction_denied', entity: 'orders', entityId: String((req.params as { id?: string }).id ?? '') });
+      return reply.status(403).type('application/problem+json')
+        .send(problem(403, 'Permission insuffisante', 'Une correction exceptionnelle requiert le rôle SUPER_ADMIN.'));
+    }
+    const params = adminIdParamsSchema.safeParse(req.params);
+    const body = adminOrderCorrectionBodySchema.safeParse(req.body);
+    const rawKey = req.headers['idempotency-key'];
+    const idempotencyKey = typeof rawKey === 'string' ? rawKey : '';
+    const key = idempotencyKeySchema.safeParse(idempotencyKey);
+    if (!params.success || !body.success || !key.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Correction invalide', 'UUID, Idempotency-Key et raison détaillée sont obligatoires.'));
+    }
+    const result = await repo.createAdminCorrectionRequest({
+      orderId: params.data.id, requestedAction: body.data.requested_action, reason: body.data.reason,
+      requestedBy: identity.sub, idempotencyKey,
+    });
+    if (!result) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Commande introuvable', 'Aucune commande ne correspond à cet identifiant.'));
+    }
+    if (result.created) {
+      await repo.logAudit({
+        actor: `admin:${identity.sub}`, action: 'admin_correction_requested', entity: 'orders', entityId: params.data.id,
+        after: { requested_action: result.request.requestedAction, reason: result.request.reason, correction_request_id: result.request.id },
+      });
+    }
+    return reply.status(result.created ? 201 : 200).send({
+      id: result.request.id, order_id: result.request.orderId, requested_action: result.request.requestedAction,
+      reason: result.request.reason, state: result.request.state, requested_by: result.request.requestedBy,
+      idempotency_key: result.request.idempotencyKey, created_at: result.request.createdAt,
+    });
   });
 
   app.get('/admin/orders', async (req, reply) => {

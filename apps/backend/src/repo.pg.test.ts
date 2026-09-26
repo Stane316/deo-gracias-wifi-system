@@ -1,5 +1,5 @@
 /**
- * IMP-12 — Tests d'intégration RÉELS (PgRepo sur Postgres migré 0001→0010).
+ * Tests d'intégration RÉELS (PgRepo sur Postgres migré 0001→0014).
  * Exécutés seulement si DATABASE_URL est définie (CI : service postgres:17 ;
  * local : tools/db-migrate.sh up). Hygiène : fixtures nettoyées avant/après
  * (leçon IMP-09 : des fixtures orphelines font échouer les runs suivants).
@@ -1771,7 +1771,7 @@ describeDb('IMP-25.3 — diagnostic base non migrée (base vide dédiée)', () =
       const health = await repoEmpty.getSchemaHealth();
       expect(health.present).toBe(0);
       expect(health.missing).toContain('plans');
-      expect(health.missing).toHaveLength(16);
+      expect(health.missing).toHaveLength(17);
 
       const ready = await appEmpty.inject({ method: 'GET', url: '/readyz' });
       expect(ready.statusCode).toBe(503);
@@ -2024,5 +2024,84 @@ describeDb('IMP-27 — reprise paiement sur PostgreSQL réel', () => {
       provider_ref: providerRef,
       order_state: 'PAID',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMP-31 — projections PostgreSQL : timeline, filtres et idempotence de correction
+// ---------------------------------------------------------------------------
+describeDb('IMP-31 — projections PostgreSQL du Dashboard Admin', () => {
+  const pool31 = new Pool({ connectionString: DATABASE_URL });
+  const repo31 = new PgRepo(pool31);
+
+  it('reconstruit la timeline sans sélectionner de secret et persiste la correction idempotente', async () => {
+    const suffix = randomUUID();
+    const phone = `019731${suffix.slice(0, 4)}`;
+    const customer = await pool31.query(`INSERT INTO public.customers (phone) VALUES ($1) RETURNING id`, [phone]);
+    const plan = await pool31.query(`SELECT id, offer_id FROM public.plans WHERE active_to IS NULL ORDER BY offer_id LIMIT 1`);
+    const customerId = String(customer.rows[0]?.['id']);
+    const planId = String(plan.rows[0]?.['id']);
+    const offerId = String(plan.rows[0]?.['offer_id']);
+    const order = await pool31.query(
+      `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
+       VALUES ($1, $2, jsonb_build_object('offer_id', $3, 'price_snapshot', 100), $4) RETURNING id`,
+      [customerId, planId, offerId, `itest-imp31-pg-${suffix}`],
+    );
+    const orderId = String(order.rows[0]?.['id']);
+    const payment = await pool31.query(
+      `INSERT INTO public.payments (order_id, amount_fcfa, state) VALUES ($1, 100, 'PENDING') RETURNING id`,
+      [orderId],
+    );
+    const paymentId = String(payment.rows[0]?.['id']);
+    const batch = await pool31.query(`INSERT INTO public.ticket_batches (source, quantity) VALUES ('backend', 1) RETURNING id`);
+    const batchId = String(batch.rows[0]?.['id']);
+    const ticket = await pool31.query(
+      `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id, db_state, order_id, sold_at)
+       VALUES ($1, $2, 'IM31', $3, 'SOLD', $4, now()) RETURNING id`,
+      [batchId, `imp31-hash-${suffix}`, planId, orderId],
+    );
+    const ticketId = String(ticket.rows[0]?.['id']);
+    await pool31.query(
+      `INSERT INTO public.access_sessions (ticket_id, state, started_at) VALUES ($1, 'ACTIVE', now())`,
+      [ticketId],
+    );
+    const sync = await pool31.query(
+      `INSERT INTO public.mikrotik_sync (operation, payload, state) VALUES ('create_ticket', $1::jsonb, 'SUCCESS') RETURNING id`,
+      [JSON.stringify({ order_id: orderId, ticket_id: ticketId })],
+    );
+    const syncId = String(sync.rows[0]?.['id']);
+    await pool31.query(
+      `INSERT INTO public.audit_logs (actor, action, entity, entity_id, before, after) VALUES
+       ('system', 'state_change', 'payments', $1, '{"state":"PENDING"}', '{"state":"CONFIRMED"}'),
+       ('system', 'state_change', 'orders', $2, '{"state":"TICKET_ALLOCATED"}', '{"state":"DELIVERED"}'),
+       ('connector', 'state_change', 'mikrotik_sync', $3, '{"state":"PROCESSING"}', '{"state":"SUCCESS"}')`,
+      [paymentId, orderId, syncId],
+    );
+    try {
+      const timeline = await repo31.getAdminOrderTimeline(orderId);
+      expect(timeline.map((event) => event.action)).toEqual(expect.arrayContaining([
+        'order_created', 'payment_initiated', 'payment_confirmed', 'ticket_assigned', 'ticket_used', 'ticket_delivered', 'sync_succeeded',
+      ]));
+      expect(JSON.stringify(timeline)).not.toContain('imp31-hash');
+
+      const page = await repo31.listAdminOrders({ limit: 10, offset: 0, offerId, paymentState: 'PENDING', from: new Date(Date.now() - 60_000), to: new Date(Date.now() + 60_000) });
+      expect(page.items.some((item) => item.id === orderId)).toBe(true);
+
+      const first = await repo31.createAdminCorrectionRequest({ orderId, requestedAction: 'REVIEW_PAYMENT', reason: 'Vérification fournisseur requise avant toute action.', requestedBy: 'sub-imp31', idempotencyKey: `imp31-key-${suffix}` });
+      const replay = await repo31.createAdminCorrectionRequest({ orderId, requestedAction: 'REVIEW_PAYMENT', reason: 'Rejeu idempotent sans mutation.', requestedBy: 'sub-imp31', idempotencyKey: `imp31-key-${suffix}` });
+      expect(first?.created).toBe(true);
+      expect(replay).toMatchObject({ created: false, request: { id: first?.request.id, state: 'OPEN' } });
+      expect((await pool31.query(`SELECT state FROM public.orders WHERE id = $1`, [orderId])).rows[0]?.['state']).toBe('CREATED');
+    } finally {
+      await pool31.query(`DELETE FROM public.mikrotik_sync WHERE id = $1`, [syncId]);
+      await pool31.query(`DELETE FROM public.access_sessions WHERE ticket_id = $1`, [ticketId]);
+      await pool31.query(`DELETE FROM public.admin_correction_requests WHERE order_id = $1`, [orderId]);
+      await pool31.query(`DELETE FROM public.tickets WHERE id = $1`, [ticketId]);
+      await pool31.query(`DELETE FROM public.ticket_batches WHERE id = $1`, [batchId]);
+      await pool31.query(`DELETE FROM public.payments WHERE id = $1`, [paymentId]);
+      await pool31.query(`DELETE FROM public.orders WHERE id = $1`, [orderId]);
+      await pool31.query(`DELETE FROM public.customers WHERE id = $1`, [customerId]);
+      await pool31.end();
+    }
   });
 });

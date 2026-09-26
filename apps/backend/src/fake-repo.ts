@@ -11,8 +11,10 @@ import type {
   ActivePlan,
   AdminAuditSummary,
   AdminBatchSummary,
+  AdminCorrectionRequest,
   AdminIncidentSummary,
   AdminOrderDetail,
+  AdminOrderTimelineEvent,
   AdminListOptions,
   AdminOrderSummary,
   AdminPage,
@@ -263,12 +265,14 @@ export class FakeRepo implements BackendRepo {
     return 'failed';
   }
 
-  audits: Array<{ actor: string; action: string; entity: string; entityId?: string | null }> = [];
+  audits: Array<{ actor: string; action: string; entity: string; entityId?: string | null; after?: Record<string, unknown> }> = [];
+  correctionRequests = new Map<string, AdminCorrectionRequest>();
   async logAudit(entry: {
     actor: string;
     action: string;
     entity: string;
     entityId?: string | null;
+    after?: Record<string, unknown>;
   }): Promise<void> {
     this.audits.push(entry);
   }
@@ -592,6 +596,11 @@ export class FakeRepo implements BackendRepo {
         updatedAt: order.updatedAt.toISOString(),
       };
       if ((options.state ?? '') !== '' && row.state !== options.state) continue;
+      if ((options.offerId ?? '') !== '' && row.offerId !== options.offerId) continue;
+      if ((options.paymentState ?? '') !== '' && row.paymentState !== options.paymentState) continue;
+      if ((options.ticketState ?? '') !== '' && row.ticketState !== options.ticketState) continue;
+      if (options.from && new Date(row.createdAt) < options.from) continue;
+      if (options.to && new Date(row.createdAt) >= options.to) continue;
       if (!this.adminMatches(options.search ?? '', [row.id, row.phone, row.offerId])) continue;
       rows.push(row);
     }
@@ -618,7 +627,67 @@ export class FakeRepo implements BackendRepo {
       codePrefixHint: ticketRecord.codePrefixHint, soldAt: ticketRecord.soldAt?.toISOString() ?? null,
       activationDeadline: ticketRecord.activationDeadline?.toISOString() ?? null,
     } satisfies AdminTicketSummary : null;
-    return { ...summary, payment, ticket };
+    return { ...summary, payment, ticket, timeline: await this.getAdminOrderTimeline(id) };
+  }
+
+  async getAdminOrderTimeline(id: string): Promise<AdminOrderTimelineEvent[]> {
+    const order = this.orders.get(id);
+    if (!order) return [];
+    const events: AdminOrderTimelineEvent[] = [{
+      id: `order:${id}:created`, entity: 'orders', entityId: id, action: 'order_created',
+      fromState: null, toState: 'CREATED', actor: 'system', at: order.createdAt.toISOString(),
+    }];
+    const payment = [...this.payments.values()].filter((candidate) => candidate.orderId === id)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0];
+    if (payment && payment.state !== 'CREATED') {
+      events.push({ id: `payment:${payment.id}:initiated`, entity: 'payments', entityId: payment.id,
+        action: 'payment_initiated', fromState: null, toState: 'INITIATED', actor: 'system', at: payment.createdAt.toISOString() });
+      if (payment.state === 'CONFIRMED' || payment.state === 'FAILED') {
+        events.push({ id: `payment:${payment.id}:${payment.state.toLowerCase()}`, entity: 'payments', entityId: payment.id,
+          action: payment.state === 'CONFIRMED' ? 'payment_confirmed' : 'payment_failed', fromState: null, toState: payment.state,
+          actor: 'system', at: (payment.confirmedAt ?? payment.updatedAt).toISOString() });
+      }
+    }
+    const ticket = [...this.tickets.values()].find((candidate) => candidate.orderId === id);
+    if (ticket?.soldAt) {
+      events.push({ id: `ticket:${ticket.id}:assigned`, entity: 'tickets', entityId: ticket.id,
+        action: 'ticket_assigned', fromState: null, toState: 'SOLD', actor: 'system', at: ticket.soldAt.toISOString() });
+      if (order.state === 'DELIVERED') {
+        events.push({ id: `order:${id}:delivered`, entity: 'orders', entityId: id,
+          action: 'ticket_delivered', fromState: 'TICKET_ALLOCATED', toState: 'DELIVERED', actor: 'system', at: order.updatedAt.toISOString() });
+      }
+      if (ticket.dbState === 'USED') {
+        events.push({ id: `ticket:${ticket.id}:used`, entity: 'tickets', entityId: ticket.id,
+          action: 'ticket_used', fromState: 'SOLD', toState: 'USED', actor: 'connector', at: ticket.soldAt.toISOString() });
+      }
+    }
+    const relatedAudits = this.audits.filter((audit) =>
+      audit.entityId === id || audit.entity === 'payments' && payment?.id === audit.entityId || audit.entity === 'tickets' && ticket?.id === audit.entityId,
+    );
+    relatedAudits.forEach((audit, index) => events.push({
+      id: `audit:${index + 1}`, entity: audit.entity, entityId: audit.entityId ?? '', action: audit.action,
+      fromState: null, toState: null, actor: audit.actor, at: new Date(Date.now() - index).toISOString(),
+    }));
+    return events.sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
+  }
+
+  async createAdminCorrectionRequest(input: {
+    orderId: string;
+    requestedAction: AdminCorrectionRequest['requestedAction'];
+    reason: string;
+    requestedBy: string;
+    idempotencyKey: string;
+  }): Promise<{ request: AdminCorrectionRequest; created: boolean } | null> {
+    if (!this.orders.has(input.orderId)) return null;
+    const key = `${input.orderId}:${input.idempotencyKey}`;
+    const existing = this.correctionRequests.get(key);
+    if (existing) return { request: existing, created: false };
+    const request: AdminCorrectionRequest = {
+      id: randomUUID(), orderId: input.orderId, requestedAction: input.requestedAction, reason: input.reason,
+      requestedBy: input.requestedBy, state: 'OPEN', idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString(),
+    };
+    this.correctionRequests.set(key, request);
+    return { request, created: true };
   }
 
   async listAdminPayments(options: AdminListOptions): Promise<AdminPage<AdminPaymentSummary>> {
@@ -632,6 +701,13 @@ export class FakeRepo implements BackendRepo {
         confirmedAt: payment.confirmedAt?.toISOString() ?? null, createdAt: payment.createdAt.toISOString(),
       };
       if ((options.state ?? '') !== '' && row.state !== options.state) continue;
+      if ((options.offerId ?? '') !== '') {
+        const orderForFilter = this.orders.get(row.orderId);
+        const offerIdForFilter = orderForFilter ? String(orderForFilter.planSnapshot['offer_id'] ?? '') : '';
+        if (offerIdForFilter !== options.offerId) continue;
+      }
+      if (options.from && new Date(row.createdAt) < options.from) continue;
+      if (options.to && new Date(row.createdAt) >= options.to) continue;
       if (!this.adminMatches(options.search ?? '', [row.id, row.orderId, row.phone, row.providerRef])) continue;
       rows.push(row);
     }
@@ -650,6 +726,9 @@ export class FakeRepo implements BackendRepo {
         activationDeadline: ticket.activationDeadline?.toISOString() ?? null,
       };
       if ((options.state ?? '') !== '' && row.dbState !== options.state) continue;
+      if ((options.offerId ?? '') !== '' && row.offerId !== options.offerId) continue;
+      if (options.from && row.soldAt && new Date(row.soldAt) < options.from) continue;
+      if (options.to && row.soldAt && new Date(row.soldAt) >= options.to) continue;
       if (!this.adminMatches(options.search ?? '', [row.id, row.batchId, row.offerId])) continue;
       rows.push(row);
     }
@@ -664,6 +743,8 @@ export class FakeRepo implements BackendRepo {
     } satisfies AdminBatchSummary));
     const filtered = rows.filter((row) =>
       ((options.state ?? '') === '' || row.source === options.state) &&
+      (!options.from || new Date(row.createdAt) >= options.from) &&
+      (!options.to || new Date(row.createdAt) < options.to) &&
       this.adminMatches(options.search ?? '', [row.id, row.notes]),
     );
     filtered.sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
@@ -675,7 +756,11 @@ export class FakeRepo implements BackendRepo {
       id: `fake-audit-${index + 1}`, actor: audit.actor, action: audit.action, entity: audit.entity,
       entityId: audit.entityId ?? null, at: new Date(Date.now() - index).toISOString(),
     }));
-    const filtered = rows.filter((row) => this.adminMatches(options.search ?? '', [row.actor, row.action, row.entity, row.entityId]));
+    const filtered = rows.filter((row) =>
+      (!options.from || new Date(row.at) >= options.from) &&
+      (!options.to || new Date(row.at) < options.to) &&
+      this.adminMatches(options.search ?? '', [row.actor, row.action, row.entity, row.entityId]),
+    );
     return this.pageAdmin(filtered, options);
   }
 
@@ -683,6 +768,8 @@ export class FakeRepo implements BackendRepo {
   async listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>> {
     const filtered = this.adminIncidents.filter((row) =>
       ((options.state ?? '') === '' || row.state === options.state) &&
+      (!options.from || new Date(row.openedAt) >= options.from) &&
+      (!options.to || new Date(row.openedAt) < options.to) &&
       this.adminMatches(options.search ?? '', [row.id, row.type, row.severity]),
     ).map((row) => ({
       ...row,

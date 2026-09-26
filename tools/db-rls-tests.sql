@@ -1,7 +1,8 @@
 -- IMP-10 — Tests de la matrice RLS (anon / authenticated / service_role).
 -- Exécuté par `tools/db-migrate.sh rls` (CI job db-migrations + local).
--- Prérequis : migrations 0001→0010 appliquées (0008 = 6 plans Grille A ; 0010 = stock
--- Mikmon 660 tickets — le test RLS vérifie que ce stock n'est visible QUE de service_role).
+-- Prérequis : migrations 0001→0014 appliquées (0008 = 6 plans Grille A ; 0010 = stock
+-- Mikmon 660 tickets ; 0014 = corrections admin — le test RLS vérifie que le stock
+-- et les demandes de correction ne sont visibles QUE de service_role).
 -- Méthode : fixtures posées en superuser, puis SET ROLE + claim JWT simulé
 -- (request.jwt.claim.sub = auth.uid(), même mécanique que Supabase).
 -- Toute violation de la matrice = RAISE EXCEPTION (échec CI).
@@ -45,6 +46,8 @@ BEGIN
     IF n <> 0 THEN RAISE EXCEPTION 'rls: anon voit % orders (attendu 0)', n; END IF;
     SELECT count(*) INTO n FROM public.audit_logs;
     IF n <> 0 THEN RAISE EXCEPTION 'rls: anon voit % audit_logs (attendu 0)', n; END IF;
+    SELECT count(*) INTO n FROM public.admin_correction_requests;
+    IF n <> 0 THEN RAISE EXCEPTION 'rls: anon voit % admin_correction_requests (attendu 0)', n; END IF;
     SELECT count(*) INTO n FROM public.plans;
     IF n <> 6 THEN RAISE EXCEPTION 'rls: anon voit % plans (attendu 6)', n; END IF;
     SELECT count(*) INTO n FROM public.settings;
@@ -84,6 +87,8 @@ BEGIN
     IF n <> 0 THEN RAISE EXCEPTION 'rls: authenticated B voit % orders de A (attendu 0)', n; END IF;
     SELECT count(*) INTO n FROM public.tickets;
     IF n <> 0 THEN RAISE EXCEPTION 'rls: authenticated B voit % tickets de A (attendu 0)', n; END IF;
+    SELECT count(*) INTO n FROM public.admin_correction_requests;
+    IF n <> 0 THEN RAISE EXCEPTION 'rls: authenticated B voit % admin_correction_requests (attendu 0)', n; END IF;
   RESET ROLE;
 
   -- ── service_role : full (BYPASSRLS) ───────────────────────────────────────
@@ -95,6 +100,8 @@ BEGIN
     IF n <> n_stock + 1 THEN RAISE EXCEPTION 'rls: service_role voit % tickets (attendu % = stock + fixture)', n, n_stock + 1; END IF;
     SELECT count(*) INTO n FROM public.mikrotik_sync;   -- table ops : accessible backend
     IF n <> 0 THEN RAISE EXCEPTION 'rls: service_role mikrotik_sync inattendu (% )', n; END IF;
+    SELECT count(*) INTO n FROM public.admin_correction_requests;
+    IF n <> 0 THEN RAISE EXCEPTION 'rls: service_role admin_correction_requests inattendu (% )', n; END IF;
   RESET ROLE;
 
   -- ── Nettoyage des fixtures (superuser, ordre FK) : le test ne doit rien

@@ -114,6 +114,7 @@ export function Admin() {
   const [password, setPassword] = useState('');
   const [supabaseSession, setSupabaseSession] = useState<SupabaseSession | null>(() => readAdminSession());
   const [connected, setConnected] = useState(false);
+  const [adminRole, setAdminRole] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const [tab, setTab] = useState<AdminTab>('dashboard');
@@ -130,6 +131,11 @@ export function Admin() {
   const [offers, setOffers] = useState<Offer[]>([]);
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState('');
+  const [paymentStateFilter, setPaymentStateFilter] = useState('');
+  const [ticketStateFilter, setTicketStateFilter] = useState('');
+  const [offerFilter, setOfferFilter] = useState('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
   const [pageOffset, setPageOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -139,6 +145,10 @@ export function Admin() {
   const [batchError, setBatchError] = useState<string | null>(null);
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [ackPending, setAckPending] = useState<string | null>(null);
+  const [correctionAction, setCorrectionAction] = useState<'REVIEW_PAYMENT' | 'REVIEW_ALLOCATION' | 'REVIEW_DELIVERY'>('REVIEW_PAYMENT');
+  const [correctionReason, setCorrectionReason] = useState('');
+  const [correctionPending, setCorrectionPending] = useState(false);
+  const [correctionMessage, setCorrectionMessage] = useState<string | null>(null);
 
   const usesSupabase = supabaseAuth !== null;
   const token = usesSupabase ? (supabaseSession?.access_token ?? null) : storage.adminToken();
@@ -151,6 +161,8 @@ export function Admin() {
       storage.setAdminToken(null);
     }
     setConnected(false);
+    setAdminRole(null);
+    setCorrectionMessage(null);
     replaceBrowserPath('/admin/login');
   }, [usesSupabase]);
 
@@ -177,8 +189,10 @@ export function Admin() {
         return;
       }
     }
-    if (res.ok) setConnected(true);
-    else clearAuth();
+    if (res.ok && res.body) {
+      setAdminRole(res.body.role);
+      setConnected(true);
+    } else clearAuth();
   }, [clearAuth, supabaseSession?.refresh_token, token]);
 
   useEffect(() => { void check(); }, [check]);
@@ -214,6 +228,15 @@ export function Admin() {
     const params = new URLSearchParams({ limit: '25', offset: String(pageOffset) });
     if (search.trim()) params.set('search', search.trim());
     if (stateFilter.trim()) params.set('state', stateFilter.trim());
+    if (tab === 'orders' && offerFilter.trim()) params.set('offer_id', offerFilter.trim());
+    if (tab === 'orders' && paymentStateFilter.trim()) params.set('payment_state', paymentStateFilter.trim());
+    if (tab === 'orders' && ticketStateFilter.trim()) params.set('ticket_state', ticketStateFilter.trim());
+    if (fromDate) params.set('from', `${fromDate}T00:00:00.000Z`);
+    if (toDate) {
+      const exclusiveTo = new Date(`${toDate}T00:00:00.000Z`);
+      exclusiveTo.setUTCDate(exclusiveTo.getUTCDate() + 1);
+      params.set('to', exclusiveTo.toISOString());
+    }
     return `${path}?${params.toString()}`;
   };
 
@@ -264,10 +287,10 @@ export function Admin() {
     } finally {
       setLoading(false);
     }
-  }, [pageOffset, search, stateFilter, tab, token]);
+  }, [fromDate, offerFilter, pageOffset, paymentStateFilter, search, stateFilter, tab, ticketStateFilter, toDate, token]);
 
-  useEffect(() => { setPageOffset(0); setStateFilter(''); }, [tab]);
-  useEffect(() => { setPageOffset(0); }, [search, stateFilter]);
+  useEffect(() => { setPageOffset(0); setStateFilter(''); setPaymentStateFilter(''); setTicketStateFilter(''); setOfferFilter(''); setFromDate(''); setToDate(''); }, [tab]);
+  useEffect(() => { setPageOffset(0); }, [fromDate, offerFilter, paymentStateFilter, search, stateFilter, ticketStateFilter, toDate]);
   useEffect(() => { if (connected) void load(); }, [connected, load]);
 
   const login = async () => {
@@ -285,7 +308,7 @@ export function Admin() {
     }
     storage.setAdminToken(tokenInput.trim());
     const res = await api<{ sub: string; role: string }>('/admin/me', { token: tokenInput.trim() });
-    if (res.ok) { setConnected(true); setTokenInput(''); }
+    if (res.ok) { setAdminRole(res.body?.role ?? null); setConnected(true); setTokenInput(''); }
     else { storage.setAdminToken(null); setAuthError(problemDetail(res.body)); }
   };
 
@@ -310,6 +333,28 @@ export function Admin() {
     const res = await api<AdminOrderDetail>(`/admin/orders/${id}`, { token });
     if (res.ok && res.body) setSelectedOrder(res.body);
     else setError(problemDetail(res.body));
+  };
+
+  const requestCorrection = async () => {
+    if (!selectedOrder || correctionPending || correctionReason.trim().length < 20) {
+      setCorrectionMessage('La raison doit contenir au moins 20 caractères.');
+      return;
+    }
+    setCorrectionPending(true);
+    setCorrectionMessage(null);
+    try {
+      const res = await api(`/admin/orders/${selectedOrder.id}/correction-requests`, {
+        method: 'POST', token,
+        headers: { 'Idempotency-Key': `admin-correction-${globalThis.crypto.randomUUID()}` },
+        body: { requested_action: correctionAction, reason: correctionReason.trim() },
+      });
+      if (res.ok) {
+        setCorrectionMessage('Demande enregistrée pour revue SUPER_ADMIN. Aucun état de paiement n’a été modifié.');
+        setCorrectionReason('');
+      } else setCorrectionMessage(problemDetail(res.body));
+    } finally {
+      setCorrectionPending(false);
+    }
   };
 
   const openActivity = (entity: string, entityId: string | null) => {
@@ -429,6 +474,15 @@ export function Admin() {
                 </select>
               </label>
             ) : null}
+            {tab === 'orders' ? (
+              <>
+                <label className="admin-filter"><span>Offre</span><select value={offerFilter} onChange={(e) => setOfferFilter(e.target.value)} aria-label="Filtrer par offre"><option value="">Toutes</option>{offers.map((offer) => <option key={offer.id} value={offer.id}>{offer.id}</option>)}</select></label>
+                <label className="admin-filter"><span>Paiement lié</span><select value={paymentStateFilter} onChange={(e) => setPaymentStateFilter(e.target.value)} aria-label="État paiement lié"><option value="">Tous</option>{ADMIN_FILTERS.payments?.values.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+                <label className="admin-filter"><span>Ticket lié</span><select value={ticketStateFilter} onChange={(e) => setTicketStateFilter(e.target.value)} aria-label="État ticket lié"><option value="">Tous</option>{ADMIN_FILTERS.tickets?.values.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+              </>
+            ) : null}
+            <label className="admin-filter"><span>Du</span><input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} aria-label="Date de début" /></label>
+            <label className="admin-filter"><span>Au</span><input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} aria-label="Date de fin" /></label>
             <button className="btn small" onClick={() => void load()}>Actualiser</button>
           </div>
         ) : null}
@@ -497,8 +551,25 @@ export function Admin() {
         <tbody>{pageItems(orders).map((o) => <tr key={o.id}><td><code>{o.id.slice(0, 8)}…</code></td><td>{o.phone}</td><td>{o.offer_id}</td><td>{formatFcfa(o.price_fcfa)}</td><td>{stateBadge(o.state)}</td><td>{stateBadge(o.payment_state)}</td><td>{stateBadge(o.ticket_state)}</td><td>{formatDateTime(o.created_at)}</td><td><button className="btn small" onClick={() => void openOrder(o.id)}>Détail</button></td></tr>)}</tbody>
       </AdminTable>{orders && orders.items.length === 0 ? <p className="hint">Aucune commande trouvée.</p> : null}<AdminPager page={orders} offset={pageOffset} onOffsetChange={setPageOffset} /></section> : null}
 
-      {selectedOrder ? <section className="card order-detail"><h2>Détail commande <code>{selectedOrder.id}</code></h2><div className="kv"><div><span>Client</span><strong>{selectedOrder.phone}</strong></div><div><span>Offre</span><strong>{selectedOrder.offer_id} — {formatFcfa(selectedOrder.price_fcfa)}</strong></div><div><span>Commande</span><strong>{stateBadge(selectedOrder.state)}</strong></div></div><div className="grid"><div><h3>Paiement lié</h3>{selectedOrder.payment ? <p><code>{selectedOrder.payment.id}</code> · {selectedOrder.payment.provider} · {formatFcfa(selectedOrder.payment.amount_fcfa)} · {stateBadge(selectedOrder.payment.state)}</p> : <p className="hint">Aucun paiement lié.</p>}</div><div><h3>Ticket lié</h3>{selectedOrder.ticket ? <p><code>{selectedOrder.ticket.id}</code> · DB {stateBadge(selectedOrder.ticket.db_state)} · routeur {stateBadge(selectedOrder.ticket.router_state)} · préfixe {selectedOrder.ticket.code_prefix_hint ?? '—'}</p> : <p className="hint">Aucun ticket lié.</p>}</div></div><button className="ghost" onClick={() => setSelectedOrder(null)}>Fermer le détail</button></section> : null}
-
+      {selectedOrder ? (
+        <section className="card order-detail">
+          <h2>Détail commande <code>{selectedOrder.id}</code></h2>
+          <div className="kv">
+            <div><span>Client</span><strong>{selectedOrder.phone}</strong></div>
+            <div><span>Offre</span><strong>{selectedOrder.offer_id} — {formatFcfa(selectedOrder.price_fcfa)}</strong></div>
+            <div><span>Commande</span><strong>{stateBadge(selectedOrder.state)}</strong></div>
+          </div>
+          <div className="grid">
+            <div><h3>Paiement lié</h3>{selectedOrder.payment ? <p><code>{selectedOrder.payment.id}</code> · {selectedOrder.payment.provider} · {formatFcfa(selectedOrder.payment.amount_fcfa)} · {stateBadge(selectedOrder.payment.state)}<br /><span className="hint">Référence provider : {selectedOrder.payment.provider_ref ?? '—'}</span></p> : <p className="hint">Aucun paiement lié.</p>}</div>
+            <div><h3>Ticket lié</h3>{selectedOrder.ticket ? <p><code>{selectedOrder.ticket.id}</code> · DB {stateBadge(selectedOrder.ticket.db_state)} · routeur {stateBadge(selectedOrder.ticket.router_state)} · préfixe {selectedOrder.ticket.code_prefix_hint ?? '—'}</p> : <p className="hint">Aucun ticket lié.</p>}</div>
+          </div>
+          <h3>Chronologie reconstruite</h3>
+          {selectedOrder.timeline.length === 0 ? <p className="hint">Aucun événement observable.</p> : <ol className="admin-timeline">{selectedOrder.timeline.map((event) => <li key={event.id}><span className="badge">{event.action}</span><span>{event.from_state ?? '—'} → {event.to_state ?? '—'}</span><small>{event.actor} · {formatDateTime(event.at)}</small></li>)}</ol>}
+          <p className="hint">Aucun secret de ticket, token, mot de passe, signature webhook ou credential MikroTik n’est affiché.</p>
+          {adminRole === 'SUPER_ADMIN' ? <div className="correction-box"><h3>Correction exceptionnelle</h3><p className="hint">Cette demande est auditée et ne modifie jamais directement le paiement. Une raison détaillée est obligatoire.</p><div className="admin-filter-row"><select value={correctionAction} onChange={(e) => setCorrectionAction(e.target.value as typeof correctionAction)} aria-label="Action de correction"><option value="REVIEW_PAYMENT">Revoir le paiement</option><option value="REVIEW_ALLOCATION">Revoir l’allocation</option><option value="REVIEW_DELIVERY">Revoir la délivrance</option></select><textarea value={correctionReason} onChange={(e) => setCorrectionReason(e.target.value)} minLength={20} maxLength={1000} placeholder="Raison opérationnelle (20 caractères minimum)" aria-label="Raison de la correction" /><button className="btn small" onClick={() => void requestCorrection()} disabled={correctionPending}>{correctionPending ? 'Enregistrement…' : 'Soumettre pour revue'}</button></div>{correctionMessage ? <p className="hint" role="status">{correctionMessage}</p> : null}</div> : null}
+          <button className="ghost" onClick={() => setSelectedOrder(null)}>Fermer le détail</button>
+        </section>
+      ) : null}
       {tab === 'payments' ? <section className="card"><h2>Paiements ({payments?.total ?? 0})</h2><AdminTable>
         <thead><tr><th>Paiement</th><th>Commande</th><th>Numéro</th><th>Montant</th><th>État</th><th>Provider</th><th>Créé</th></tr></thead>
         <tbody>{pageItems(payments).map((p) => <tr key={p.id}><td><code>{p.id.slice(0, 8)}…</code></td><td><code>{p.order_id.slice(0, 8)}…</code></td><td>{p.phone}</td><td>{formatFcfa(p.amount_fcfa)}</td><td>{stateBadge(p.state)}</td><td>{p.provider}</td><td>{formatDateTime(p.created_at)}</td></tr>)}</tbody>

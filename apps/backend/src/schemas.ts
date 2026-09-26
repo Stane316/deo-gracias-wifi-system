@@ -22,6 +22,20 @@ export const adminListQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
   search: z.string().trim().max(100).optional(),
   state: z.string().trim().max(40).optional(),
+  offer_id: z.string().trim().max(80).optional(),
+  payment_state: z.string().trim().max(40).optional(),
+  ticket_state: z.string().trim().max(40).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+}).strict().refine((query) => query.from == null || query.to == null || query.from <= query.to, {
+  message: 'from doit être antérieur ou égal à to',
+  path: ['from'],
+});
+
+/** IMP-31 — une demande de correction ne modifie jamais l'état du paiement. */
+export const adminOrderCorrectionBodySchema = z.object({
+  requested_action: z.enum(['REVIEW_PAYMENT', 'REVIEW_ALLOCATION', 'REVIEW_DELIVERY']),
+  reason: z.string().trim().min(20).max(1000),
 }).strict();
 
 export const adminIdParamsSchema = z.object({ id: z.string().uuid() }).strict();

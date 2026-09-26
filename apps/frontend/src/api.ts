@@ -107,9 +107,21 @@ export interface AdminPaymentSummary {
   created_at: string;
 }
 
+export interface AdminOrderTimelineEvent {
+  id: string;
+  entity: string;
+  entity_id: string;
+  action: string;
+  from_state: string | null;
+  to_state: string | null;
+  actor: string;
+  at: string;
+}
+
 export interface AdminOrderDetail extends AdminOrderSummary {
   payment: AdminPaymentSummary | null;
   ticket: AdminTicketSummary | null;
+  timeline: AdminOrderTimelineEvent[];
 }
 
 export interface AdminTicketSummary {
