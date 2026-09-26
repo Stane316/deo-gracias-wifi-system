@@ -2360,3 +2360,297 @@ describeDb('IMP-32 — tickets/lots/import sur Postgres réel (DATABASE_URL)', (
     expect((await pool32.query(`SELECT count(*)::int AS n FROM public.ticket_batches WHERE idempotency_key = 'itest-imp32-pg-dup'`)).rows[0]?.['n']).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// IMP-33 — Incidents & récupération (doc 09 §41-46, §101, §117) sur Postgres
+// réel : scénario C (paiement confirmé + stock épuisé → incident → stock →
+// retry → DELIVERED/RESOLVED), scénario D (sync BLOCKED → incident → resync
+// → PENDING, base uniquement), scénario A (flux nominal → aucun incident),
+// scénario E (lot PHYSICAL jamais sélectionné — garde IMP-32, citée).
+// ---------------------------------------------------------------------------
+describeDb('IMP-33 — incidents & récupération sur Postgres réel (DATABASE_URL)', () => {
+  const pool33 = new Pool({ connectionString: DATABASE_URL });
+  const repo33 = new PgRepo(pool33);
+  const WH_SECRET33 = 'wh_sandbox_imp33_pg';
+  const verifier33 = new FakeVerifier();
+  const ADMIN33 = { authorization: 'Bearer tok-imp33-admin' };
+  let app33: Awaited<ReturnType<typeof buildApp>>;
+  let plan24_33: string;
+  const syncOpIds33: string[] = [];
+  const batchIds33: string[] = [];
+
+  const cleanup33 = async (): Promise<void> => {
+    await pool33.query(
+      `DELETE FROM public.payment_events
+       WHERE provider_event_id LIKE 'fedapay:itest-imp33-pg:%'
+          OR payment_id IN (
+            SELECT p.id FROM public.payments p
+            JOIN public.orders o ON o.id = p.order_id
+            JOIN public.customers c ON c.id = o.customer_id
+            WHERE c.phone LIKE '019733%')`,
+    );
+    // Les incidents d'abord (avant leurs commandes), puis le reste en cascade logique.
+    await pool33.query(
+      `DELETE FROM public.incidents
+       WHERE detection_key = 'connector-offline'
+          OR order_id IN (
+            SELECT id FROM public.orders
+            WHERE customer_id IN (SELECT id FROM public.customers WHERE phone LIKE '019733%')
+               OR idempotency_key LIKE 'itest-imp33-pg-%')
+          OR (details->>'op_id') = ANY($1::text[])`,
+      [syncOpIds33],
+    );
+    await pool33.query(
+      `DELETE FROM public.payments WHERE order_id IN (
+         SELECT id FROM public.orders
+         WHERE customer_id IN (SELECT id FROM public.customers WHERE phone LIKE '019733%')
+            OR idempotency_key LIKE 'itest-imp33-pg-%')`,
+    );
+    await pool33.query(
+      `DELETE FROM public.tickets
+       WHERE order_id IN (SELECT id FROM public.orders
+            WHERE customer_id IN (SELECT id FROM public.customers WHERE phone LIKE '019733%'))
+          OR batch_id = ANY($1::uuid[])`,
+      [batchIds33],
+    );
+    await pool33.query(`DELETE FROM public.ticket_batches WHERE id = ANY($1::uuid[])`, [batchIds33]);
+    await pool33.query(
+      `DELETE FROM public.orders
+       WHERE customer_id IN (SELECT id FROM public.customers WHERE phone LIKE '019733%')
+          OR idempotency_key LIKE 'itest-imp33-pg-%'`,
+    );
+    await pool33.query(`DELETE FROM public.customers WHERE phone LIKE '019733%'`);
+    await pool33.query(`DELETE FROM public.mikrotik_sync WHERE id = ANY($1::uuid[])`, [syncOpIds33]);
+  };
+
+  const createOrder33 = async (key: string, phone: string) => {
+    const res = await app33.inject({
+      method: 'POST', url: '/orders',
+      headers: { 'idempotency-key': key },
+      payload: { offer_id: '24-HEURES', customer_phone: phone },
+    });
+    expect(res.statusCode).toBe(201);
+    const { id } = res.json() as { id: string };
+    const order = await repo33.getOrderById(id);
+    return { id, amount_fcfa: order?.planSnapshot['price_snapshot'] as number };
+  };
+
+  const pay33 = async (orderId: string) => {
+    const res = await app33.inject({ method: 'POST', url: `/orders/${orderId}/pay` });
+    expect(res.statusCode).toBe(202);
+    return res.json() as Record<string, unknown>;
+  };
+
+  const sendEvent33 = (eventId: string, ref: string, amount: number, paymentId: string) => {
+    const body = JSON.stringify({
+      id: eventId,
+      name: 'transaction.approved',
+      entity: {
+        reference: ref,
+        amount,
+        status: 'approved',
+        currency: { iso: 'XOF' },
+        custom_metadata: { payment_id: paymentId },
+      },
+    });
+    const header = generateTestHeaderString({ payload: body, secret: WH_SECRET33 });
+    return app33.inject({
+      method: 'POST', url: '/webhooks/fedapay',
+      headers: { 'content-type': 'application/json', 'x-fedapay-signature': header },
+      payload: body,
+    });
+  };
+
+  /** Webhook approved : paiement CONFIRMÉ + commande PAID (+ allocation si stock). */
+  const approveOrder33 = async (key: string, phone: string) => {
+    const order = await createOrder33(key, phone);
+    const p = await pay33(order.id);
+    const paymentId = p['payment_id'] as string;
+    const providerRef = p['provider_ref'] as string;
+    const res = await sendEvent33(`itest-imp33-pg:${randomUUID()}`, providerRef, order.amount_fcfa, paymentId);
+    expect(res.statusCode).toBe(200);
+    return { ...order, paymentId };
+  };
+
+  beforeAll(async () => {
+    verifier33.identities.set('tok-imp33-admin', { sub: 'sub-imp33-admin', phone: null, email: 'imp33@dg.bj', role: 'ADMIN' });
+    await parkMikmonStock(pool33); // le stock seedé 0010 ne doit pas être alloué ici
+    await cleanup33();
+    const plans = await pool33.query(`SELECT id FROM public.plans WHERE offer_id = '24-HEURES' AND active_to IS NULL LIMIT 1`);
+    plan24_33 = String(plans.rows[0]?.['id']);
+    app33 = await buildApp({
+      repo: repo33,
+      payment: { provider: new FakeProviderPg(), webhookSecret: WH_SECRET33 },
+      auth: { verifier: verifier33, rateLimits: { requestMax: 1000, verifyMax: 1000 } },
+    });
+  });
+
+  afterAll(async () => {
+    await cleanup33();
+    await unParkMikmonStock(pool33);
+    await app33.close();
+    await pool33.end();
+    syncOpIds33.length = 0;
+    batchIds33.length = 0;
+  });
+
+  it('C : PAID + stock épuisé => incident OPEN HIGH (fiche complète) ; stock => retry => DELIVERED + RESOLVED ; replay', async () => {
+    // Webhook approuvé, AUCUN ticket 24-HEURES disponible (mikmon parqué).
+    const order = await approveOrder33('itest-imp33-pg-c1', '0197330001');
+    const dbOrd = await pool33.query(`SELECT state FROM public.orders WHERE id = $1`, [order.id]);
+    expect(dbOrd.rows[0]?.['state']).toBe('PAID'); // le paiement CONFIRMÉ est préservé
+    const dbPay = await pool33.query(`SELECT state FROM public.payments WHERE id = $1`, [order.paymentId]);
+    expect(dbPay.rows[0]?.['state']).toBe('CONFIRMED');
+
+    const inc = await pool33.query(
+      `SELECT id, type, severity, state, order_id, payment_id, error, recommended_action
+       FROM public.incidents WHERE order_id = $1`, [order.id]);
+    expect(inc.rows).toHaveLength(1);
+    expect(inc.rows[0]).toMatchObject({
+      type: 'TICKET_ALLOCATION_ERROR', severity: 'HIGH', state: 'OPEN',
+      order_id: order.id, payment_id: order.paymentId,
+    });
+    expect(String(inc.rows[0]?.['error'])).toContain('Stock de tickets épuisé');
+    const incidentId = String(inc.rows[0]?.['id']);
+
+    // Fiche admin : contexte + historique (incident_created audité).
+    const detailRes = await app33.inject({ method: 'GET', url: `/admin/incidents/${incidentId}`, headers: ADMIN33 });
+    expect(detailRes.statusCode).toBe(200);
+    const detail = detailRes.json() as {
+      state: string; order: { phone: string; offer_id: string; state: string } | null;
+      payment: { id: string; state: string } | null;
+      history: Array<{ action: string }>;
+    };
+    expect(detail.order).toMatchObject({ phone: '0197330001', offer_id: '24-HEURES', state: 'PAID' });
+    expect(detail.payment?.state).toBe('CONFIRMED');
+    expect(detail.history.some((h) => h.action === 'incident_created')).toBe(true);
+
+    // Stock restauré => retry allocation (Idempotency-Key) : DELIVERED + RESOLVED.
+    const batch = await repo33.createBackendBatch({ offerId: '24-HEURES', quantity: 1 });
+    batchIds33.push(batch.batchId);
+    const retryKey = 'itest-imp33-retry-c1';
+    const retry = await app33.inject({
+      method: 'POST', url: `/admin/incidents/${incidentId}/retry`,
+      headers: { ...ADMIN33, 'content-type': 'application/json' },
+      payload: { reason: 'Stock importé après vérification du lot, retry allocation.', idempotency_key: retryKey },
+    });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toMatchObject({ state: 'RESOLVED', retry: { outcome: 'delivered' } });
+    expect((await pool33.query(`SELECT state FROM public.orders WHERE id = $1`, [order.id])).rows[0]?.['state']).toBe('DELIVERED');
+    const sold = await pool33.query(
+      `SELECT t.db_state FROM public.tickets t WHERE t.order_id = $1`, [order.id]);
+    expect(sold.rows[0]?.['db_state']).toBe('SOLD');
+    const incAfter = await pool33.query(
+      `SELECT state, closed_at, attempts, last_retry_key, ticket_id FROM public.incidents WHERE id = $1`, [incidentId]);
+    expect(incAfter.rows[0]).toMatchObject({ state: 'RESOLVED', attempts: 1 });
+    expect(incAfter.rows[0]?.['closed_at']).not.toBeNull();
+    expect(incAfter.rows[0]?.['ticket_id']).not.toBeNull();
+
+    // Idempotence du retry : rouvrir puis REJOUER la même clé => aucun second effet.
+    const reopen = await app33.inject({
+      method: 'POST', url: `/admin/incidents/${incidentId}/reopen`,
+      headers: { ...ADMIN33, 'content-type': 'application/json' },
+      payload: { reason: 'Contrôle qualité : vérification de la non-distribution.' },
+    });
+    expect(reopen.statusCode).toBe(200);
+    const replay = await app33.inject({
+      method: 'POST', url: `/admin/incidents/${incidentId}/retry`,
+      headers: { ...ADMIN33, 'content-type': 'application/json' },
+      payload: { reason: 'Rejeu identique de la clé de récupération (anti-replay).', idempotency_key: retryKey },
+    });
+    expect(replay.statusCode).toBe(200);
+    expect((replay.json() as { retry: { outcome: string } }).retry.outcome).toBe('replayed');
+    const incReplay = await pool33.query(`SELECT attempts, state FROM public.incidents WHERE id = $1`, [incidentId]);
+    expect(incReplay.rows[0]).toMatchObject({ attempts: 1, state: 'REOPENED' });
+    // Invariant 7 : une seule commande, un seul ticket SOLD (pas de double livraison).
+    const soldCount = await pool33.query(`SELECT count(*)::int AS n FROM public.tickets WHERE order_id = $1 AND db_state = 'SOLD'`, [order.id]);
+    expect(Number(soldCount.rows[0]?.['n'])).toBe(1);
+  });
+
+  it('D : op BLOCKED => incident MIKROTIK_SYNC_ERROR HIGH ; resync => ops PENDING (base uniquement) + RESOLVED', async () => {
+    const op = await pool33.query(
+      `INSERT INTO public.mikrotik_sync (operation, payload, state, locked_by, attempts)
+       VALUES ('create_ticket', '{"name":"dg-imp33"}'::jsonb, 'PROCESSING', 'itest-imp33-worker', 1)
+       RETURNING id`);
+    const opId = String(op.rows[0]?.['id']);
+    syncOpIds33.push(opId);
+
+    // Échec définitif (pas d'échéance de retry) => BLOCKED + incident de détection.
+    const outcome = await repo33.resolveSyncOp(opId, {
+      kind: 'failure', error: { code: 'router_timeout', message: 'routeur injoignable' }, nextRetryAt: null,
+    }, new Date());
+    expect(outcome).toMatchObject({ state: 'BLOCKED' });
+    const inc = await pool33.query(
+      `SELECT id, type, severity, state, detection_key FROM public.incidents WHERE detection_key = $1`,
+      [`sync-blocked:${opId}`]);
+    expect(inc.rows).toHaveLength(1);
+    expect(inc.rows[0]).toMatchObject({ type: 'MIKROTIK_SYNC_ERROR', severity: 'HIGH', state: 'OPEN' });
+    const incidentId = String(inc.rows[0]?.['id']);
+
+    // Resync via retry : requeue DB uniquement (zéro écriture routeur ici).
+    const retry = await app33.inject({
+      method: 'POST', url: `/admin/incidents/${incidentId}/retry`,
+      headers: { ...ADMIN33, 'content-type': 'application/json' },
+      payload: { reason: 'Resync demandé après vérification réseau du routeur.', idempotency_key: 'itest-imp33-resync-d1' },
+    });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toMatchObject({ state: 'RESOLVED', retry: { outcome: 'requeued' } });
+    const opAfter = await pool33.query(`SELECT state, attempts, next_retry_at, locked_by FROM public.mikrotik_sync WHERE id = $1`, [opId]);
+    expect(opAfter.rows[0]).toMatchObject({ state: 'PENDING', attempts: 0 });
+    expect(opAfter.rows[0]?.['next_retry_at']).toBeNull();
+    expect(opAfter.rows[0]?.['locked_by']).toBeNull();
+  });
+
+  it('A : flux nominal (stock présent) => DELIVERED, AUCUN incident ; E : lot PHYSICAL jamais sélectionné', async () => {
+    // A — stock présent AVANT le webhook : délivrance directe, pas d'incident.
+    const batch = await repo33.createBackendBatch({ offerId: '24-HEURES', quantity: 1 });
+    batchIds33.push(batch.batchId);
+    const order = await approveOrder33('itest-imp33-pg-a1', '0197330002');
+    expect((await pool33.query(`SELECT state FROM public.orders WHERE id = $1`, [order.id])).rows[0]?.['state']).toBe('DELIVERED');
+    const incA = await pool33.query(`SELECT count(*)::int AS n FROM public.incidents WHERE order_id = $1`, [order.id]);
+    expect(Number(incA.rows[0]?.['n'])).toBe(0);
+
+    // E — (doc 09 §117) un batch PHYSICAL n'est JAMAIS sélectionné pour une
+    // vente numérique (garde IMP-32, doc 09 §28) : no-stock, ticket intact.
+    const phys = await pool33.query(
+      `INSERT INTO public.ticket_batches (source, destination, quantity, notes)
+       VALUES ('backend', 'PHYSICAL', 1, 'itest-imp33-phys') RETURNING id`);
+    const physBatch = String(phys.rows[0]?.['id']);
+    batchIds33.push(physBatch);
+    await pool33.query(
+      `INSERT INTO public.tickets (batch_id, code_hash, code_prefix_hint, plan_id)
+       VALUES ($1, 'imp33-phys-hash', 'IM33', $2)`, [physBatch, plan24_33]);
+    const orderE = await approveOrder33('itest-imp33-pg-e1', '0197330003');
+    expect((await pool33.query(`SELECT state FROM public.orders WHERE id = $1`, [orderE.id])).rows[0]?.['state']).toBe('PAID');
+    const physRow = await pool33.query(`SELECT db_state, order_id FROM public.tickets WHERE batch_id = $1`, [physBatch]);
+    expect(physRow.rows[0]).toMatchObject({ db_state: 'AVAILABLE', order_id: null });
+    // L'échec d'allocation laisse un incident (scénario C) : la commande reste PAID.
+    const incE = await pool33.query(`SELECT count(*)::int AS n FROM public.incidents WHERE order_id = $1 AND type = 'TICKET_ALLOCATION_ERROR'`, [orderE.id]);
+    expect(Number(incE.rows[0]?.['n'])).toBe(1);
+  });
+
+  it('worker détection offline : OFFLINE => incident ; revenu => auto-résolution (system)', async () => {
+    const now = new Date();
+    // Heartbeat vieux de 6 min => OFFLINE (seuil 5 min).
+    await repo33.recordConnectorHeartbeat({ connectorId: 'itest-imp33-conn' });
+    await pool33.query(
+      `UPDATE public.connector_heartbeats SET last_seen_at = now() - interval '6 minutes' WHERE connector_id = $1`,
+      ['itest-imp33-conn']);
+    expect(await repo33.runConnectorOfflineDetection('system', now)).toEqual({ opened: 1, resolved: 0 });
+    const inc = await pool33.query(
+      `SELECT id, type, severity, state, connector_id FROM public.incidents WHERE detection_key = 'connector-offline'`);
+    expect(inc.rows).toHaveLength(1);
+    expect(inc.rows[0]).toMatchObject({ type: 'CONNECTOR_OFFLINE', severity: 'MEDIUM', state: 'OPEN' });
+
+    // Idempotence du worker.
+    expect(await repo33.runConnectorOfflineDetection('system', now)).toEqual({ opened: 0, resolved: 0 });
+
+    // Revenu en ligne (heartbeat récent) => auto-résolution, acteur system.
+    await repo33.recordConnectorHeartbeat({ connectorId: 'itest-imp33-conn' });
+    expect(await repo33.runConnectorOfflineDetection('system', new Date())).toEqual({ opened: 0, resolved: 1 });
+    const after = await pool33.query(`SELECT state, closed_at, close_reason FROM public.incidents WHERE detection_key = 'connector-offline'`);
+    expect(after.rows[0]?.['state']).toBe('RESOLVED');
+    expect(after.rows[0]?.['closed_at']).not.toBeNull();
+    expect(String(after.rows[0]?.['close_reason'])).toContain('en ligne');
+  });
+});

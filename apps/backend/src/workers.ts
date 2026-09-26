@@ -33,6 +33,7 @@ export const DEFAULT_INTERVALS = {
   sweepMs: 300_000,        // cron 5 min
   reconcileMs: 3_600_000,  // cron 1 h (simulation Phase 1)
   syncRequeueMs: 60_000,   // IMP-21 : verrous perdus de la file mikrotik_sync
+  connectorOfflineMs: 60_000, // IMP-33 : détection CONNECTOR_OFFLINE (doc 09 §117-D)
 } as const;
 
 /** IMP-21 — au-delà, un PROCESSING est considéré verrou perdu (D12). */
@@ -131,10 +132,23 @@ export async function runSyncRequeue(
   return repo.requeueStuckSyncOps(new Date(now.getTime() - stuckMs), now);
 }
 
+/**
+ * IMP-33 — détection idempotente du Connector hors ligne (doc 09 §117-D) :
+ * OFFLINE → incident CONNECTOR_OFFLINE ; revenu → auto-résolution (system).
+ */
+export async function runConnectorOfflineDetection(
+  repo: BackendRepo,
+  now: Date,
+): Promise<{ opened: number; resolved: number }> {
+  return repo.runConnectorOfflineDetection('system', now);
+}
+
 export interface WorkersTickReport extends ExpiryReport {
   swept: number;
   requeued: number;
   reconciliation: ReconciliationReport | null;
+  /** IMP-33 — incidents CONNECTOR_OFFLINE ouverts/résolus au dernier passage. */
+  connectorOffline: { opened: number; resolved: number };
 }
 
 export interface StartWorkersOptions {
@@ -162,31 +176,37 @@ export function startWorkers(repo: BackendRepo, opts: StartWorkersOptions = {}):
     const swept = await runWebhookSweeper(repo, opts.provider, when);
     const requeuedOps = await runSyncRequeue(repo, when);
     const reconciliation = await runReconciliationSim(repo);
-    return { ...expiry, swept, requeued: requeuedOps.length, reconciliation };
+    const connectorOffline = await runConnectorOfflineDetection(repo, when);
+    return { ...expiry, swept, requeued: requeuedOps.length, reconciliation, connectorOffline };
   };
 
   const timers: Array<ReturnType<typeof setInterval>> = [
     setInterval(() => {
       runOrderExpiry(repo, now())
-        .then((r) => opts.onTick?.({ ...r, swept: 0, requeued: 0, reconciliation: null }))
+        .then((r) => opts.onTick?.({ ...r, swept: 0, requeued: 0, reconciliation: null, connectorOffline: { opened: 0, resolved: 0 } }))
         .catch((err: unknown) => report(err, 'order-expiry'));
     }, intervals.orderExpiryMs),
     setInterval(() => {
       runWebhookSweeper(repo, opts.provider, now())
-        .then((swept) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept, requeued: 0, reconciliation: null }))
+        .then((swept) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept, requeued: 0, reconciliation: null, connectorOffline: { opened: 0, resolved: 0 } }))
         .catch((err: unknown) => report(err, 'webhook-sweeper'));
     }, intervals.sweepMs),
     setInterval(() => {
       runReconciliationSim(repo)
         .then((reconciliation) =>
-          opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, requeued: 0, reconciliation }))
+          opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, requeued: 0, reconciliation, connectorOffline: { opened: 0, resolved: 0 } }))
         .catch((err: unknown) => report(err, 'reconciler'));
     }, intervals.reconcileMs),
     setInterval(() => {
       runSyncRequeue(repo, now())
-        .then((ids) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, requeued: ids.length, reconciliation: null }))
+        .then((ids) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, requeued: ids.length, reconciliation: null, connectorOffline: { opened: 0, resolved: 0 } }))
         .catch((err: unknown) => report(err, 'sync-requeue'));
     }, intervals.syncRequeueMs),
+    setInterval(() => {
+      runConnectorOfflineDetection(repo, now())
+        .then((connectorOffline) => opts.onTick?.({ ordersExpired: [], paymentsExpired: 0, ticketsReleased: [], ticketsExpired: [], swept: 0, requeued: 0, reconciliation: null, connectorOffline }))
+        .catch((err: unknown) => report(err, 'connector-offline'));
+    }, intervals.connectorOfflineMs),
   ];
   for (const t of timers) t.unref?.();
 

@@ -56,6 +56,17 @@ export const adminOrderCorrectionBodySchema = z.object({
 
 export const adminIdParamsSchema = z.object({ id: z.string().uuid() }).strict();
 
+/** IMP-33 — action de cycle de vie incident : raison obligatoire, auditée (doc 09 §44-45). */
+export const incidentActionBodySchema = z.object({
+  reason: z.string().trim().min(20).max(1000),
+}).strict();
+
+/** IMP-33 — récupération (retry allocation / resync) : raison + Idempotency-Key (anti-rejeu). */
+export const incidentRetryBodySchema = z.object({
+  reason: z.string().trim().min(20).max(1000),
+  idempotency_key: z.string().trim().min(8).max(200),
+}).strict();
+
 /** IMP-27 — récupération des tickets limitée à la commande en cours.
  * Le token client reste obligatoire côté route ; order_id ne sert qu'à
  * corréler la délivrance, jamais à contourner l'autorisation. */

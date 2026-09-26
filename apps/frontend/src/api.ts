@@ -228,9 +228,42 @@ export interface AdminIncidentSummary {
   severity: string;
   state: string;
   details: Record<string, unknown>;
+  /** IMP-33 — références de la fiche (doc 09 §44). */
+  order_id: string | null;
+  payment_id: string | null;
+  ticket_id: string | null;
+  connector_id: string | null;
+  error: string | null;
+  recommended_action: string | null;
+  attempts: number;
+  last_attempt_at: string | null;
+  acknowledged_at: string | null;
   opened_at: string;
   closed_at: string | null;
   created_at: string;
+}
+
+/** IMP-33 — fiche incident complète (GET /admin/incidents/:id, doc 09 §44). */
+export interface AdminIncidentDetail {
+  id: string;
+  type: string;
+  severity: string;
+  state: string;
+  order: { id: string; phone: string | null; offer_id: string | null; state: string | null } | null;
+  payment: { id: string; state: string | null } | null;
+  ticket: { id: string; state: string | null } | null;
+  connector_id: string | null;
+  error: string | null;
+  recommended_action: string | null;
+  opened_at: string;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  closed_at: string | null;
+  close_reason: string | null;
+  last_attempt_at: string | null;
+  attempts: number;
+  reopened_count: number;
+  history: Array<{ action: string; actor: string; at: string; after: Record<string, unknown> | null }>;
 }
 
 export interface ReconciliationView {

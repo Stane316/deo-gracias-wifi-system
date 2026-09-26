@@ -38,6 +38,8 @@ import {
   createBatchBodySchema,
   createOrderBodySchema,
   idempotencyKeySchema,
+  incidentActionBodySchema,
+  incidentRetryBodySchema,
   normalizePhone,
   orderIdParamsSchema,
   phoneSchema,
@@ -1632,9 +1634,117 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     return {
       items: page.items.map((i) => ({
         id: i.id, type: i.type, severity: i.severity, state: i.state,
+        order_id: i.orderId, payment_id: i.paymentId, ticket_id: i.ticketId,
+        connector_id: i.connectorId, error: i.error, recommended_action: i.recommendedAction,
+        attempts: i.attempts, last_attempt_at: i.lastAttemptAt, acknowledged_at: i.acknowledgedAt,
         opened_at: i.openedAt, closed_at: i.closedAt, created_at: i.createdAt,
       })),
       total: page.total, limit: page.limit, offset: page.offset,
+    };
+  });
+
+  // IMP-33 — fiche incident (doc 09 §44) : contexte commande/paiement/ticket,
+  // erreur technique, tentatives, action recommandée, historique des transitions.
+  app.get('/admin/incidents/:id', async (req, reply) => {
+    if (!await requireAdminImp27(req, reply)) return;
+    const params = adminIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Identifiant invalide', 'L\'identifiant de l\'incident doit être un UUID.'));
+    }
+    const detail = await repo.getAdminIncident(params.data.id);
+    if (!detail) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Incident introuvable', 'Aucun incident ne correspond à cet identifiant.'));
+    }
+    return {
+      id: detail.id, type: detail.type, severity: detail.severity, state: detail.state,
+      order: detail.orderId
+        ? { id: detail.orderId, phone: detail.orderPhone, offer_id: detail.orderOfferId, state: detail.orderState }
+        : null,
+      payment: detail.paymentId ? { id: detail.paymentId, state: detail.paymentState } : null,
+      ticket: detail.ticketId ? { id: detail.ticketId, state: detail.ticketState } : null,
+      connector_id: detail.connectorId,
+      error: detail.error,
+      recommended_action: detail.recommendedAction,
+      opened_at: detail.openedAt,
+      acknowledged_at: detail.acknowledgedAt,
+      acknowledged_by: detail.acknowledgedBy,
+      closed_at: detail.closedAt,
+      close_reason: detail.closeReason,
+      last_attempt_at: detail.lastAttemptAt,
+      attempts: detail.attempts,
+      reopened_count: detail.reopenedCount,
+      history: detail.history.map((h) => ({ action: h.action, actor: h.actor, at: h.at, after: h.after })),
+    };
+  });
+
+  /** IMP-33 — transition de cycle de vie : raison obligatoire (20..1000), auditée. */
+  const incidentTransitionRoute = (
+    path: string,
+    action: 'acknowledge' | 'investigate' | 'resolve' | 'reopen',
+    run: (id: string, actor: string, reason: string) => Promise<import('./repo.js').AdminIncidentSummary | null>,
+  ): void => {
+    app.post(path, async (req, reply) => {
+      const identity = await requireAdminImp27(req, reply);
+      if (!identity) return;
+      const params = adminIdParamsSchema.safeParse(req.params);
+      const body = incidentActionBodySchema.safeParse(req.body);
+      if (!params.success || !body.success) {
+        return reply.status(400).type('application/problem+json')
+          .send(problem(400, 'Action invalide', 'UUID de l\'incident et raison détaillée (20 à 1000 caractères) sont obligatoires.'));
+      }
+      const existing = await repo.getAdminIncident(params.data.id);
+      if (!existing) {
+        return reply.status(404).type('application/problem+json')
+          .send(problem(404, 'Incident introuvable', 'Aucun incident ne correspond à cet identifiant.'));
+      }
+      const summary = await run(params.data.id, `admin:${identity.sub}`, body.data.reason);
+      if (!summary) {
+        return reply.status(409).type('application/problem+json')
+          .send(problem(409, 'Transition interdite', `L'action « ${action} » n'est pas possible depuis l'état « ${existing.state} » (doc 09 §43).`));
+      }
+      return { id: summary.id, state: summary.state, attempts: summary.attempts, opened_at: summary.openedAt, closed_at: summary.closedAt };
+    });
+  };
+
+  incidentTransitionRoute('/admin/incidents/:id/acknowledge', 'acknowledge', (id, actor, reason) => repo.acknowledgeIncident(id, actor, reason));
+  incidentTransitionRoute('/admin/incidents/:id/investigate', 'investigate', (id, actor, reason) => repo.investigateIncident(id, actor, reason));
+  incidentTransitionRoute('/admin/incidents/:id/resolve', 'resolve', (id, actor, reason) => repo.resolveIncident(id, actor, reason));
+  incidentTransitionRoute('/admin/incidents/:id/reopen', 'reopen', (id, actor, reason) => repo.reopenIncident(id, actor, reason));
+
+  /**
+   * IMP-33 — action de récupération (doc 09 §45-46) : Idempotency-Key obligatoire
+   * (anti-rejeu). Aucune action ne contourne les invariants : jamais de nouveau
+   * paiement (invariant 6), jamais d'écriture routeur ici (le resync est un
+   * requeue DB — le worker de sync traite ensuite).
+   */
+  app.post('/admin/incidents/:id/retry', async (req, reply) => {
+    const identity = await requireAdminImp27(req, reply);
+    if (!identity) return;
+    const params = adminIdParamsSchema.safeParse(req.params);
+    const body = incidentRetryBodySchema.safeParse(req.body);
+    if (!params.success || !body.success) {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Retry invalide', 'UUID de l\'incident, raison détaillée et Idempotency-Key sont obligatoires.'));
+    }
+    const existing = await repo.getAdminIncident(params.data.id);
+    if (!existing) {
+      return reply.status(404).type('application/problem+json')
+        .send(problem(404, 'Incident introuvable', 'Aucun incident ne correspond à cet identifiant.'));
+    }
+    const result = await repo.retryIncident(params.data.id, `admin:${identity.sub}`, body.data.reason, body.data.idempotency_key);
+    if (result.retry.outcome === 'not-retryable-state') {
+      return reply.status(409).type('application/problem+json')
+        .send(problem(409, 'Incident non retryable', 'Rouvrez d\'abord l\'incident (résolu/fermé).'));
+    }
+    if (result.retry.outcome === 'not-applicable') {
+      return reply.status(400).type('application/problem+json')
+        .send(problem(400, 'Type non retryable', `Le type « ${existing.type} » ne propose pas d'action de récupération automatique (résolution manuelle).`));
+    }
+    return {
+      id: result.summary.id, state: result.summary.state, attempts: result.summary.attempts,
+      retry: result.retry, closed_at: result.summary.closedAt,
     };
   });
 

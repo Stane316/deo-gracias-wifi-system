@@ -21,21 +21,24 @@ PREVIOUS:
 IMP-28 — FROZEN : code-first complet, dépendances externes différées, Walled Garden no-write
 
 CURRENT:
-IMP-32 — tickets, lots et import — code COMPLET (migration 0015, garde DIGITAL/PHYSICAL,
-import preview→validation→transaction idempotent, révélation admin auditée, compteurs de lots,
-stats par destination, réconciliation manifeste IMP-06) ; validation locale PostgreSQL 17
-(15 migrations, backend 230/230 dont 54 tests PG réel, 4 workspaces verts) ;
+IMP-33 — incidents et récupération — code COMPLET (migration 0016, 8 types d'incidents,
+priorités §42, cycle OPEN→ACKNOWLEDGED→INVESTIGATING→RESOLVED/CLOSED + REOPENED,
+fiche incident, détections idempotentes sync-bloquée/allocation-échouée/connector-offline,
+retry idempotent par clé (allocation, jamais de paiement), resync = requeue DB,
+scénarios A→E §117) ; validation locale PostgreSQL 17 (16 migrations, backend
+245/245 dont 58 tests PG réel, 4 workspaces verts) ;
 en attente du commit/push Stane et de la CI GitHub verte
 
 NEXT:
-CI GitHub de IMP-32, puis IMP-33 — incidents et récupération
+commit/push Stane de IMP-33, CI GitHub, puis IMP-34
 
 REMAINING:
-IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-33 → IMP-40
+IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-34 → IMP-40
 ```
 
 # JOURNAL DE PILOTAGE — 25/09/2026
 
+- **IMP-33 (27/09) — code complet + validé sur PostgreSQL 17** : migration `0016` (table `incidents` : 8 types du §41, `reopened_count`, garde de transitions + `CHECK closed_at` ; `state_transitions` : `REOPENED←RESOLVED` + requeue resync `mikrotik_sync FAILED/BLOCKED→PENDING`) ; 4 détections idempotentes par `detection_key` (`sync-blocked:<opId>` HIGH, `allocation-failed:<orderId>` HIGH, `connector-offline` MEDIUM avec résolution automatique au retour du Connector) ; fiche incident GET liste/detail (0 secret : jamais de clé/ticket/PAN) ; actions idempotentes ack/investigate/resolve/reopen (409 si inapplicable, 404 si absent, 400 si inconnu) ; **retry par clé d'idempotence** (outcomes `delivered|requeued|still-no-stock|illegal-order|replayed|not-applicable|not-retryable-state` ; jamais de nouveau paiement ; CONNECTOR_OFFLINE non retryable) ; **resync = requeue DB uniquement** (zéro écriture MikroTik) ; audit `incident_created`/`incident_transition`/`incident_retry` ; frontend : file incidents avec filtres + fiche + actions. Correction d'un **deadlock** PG prouvé par `pg_locks` (réécriture 3 phases : tentative sous verrou → action sans verrou → résolution conditionnelle). Validation locale : chaîne `down/up` OK (16 migrations), backend **245/245** dont 58 tests PostgreSQL réel (54 existants + 4 E2E PG IMP-33), 4 workspaces verts (321 tests), typecheck/build OK, gitleaks 0 leak (1 faux positif local `.env` non suivi). Rapport : `docs/IMP-33_IMPLEMENTATION.md`. En attente : commit/push Stane + CI GitHub.
 - **IMP-32 (26/09) — code complet + validé sur PostgreSQL 17** : migration `0015` (destination DIGITAL/PHYSICAL + idempotence d'import), garde d'allocation (jamais de PHYSICAL pour une vente digitale ; leçon `FOR UPDATE OF t` — un SKIP LOCKED sur JOIN verrouillait le lot), import preview→validation→transaction sans import partiel silencieux, révélation admin contrôlée et auditée (code jamais journalisé), 7 compteurs de lots, stats `by_destination` + réservations stales, réconciliation 660/660 du manifeste IMP-06. Validation locale : chaîne `down/up/smoke` OK (15 migrations), backend **230/230** dont 54 tests PostgreSQL réel (14 FakeRepo + 4 PG pour IMP-32), 4 workspaces verts (364 tests), typecheck OK. Rapport : `docs/IMP-32_IMPLEMENTATION.md`. En attente : commit/push Stane + CI GitHub.
 - **IMP-31 — CI #57 verte (commit `907917e`)** : correctif `3be4cce` validé sur GitHub ; le gate IMP-32 est levé.
 - **IMP-31 (26/09) — slice poussée, CI #56 rouge, corrections prêtes** : commit GitHub `3883533` validé par audit direct (fichiers identiques au workspace, à l'exception de contenus locaux en attente). Trois échecs CI reproduits et corrigés localement sur PostgreSQL 17 : GRANT manquant dans `0014` (RLS exit 3), paramètre SQL non typé dans le test PG (`42P18`), 5 faux positifs gitleaks (`// gitleaks:allow`). Validation locale : chaîne `up/smoke/down/up/smoke/rls/states` OK, 212/212 backend dont 50 tests PostgreSQL exécutés, typecheck/build OK, e2e 12/12, gitleaks 0 leak. En attente : push du correctif par Stane puis CI verte pour ouvrir IMP-32.
@@ -160,7 +163,7 @@ Statuts autorisés : `DONE`, `PARTIAL`, `NOT STARTED`, `BLOCKED`, `NEEDS VERIFIC
 | IMP-30 | PARTIAL — CODE-FIRST SLICE COMPLETE / EXTERNAL VALIDATION DEFERRED | `admin.ts`, `/admin/dashboard`, `/admin/system/status`, heartbeat Connector, activité récente, KPI/UI, `docs/IMP-30_IMPLEMENTATION.md` | Overview, ventes par plan, inventaire/alertes, activité et santé sync/Connector codés ; heartbeat réel, MikroTik et Supabase distant restent différés. |
 | IMP-31 | PARTIAL — CODE-FIRST SLICE COMPLETE / POSTGRES VALIDATION DEFERRED | `repo.ts`, `fake-repo.ts`, `app.ts`, `Admin.tsx`, migration `0014`, `docs/IMP-31_IMPLEMENTATION.md` | Listes filtrées/paginées, détail sans secrets, timeline reconstruisible, correction `SUPER_ADMIN` idempotente avec raison/audit et tests unitaires codés ; PostgreSQL/RLS/smoke restent non exécutés faute d’environnement. |
 | IMP-32 | DONE — CODE COMPLETE + POSTGRES VALIDATED | `migration 0015`, `stock-manifest.ts`, `repo.ts`, `fake-repo.ts`, `app.ts`, `Admin.tsx`, `admin-tickets.test.ts`, `docs/IMP-32_IMPLEMENTATION.md` | Garde DIGITAL/PHYSICAL à l'allocation, import preview→validation→transaction idempotent sans partiel silencieux, révélation admin auditée (code jamais journalisé), 7 compteurs de lots, stats par destination + réservations stales, réconciliation manifeste IMP-06 ; CI GitHub en attente du push. |
-| IMP-33 | PARTIAL | allocation admin, ack alertes, réconciliation et primitives d’audit | Primitives de récupération présentes ; centre d’incidents, fiche, retry/resync/resolve/reopen idempotents et scénario C complet manquent. |
+| IMP-33 | DONE — CODE COMPLETE + POSTGRES VALIDATED | `migration 0016`, `repo.ts`, `tickets.ts`, `fake-repo.ts`, `workers.ts`, `schemas.ts`, `app.ts`, `Admin.tsx`, `admin-incidents.test.ts`, `repo.pg.test.ts` (4 E2E PG), `docs/IMP-33_IMPLEMENTATION.md`, `docs/field-guides/GUIDE-12-INCIDENTS-RECOVERY.md` | 8 types d'incidents, détections idempotentes, fiche, actions idempotentes, retry par clé (jamais de paiement), resync = requeue DB, resolve/reopen, audit ; CI GitHub en attente du push. |
 | IMP-34 | NOT STARTED | catalogue read-only `/offers` et plans SQL existants | Aucun CRUD plan/paramètre métier/audit commercial dédié ni protection grille complète. |
 | IMP-35 | PARTIAL | CI typecheck/tests/PostgreSQL/gitleaks, RLS et state tests | Hardening partiel ; rapport `docs/testing/SECURITY_TEST_REPORT.md`, P1-P7/I1-I5/M1-M6/A1-A4/S1-S10, npm audit, CSP et tests de charge manquent. |
 | IMP-36 | BLOCKED | code FedaPay sandbox, `GUIDE-11` | Onboarding marchand, KYC, clés live, webhook live et paiement réel sont des actions Stane après IMP-35. |
@@ -262,7 +265,7 @@ aud itée et reclassée sans modifier la clôture indépendante d’IMP-27.
 | IMP-30 | Dashboard overview | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **overview, activité, inventaire et santé heartbeat codés ; CI/revue et externe différés** |
 | IMP-31 | Commandes / paiements admin | **PARTIAL — CODE-FIRST SLICE COMPLETE** | **timeline, filtres serveur, correction idempotente/auditée codés ; PostgreSQL/RLS/smoke différés** |
 | IMP-32 | Tickets / lots / import | **DONE** | **migration 0015, import, révélation, compteurs, réconciliation — PG validé** |
-| IMP-33 | Incidents / récupération | PARTIAL | FUTURE, primitives déjà présentes |
+| IMP-33 | Incidents / récupération | **DONE** | **migration 0016, détections, fiche, retry/resync/resolve/reopen idempotents — PG validé** |
 | IMP-34 | Plans / paramètres / audit | NOT STARTED | FUTURE |
 | IMP-35 | Hardening / GO-NO-GO | PARTIAL | FUTURE |
 | IMP-36 | FedaPay production | BLOCKED | FUTURE gated |

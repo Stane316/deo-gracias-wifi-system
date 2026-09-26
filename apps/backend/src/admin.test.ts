@@ -333,8 +333,11 @@ describe('IMP-27 — listes admin paginées et sans secrets', () => {
     await repo.createBackendBatch({ offerId: '5-HEURES', quantity: 1 });
     await repo.logAudit({ actor: 'admin:sub-admin', action: 'imp27_test', entity: 'orders', entityId: created.order.id });
     repo.adminIncidents.push({
-      id: 'incident-1', type: 'sync_blocked', severity: 'WARNING', state: 'OPEN', details: { message: 'test' },
+      id: 'incident-1', type: 'MIKROTIK_SYNC_ERROR', severity: 'HIGH', state: 'OPEN', details: { message: 'test' },
+      orderId: null, paymentId: null, ticketId: null, connectorId: null,
+      error: 'test', recommendedAction: 'test', attempts: 0, lastAttemptAt: null, acknowledgedAt: null,
       openedAt: new Date().toISOString(), closedAt: null, createdAt: new Date().toISOString(),
+      detectionKey: null, acknowledgedBy: null, lastRetryKey: null, reopenedCount: 0, closeReason: null, history: [],
     });
 
     const headers = { authorization: 'Bearer tok-admin' };

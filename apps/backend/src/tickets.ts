@@ -65,6 +65,25 @@ export async function allocateAndDeliver(
       entity: 'orders',
       entityId: orderId,
     });
+    // IMP-33 — scénario C (doc 09 §117) : incident TICKET_ALLOCATION_ERROR (HIGH),
+    // idempotent par commande (detection_key). La récupération passera par le
+    // retry d'allocation admin — JAMAIS par un nouveau paiement (invariant 6).
+    try {
+      const payment = await repo.getLatestPaymentByOrderId(orderId);
+      await repo.createIncident({
+        type: 'TICKET_ALLOCATION_ERROR',
+        severity: 'HIGH',
+        detectionKey: `allocation-failed:${orderId}`,
+        orderId,
+        paymentId: payment?.id ?? null,
+        error: 'Stock de tickets épuisé pour le plan de la commande (aucun ticket AVAILABLE)',
+        recommendedAction:
+          'Importer du stock (IMP-32) puis action « Retry allocation » — le paiement reste CONFIRMÉ, jamais de nouveau paiement.',
+      });
+    } catch (err) {
+      // La détection ne doit jamais casser le flux d'allocation.
+      log?.warn({ orderId, err: String(err) }, 'incident allocation : création impossible');
+    }
     log?.warn({ orderId }, 'allocation ticket : stock épuisé pour ce plan');
     return { status: 'no-stock', orderState: 'PAID' };
   }

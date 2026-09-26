@@ -4,10 +4,12 @@
  */
 import { OFFERS } from '@dg/shared';
 import { createHash, randomUUID } from 'node:crypto';
+import { computeConnectorState } from './admin.js';
 import type { AdminDashboardDbStats, AlertAckRecord, ConnectorHeartbeat } from './admin.js';
 import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs } from './ticketgen.js';
 import { sealCode } from './ticketvault.js';
 import { STOCK_MANIFEST_IMP06 } from './stock-manifest.js';
+import { allocateAndDeliver } from './tickets.js';
 import { DEFAULT_RESERVED_TTL_MS } from './workers.js';
 import type { CreatedBackendBatch } from './repo.js';
 import {
@@ -22,7 +24,10 @@ import type {
   AdminAuditSummary,
   AdminBatchSummary,
   AdminCorrectionRequest,
+  AdminIncidentDetail,
   AdminIncidentSummary,
+  CreateIncidentInput,
+  IncidentRetryOutcome,
   AdminOrderDetail,
   AdminOrderTimelineEvent,
   AdminListOptions,
@@ -39,6 +44,16 @@ import type {
   SyncResolveOutcome,
   TicketRecord,
 } from './repo.js';
+
+/** IMP-33 — incident en mémoire : summary + champs internes du cycle de vie. */
+type FakeIncident = AdminIncidentSummary & {
+  detectionKey: string | null;
+  acknowledgedBy: string | null;
+  lastRetryKey: string | null;
+  reopenedCount: number;
+  closeReason: string | null;
+  history: Array<{ id: string; action: string; actor: string; at: string; after: Record<string, unknown> | null }>;
+};
 
 export class FakeRepo implements BackendRepo {
   pingFails = false;
@@ -294,6 +309,12 @@ export class FakeRepo implements BackendRepo {
   async getPaymentByProviderRef(providerRef: string): Promise<PaymentRecord | null> {
     return [...this.payments.values()].find((p) => p.providerRef === providerRef) ?? null;
   }
+  async getLatestPaymentByOrderId(orderId: string): Promise<{ id: string; state: string } | null> {
+    const found = [...this.payments.values()]
+      .filter((p) => p.orderId === orderId)
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+    return found ? { id: found.id, state: found.state } : null;
+  }
 
   async insertPaymentEvent(entry: {
     paymentId: string | null;
@@ -330,7 +351,7 @@ export class FakeRepo implements BackendRepo {
     return 'failed';
   }
 
-  audits: Array<{ actor: string; action: string; entity: string; entityId?: string | null; after?: Record<string, unknown> }> = [];
+  audits: Array<{ actor: string; action: string; entity: string; entityId?: string | null; after?: Record<string, unknown>; at?: string }> = [];
   correctionRequests = new Map<string, AdminCorrectionRequest>();
   async logAudit(entry: {
     actor: string;
@@ -477,7 +498,9 @@ export class FakeRepo implements BackendRepo {
       this.tickets.set(spec.routerName, {
         id: spec.routerName,
         batchId: batch.batchId,
-        planId: plan.planId,
+        // Parité createOrder : l'allocation joint tickets.plan_id = orders.plan_id,
+        // qui est le plan getOrCreatePlanId(offer) (pas l'UUID « plan-N » des plans actifs).
+        planId: this.getOrCreatePlanId(input.offerId),
         dbState: 'AVAILABLE',
         routerState: 'UNUSED',
         orderId: null,
@@ -567,7 +590,17 @@ export class FakeRepo implements BackendRepo {
     op.nextRetryAt = outcome.nextRetryAt;
     op.lockedBy = null;
     op.updatedAt = new Date();
-    return { state: outcome.nextRetryAt == null ? 'BLOCKED' : 'RETRY', attempts: op.attempts };
+    if (op.state === 'BLOCKED') {
+      // IMP-33 — sync bloquée → incident MIKROTIK_SYNC_ERROR (parité PgRepo, doc 09 §117-D).
+      await this.createIncident({
+        type: 'MIKROTIK_SYNC_ERROR',
+        severity: 'HIGH',
+        detectionKey: `sync-blocked:${op.id}`,
+        error: `Opération de synchronisation bloquée : ${outcome.error.code} — ${outcome.error.message}`,
+        recommendedAction: 'Vérifier le Connector (réseau, credentials routeur) puis action « Retry / Resync » (requeue uniquement).',
+      });
+    }
+    return { state: op.state, attempts: op.attempts };
   }
   /** IMP-22 — empreintes legacy injectables par les tests (le fake n'a pas de lots Mikmon). */
   legacyCodeHashes: string[] = [];
@@ -1089,21 +1122,268 @@ export class FakeRepo implements BackendRepo {
     return this.pageAdmin(filtered, options);
   }
 
-  adminIncidents: AdminIncidentSummary[] = [];
-  async listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>> {
-    const filtered = this.adminIncidents.filter((row) =>
-      ((options.state ?? '') === '' || row.state === options.state) &&
-      (!options.from || new Date(row.openedAt) >= options.from) &&
-      (!options.to || new Date(row.openedAt) < options.to) &&
-      this.adminMatches(options.search ?? '', [row.id, row.type, row.severity]),
-    ).map((row) => ({
-      ...row,
+  // ─── IMP-33 — incidents & récupération (parité avec le PgRepo) ───
+
+  adminIncidents: FakeIncident[] = [];
+
+  private incidentFromRow(r: FakeIncident): AdminIncidentSummary {
+    return {
+      id: r.id, type: r.type, severity: r.severity, state: r.state, details: r.details,
+      orderId: r.orderId, paymentId: r.paymentId, ticketId: r.ticketId, connectorId: r.connectorId,
+      error: r.error, recommendedAction: r.recommendedAction, attempts: r.attempts,
+      lastAttemptAt: r.lastAttemptAt, acknowledgedAt: r.acknowledgedAt,
+      openedAt: r.openedAt, closedAt: r.closedAt, createdAt: r.createdAt,
+    };
+  }
+  private incidentAudit(entityId: string, action: string, actor: string, after: Record<string, unknown>): void {
+    this.audits.push({ actor, action, entity: 'incidents', entityId, after, at: new Date().toISOString() });
+  }
+  private async transitionIncident(
+    inc: FakeIncident,
+    actor: string,
+    reason: string,
+    toState: FakeIncident['state'],
+    fromStates: FakeIncident['state'][],
+    opts: { setAck?: boolean; setClose?: boolean; bumpReopen?: boolean } = {},
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    inc.state = toState;
+    if (opts.setAck && inc.acknowledgedAt == null) inc.acknowledgedAt = now;
+    if (opts.setAck) inc.acknowledgedBy = actor;
+    if (opts.setClose) {
+      inc.closedAt = now;
+      inc.closeReason = reason;
+    }
+    if (opts.bumpReopen) inc.reopenedCount += 1;
+    this.incidentAudit(inc.id, 'incident_transition', actor, { to: toState, reason });
+  }
+
+  async createIncident(input: CreateIncidentInput): Promise<AdminIncidentSummary> {
+    if (input.detectionKey) {
+      const existing = this.adminIncidents.find((r) => r.detectionKey === input.detectionKey);
+      if (existing) return this.incidentFromRow(existing);
+    }
+    const now = new Date().toISOString();
+    const inc: FakeIncident = {
+      id: randomUUID(),
+      type: input.type,
+      severity: input.severity,
+      state: 'OPEN',
       details: {
-        code: typeof row.details['code'] === 'string' ? row.details['code'] : '',
-        message: typeof row.details['message'] === 'string' ? row.details['message'] : '',
-        source: typeof row.details['source'] === 'string' ? row.details['source'] : '',
+        code: input.detectionKey ? 'auto' : 'manual',
+        message: input.error ?? '',
+        source: input.detectionKey ? 'detection' : 'admin',
       },
-    }));
+      detectionKey: input.detectionKey ?? null,
+      orderId: input.orderId ?? null,
+      paymentId: input.paymentId ?? null,
+      ticketId: input.ticketId ?? null,
+      connectorId: input.connectorId ?? null,
+      error: input.error ?? null,
+      recommendedAction: input.recommendedAction ?? null,
+      acknowledgedAt: null,
+      acknowledgedBy: null,
+      lastAttemptAt: null,
+      attempts: 0,
+      reopenedCount: 0,
+      closeReason: null,
+      lastRetryKey: null,
+      openedAt: now,
+      closedAt: null,
+      createdAt: now,
+      history: [],
+    };
+    this.adminIncidents.unshift(inc);
+    const actor = input.actor ?? 'system';
+    this.incidentAudit(inc.id, 'incident_created', actor, {
+      type: input.type, severity: input.severity, orderId: input.orderId ?? null,
+    });
+    return this.incidentFromRow(inc);
+  }
+
+  async getAdminIncident(id: string): Promise<AdminIncidentDetail | null> {
+    const inc = this.adminIncidents.find((r) => r.id === id);
+    if (!inc) return null;
+    const order = inc.orderId ? this.orders.get(inc.orderId) : undefined;
+    const payment = inc.paymentId ? this.payments.get(inc.paymentId) : undefined;
+    const ticket = inc.ticketId ? this.tickets.get(inc.ticketId) : undefined;
+    const customer = order ? this.getCustomerById(order.customerId) : null;
+    // planIds : Map<offerId, planId> (getOrCreatePlanId) — résolution inverse.
+    const offerId = order ? [...this.planIds.entries()].find(([, pid]) => pid === order.planId)?.[0] : undefined;
+    // Historique = audits de l'incident (parité PG : audit_logs est la source).
+    const history = this.audits
+      .filter((a) => a.entity === 'incidents' && a.entityId === inc.id)
+      .map((a, index) => ({
+        id: `fake-incident-audit-${index + 1}`,
+        action: a.action,
+        actor: a.actor,
+        at: a.at ?? new Date().toISOString(),
+        after: a.after ?? null,
+      }));
+    return {
+      ...this.incidentFromRow(inc),
+      orderPhone: (await customer)?.phone ?? null,
+      orderOfferId: offerId ?? null,
+      orderState: order?.state ?? null,
+      paymentState: payment?.state ?? null,
+      ticketState: ticket?.dbState ?? null,
+      acknowledgedBy: inc.acknowledgedBy,
+      closeReason: inc.closeReason,
+      reopenedCount: inc.reopenedCount,
+      history,
+    };
+  }
+
+  private async runFakeIncidentTransition(
+    id: string,
+    actor: string,
+    reason: string,
+    toState: FakeIncident['state'],
+    fromStates: FakeIncident['state'][],
+    opts: { setAck?: boolean; setClose?: boolean; bumpReopen?: boolean } = {},
+  ): Promise<AdminIncidentSummary | null> {
+    const inc = this.adminIncidents.find((r) => r.id === id);
+    if (!inc) return null;
+    if (inc.state === toState) return this.incidentFromRow(inc);
+    if (!fromStates.includes(inc.state)) return null;
+    await this.transitionIncident(inc, actor, reason, toState, fromStates, opts);
+    return this.incidentFromRow(inc);
+  }
+
+  async acknowledgeIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runFakeIncidentTransition(id, actor, reason, 'ACKNOWLEDGED', ['OPEN', 'REOPENED'], { setAck: true });
+  }
+
+  async investigateIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runFakeIncidentTransition(id, actor, reason, 'INVESTIGATING', ['OPEN', 'ACKNOWLEDGED', 'REOPENED']);
+  }
+
+  async resolveIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runFakeIncidentTransition(
+      id, actor, reason, 'RESOLVED',
+      ['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'REOPENED'],
+      { setClose: true },
+    );
+  }
+
+  async reopenIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runFakeIncidentTransition(id, actor, reason, 'REOPENED', ['RESOLVED', 'CLOSED'], { bumpReopen: true });
+  }
+
+  async retryIncident(
+    id: string,
+    actor: string,
+    reason: string,
+    idempotencyKey: string,
+  ): Promise<{ summary: AdminIncidentSummary; retry: IncidentRetryOutcome }> {
+    const inc = this.adminIncidents.find((r) => r.id === id);
+    if (!inc) throw new Error('incident introuvable pour retry');
+    const summary = () => this.incidentFromRow(inc);
+    if (inc.lastRetryKey != null && inc.lastRetryKey === idempotencyKey) {
+      return { summary: summary(), retry: { outcome: 'replayed', state: inc.state } };
+    }
+    if (inc.state === 'RESOLVED' || inc.state === 'CLOSED') {
+      return { summary: summary(), retry: { outcome: 'not-retryable-state' } };
+    }
+    if (inc.type !== 'TICKET_ALLOCATION_ERROR' && inc.type !== 'MIKROTIK_SYNC_ERROR') {
+      return { summary: summary(), retry: { outcome: 'not-applicable' } };
+    }
+    inc.lastRetryKey = idempotencyKey;
+    inc.lastAttemptAt = new Date().toISOString();
+    inc.attempts += 1;
+
+    if (inc.type === 'MIKROTIK_SYNC_ERROR') {
+      // Resync : requeue DB uniquement — aucune écriture routeur ici (invariant IMP-28).
+      let requeued = 0;
+      for (const op of this.syncOps) {
+        if (op.state === 'FAILED' || op.state === 'BLOCKED') {
+          op.state = 'PENDING';
+          op.attempts = 0;
+          op.nextRetryAt = null;
+          op.lockedBy = null;
+          op.updatedAt = new Date();
+          requeued += 1;
+        }
+      }
+      inc.state = 'RESOLVED';
+      inc.closedAt = new Date().toISOString();
+      inc.closeReason = reason;
+      this.incidentAudit(inc.id, 'incident_retry', actor, { result: 'requeued', reason, requeuedOps: requeued, to: 'RESOLVED', idempotencyKey });
+      return { summary: summary(), retry: { outcome: 'requeued', state: inc.state } };
+    }
+
+    // TICKET_ALLOCATION_ERROR : re-joue la machine d'allocation complète (idempotente).
+    if (!inc.orderId) {
+      this.incidentAudit(inc.id, 'incident_retry', actor, { result: 'illegal-order', reason, idempotencyKey });
+      return { summary: summary(), retry: { outcome: 'illegal-order', state: inc.state } };
+    }
+    const outcome = await allocateAndDeliver(this, inc.orderId, {
+      warn: (obj, msg) => console.warn('[incident-retry-fake]', msg, obj),
+    });
+    if (outcome.status === 'delivered' || outcome.status === 'already-delivered') {
+      inc.state = 'RESOLVED';
+      inc.closedAt = new Date().toISOString();
+      inc.closeReason = reason;
+      if (outcome.ticketId) inc.ticketId = outcome.ticketId;
+      this.incidentAudit(inc.id, 'incident_retry', actor, { result: 'delivered', reason, ticketId: outcome.ticketId, to: 'RESOLVED', idempotencyKey });
+      return { summary: summary(), retry: { outcome: 'delivered', state: inc.state } };
+    }
+    if (outcome.status === 'no-stock') {
+      this.incidentAudit(inc.id, 'incident_retry', actor, { result: 'still-no-stock', reason, idempotencyKey });
+      return { summary: summary(), retry: { outcome: 'still-no-stock', state: inc.state } };
+    }
+    this.incidentAudit(inc.id, 'incident_retry', actor, { result: 'illegal-order', reason, idempotencyKey });
+    return { summary: summary(), retry: { outcome: 'illegal-order', state: inc.state } };
+  }
+
+  async runConnectorOfflineDetection(actor: string, now: Date): Promise<{ opened: number; resolved: number }> {
+    const state = computeConnectorState(this.connectorHeartbeat, now);
+    if (state === 'OFFLINE') {
+      const exists = this.adminIncidents.some((r) => r.detectionKey === 'connector-offline');
+      await this.createIncident({
+        type: 'CONNECTOR_OFFLINE',
+        severity: 'MEDIUM',
+        detectionKey: 'connector-offline',
+        connectorId: this.connectorHeartbeat?.connectorId ?? null,
+        error: 'Absence de heartbeat du Connector (seuil 5 min)',
+        recommendedAction: 'Vérifier le routeur et le service Connector (heartbeat toutes les 30 s)',
+        actor,
+      });
+      return { opened: exists ? 0 : 1, resolved: 0 };
+    }
+    if (state === 'ONLINE' || state === 'UNKNOWN') {
+      let resolved = 0;
+      for (const inc of this.adminIncidents) {
+        if (inc.type === 'CONNECTOR_OFFLINE' && inc.detectionKey === 'connector-offline'
+          && (inc.state === 'OPEN' || inc.state === 'ACKNOWLEDGED' || inc.state === 'REOPENED')) {
+          await this.transitionIncident(
+            inc, actor, 'Connector de nouveau en ligne (détection)', 'RESOLVED',
+            ['OPEN', 'ACKNOWLEDGED', 'REOPENED'], { setClose: true },
+          );
+          resolved += 1;
+        }
+      }
+      return { opened: 0, resolved };
+    }
+    return { opened: 0, resolved: 0 };
+  }
+
+  async listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>> {
+    const filtered = this.adminIncidents
+      .filter((row) =>
+        ((options.state ?? '') === '' || row.state === options.state) &&
+        (!options.from || new Date(row.openedAt) >= options.from) &&
+        (!options.to || new Date(row.openedAt) < options.to) &&
+        this.adminMatches(options.search ?? '', [row.id, row.type, row.severity, row.error]),
+      )
+      .map((row) => ({
+        ...this.incidentFromRow(row),
+        details: {
+          code: typeof row.details['code'] === 'string' ? row.details['code'] : '',
+          message: typeof row.details['message'] === 'string' ? row.details['message'] : '',
+          source: typeof row.details['source'] === 'string' ? row.details['source'] : '',
+        },
+      }));
     return this.pageAdmin(filtered, options);
   }
 

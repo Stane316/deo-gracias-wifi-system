@@ -3,15 +3,17 @@
  * L'interface BackendRepo permet des tests unitaires sans base (fake en mémoire)
  * et des tests d'intégration réels (PgRepo sur Postgres éphémère CI / sandbox).
  */
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
 import { sealCode } from './ticketvault.js';
+import { computeConnectorState } from './admin.js';
 import type {
   AdminActivityEvent,
   AdminDashboardDbStats,
   AlertAckRecord,
   ConnectorHeartbeat,
 } from './admin.js';
+import { allocateAndDeliver } from './tickets.js';
 import { FIRST_BACKEND_BATCH_SEQ, generateTicketSpecs, type GeneratedTicketSpec } from './ticketgen.js';
 import { STOCK_MANIFEST_IMP06 } from './stock-manifest.js';
 import { DEFAULT_RESERVED_TTL_MS } from './workers.js';
@@ -186,14 +188,93 @@ export interface AdminAuditSummary {
 
 export interface AdminIncidentSummary {
   id: string;
-  type: string;
-  severity: string;
-  state: string;
+  type: IncidentType;
+  severity: IncidentSeverity;
+  state: IncidentState;
   details: Record<string, unknown>;
+  /** IMP-33 — références de la fiche incident (doc 09 §44). */
+  orderId: string | null;
+  paymentId: string | null;
+  ticketId: string | null;
+  connectorId: string | null;
+  error: string | null;
+  recommendedAction: string | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+  acknowledgedAt: string | null;
   openedAt: string;
   closedAt: string | null;
   createdAt: string;
 }
+
+/** IMP-33 — types de l'incidentaire (doc 09 §41-42). */
+export type IncidentType =
+  | 'PAYMENT_CONFIRMATION_ERROR'
+  | 'TICKET_ALLOCATION_ERROR'
+  | 'TICKET_DELIVERY_ERROR'
+  | 'MIKROTIK_SYNC_ERROR'
+  | 'CONNECTOR_OFFLINE'
+  | 'WEBHOOK_ERROR'
+  | 'INVENTORY_ERROR'
+  | 'SYSTEM_ERROR';
+export type IncidentSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+export type IncidentState = 'OPEN' | 'ACKNOWLEDGED' | 'INVESTIGATING' | 'RESOLVED' | 'REOPENED' | 'CLOSED';
+
+/** IMP-33 — création idempotente (un événement = un incident, doc 09 §101). */
+export interface CreateIncidentInput {
+  type: IncidentType;
+  severity: IncidentSeverity;
+  /** Détection idempotente : ex. `allocation-failed:<orderId>`. */
+  detectionKey?: string;
+  orderId?: string | null;
+  paymentId?: string | null;
+  ticketId?: string | null;
+  connectorId?: string | null;
+  /** Message technique sûr — JAMAIS de secret. */
+  error?: string | null;
+  recommendedAction?: string | null;
+  /** Défault 'system' ; les actions admin passent par les méthodes dédiées. */
+  actor?: string;
+}
+
+/** IMP-33 — fiche incident complète (doc 09 §44) + historique reconstruit. */
+export interface AdminIncidentDetail {
+  id: string;
+  type: IncidentType;
+  severity: IncidentSeverity;
+  state: IncidentState;
+  orderId: string | null;
+  orderPhone: string | null;
+  orderOfferId: string | null;
+  orderState: string | null;
+  paymentId: string | null;
+  paymentState: string | null;
+  ticketId: string | null;
+  ticketState: string | null;
+  connectorId: string | null;
+  error: string | null;
+  recommendedAction: string | null;
+  openedAt: string;
+  acknowledgedAt: string | null;
+  acknowledgedBy: string | null;
+  closedAt: string | null;
+  closeReason: string | null;
+  lastAttemptAt: string | null;
+  attempts: number;
+  reopenedCount: number;
+  /** Historique = transitions auditées (audit_logs insert-only, pattern IMP-31). */
+  history: Array<{ id: string; action: string; actor: string; at: string; after: Record<string, unknown> | null }>;
+}
+
+/** IMP-33 — résultat du retry de récupération (doc 09 §45-46). */
+export type IncidentRetryOutcome =
+  | { outcome: 'delivered'; state: IncidentState }               // allocation re-tentée avec succès
+  | { outcome: 'requeued'; state: IncidentState }                // resync : opérations repassées PENDING
+  | { outcome: 'still-no-stock'; state: IncidentState }          // stock toujours indisponible : incident ouvert
+  | { outcome: 'illegal-order'; state: IncidentState }           // commande non allouable (état inattendu)
+  | { outcome: 'replayed'; state: IncidentState }                // rejeu idempotent : aucun effet
+  | { outcome: 'not-applicable' }                                // type d'incident non retryable
+  | { outcome: 'not-retryable-state' };                          // incident résolu/fermé (à rouvrir)
 
 /** IMP-32 — format d'un code ticket (contrat Mikmon §3.4, seed 0010) : 8 caractères [0-9a-z]. */
 export const TICKET_CODE_FORMAT = /^[0-9a-z]{8}$/;
@@ -280,6 +361,8 @@ export interface BackendRepo {
   getLatestPaymentForOrder(orderId: string): Promise<PaymentRecord | null>;
   getOpenPaymentForOrder(orderId: string): Promise<PaymentRecord | null>;
   getPaymentByProviderRef(providerRef: string): Promise<PaymentRecord | null>;
+  /** IMP-33 — paiement le plus récent d'une commande (fiche incident, doc 09 §44). */
+  getLatestPaymentByOrderId(orderId: string): Promise<{ id: string; state: string } | null>;
   /** Insert-only ; false = déjà présent (idempotence doc 06 §20-21). */
   insertPaymentEvent(entry: {
     paymentId: string | null;
@@ -469,6 +552,33 @@ export interface BackendRepo {
   getTicketReconciliation(): Promise<TicketReconciliation>;
   listAdminAuditLogs(options: AdminListOptions): Promise<AdminPage<AdminAuditSummary>>;
   listAdminIncidents(options: AdminListOptions): Promise<AdminPage<AdminIncidentSummary>>;
+  /** IMP-33 — crée un incident si la détection n'a jamais été vue ; sinon renvoie l'incident existant (doc 09 §101, §117-C/D). */
+  createIncident(input: CreateIncidentInput): Promise<AdminIncidentSummary>;
+  /** IMP-33 — fiche complète (doc 09 §44) ou null. */
+  getAdminIncident(id: string): Promise<AdminIncidentDetail | null>;
+  /** IMP-33 — ACKNOWLEDGED ; `null` = transition interdite (garde 0016). */
+  acknowledgeIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null>;
+  /** IMP-33 — INVESTIGATING. */
+  investigateIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null>;
+  /**
+   * IMP-33 — action de récupération sous Idempotency-Key (doc 09 §45-46) :
+   *  - TICKET_ALLOCATION_ERROR : re-joue `allocateAndDeliver(order)` — succès → RESOLVED ;
+   *    no-stock → incident ouvert (doc 09 §46), jamais de nouveau paiement ;
+   *  - MIKROTIK_SYNC_ERROR : resync = opérations du Connector repassées PENDING
+   *    (DB uniquement — JAMAIS d'écriture routeur ici), incident RESOLVED ;
+   *  - autres types : `not-applicable` ; rejeu même clé : aucun effet, `replayed`.
+   */
+  retryIncident(id: string, actor: string, reason: string, idempotencyKey: string): Promise<{ summary: AdminIncidentSummary; retry: IncidentRetryOutcome }>;
+  /** IMP-33 — RESOLVED (idempotent) ; `null` = transition interdite. */
+  resolveIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null>;
+  /** IMP-33 — REOPENED (+1 compteur) si résolu/fermé, sinon null (idempotent sinon). */
+  reopenIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null>;
+  /**
+   * IMP-33 — détection worker idempotente (doc 09 §117-D) :
+   *  - Connector OFFLINE → incident CONNECTOR_OFFLINE ouvert ;
+   *  - Connector revenu → résout les CONNECTOR_OFFLINE ouverts (acteur system).
+   */
+  runConnectorOfflineDetection(actor: string, now: Date): Promise<{ opened: number; resolved: number }>;
   /** IMP-17 — reconnaissance d'alerte, atomique et idempotente (doc 09 §4.E). */
   acknowledgeAlert(id: string): Promise<AlertAckRecord | null>;
 
@@ -959,6 +1069,18 @@ export class PgRepo implements BackendRepo {
     return row ? mapPayment(row) : null;
   }
 
+  async getLatestPaymentByOrderId(orderId: string): Promise<{ id: string; state: string } | null> {
+    const res = await this.pool.query(
+      `SELECT id, state FROM public.payments
+       WHERE order_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [orderId],
+    );
+    const row = res.rows[0];
+    return row ? { id: String(row['id']), state: String(row['state']) } : null;
+  }
+
   async insertPaymentEvent(entry: {
     paymentId: string | null;
     providerEventId: string;
@@ -1111,6 +1233,34 @@ export class PgRepo implements BackendRepo {
       );
       const mrow = moved.rows[0];
       if (!mrow) return { state: 'illegal' as const, attempts: Number(frow['attempts']) };
+      if (mrow['state'] === 'BLOCKED') {
+        // IMP-33 — sync bloquée → incident MIKROTIK_SYNC_ERROR (doc 09 §117-D),
+        // idempotent par op (detection_key). L'erreur conservée est le code/message
+        // technique SÛR fourni par l'appelant — jamais de secret.
+        const ins = await q(
+          `INSERT INTO public.incidents
+             (type, severity, state, detection_key, connector_id, error, recommended_action, details)
+           VALUES ('MIKROTIK_SYNC_ERROR', 'HIGH', 'OPEN', $1, NULL, $2, $3,
+                   jsonb_build_object('code', 'sync_blocked', 'source', 'detection',
+                                      'op_id', $4::text))
+           ON CONFLICT (detection_key) DO NOTHING
+           RETURNING id`,
+          [
+            `sync-blocked:${id}`,
+            `Opération de synchronisation bloquée : ${outcome.error.code} — ${outcome.error.message}`,
+            'Vérifier le Connector (réseau, credentials routeur) puis action « Retry / Resync » (requeue uniquement).',
+            id,
+          ],
+        );
+        const newIncidentId = ins.rows[0]?.['id'];
+        if (newIncidentId != null) {
+          await q(
+            `INSERT INTO public.audit_logs (actor, action, entity, entity_id, after)
+             VALUES ($1, 'incident_created', 'incidents', $2, $3::jsonb)`,
+            ['system', String(newIncidentId), JSON.stringify({ type: 'MIKROTIK_SYNC_ERROR', severity: 'HIGH', opId: id })],
+          );
+        }
+      }
       return { state: mrow['state'] as 'RETRY' | 'BLOCKED', attempts: Number(mrow['attempts']) };
     });
   }
@@ -2085,35 +2235,511 @@ export class PgRepo implements BackendRepo {
     const search = options.search?.trim() ?? '';
     const state = options.state?.trim() ?? '';
     const res = await this.pool.query(
-      `SELECT id, type, severity, state,
+      `SELECT i.id, i.type, i.severity, i.state,
               jsonb_build_object(
-                'code', COALESCE(details->>'code', ''),
-                'message', COALESCE(details->>'message', ''),
-                'source', COALESCE(details->>'source', '')
+                'code', COALESCE(i.details->>'code', ''),
+                'message', COALESCE(i.details->>'message', ''),
+                'source', COALESCE(i.details->>'source', '')
               ) AS details,
-              opened_at, closed_at, created_at,
+              i.order_id, i.payment_id, i.ticket_id, i.connector_id, i.error,
+              i.recommended_action, i.attempts, i.last_attempt_at, i.acknowledged_at,
+              i.opened_at, i.closed_at, i.created_at,
               count(*) OVER()::int AS total
-       FROM public.incidents
-       WHERE ($1 = '' OR id::text ILIKE '%' || $1 || '%' OR type ILIKE '%' || $1 || '%'
-              OR severity ILIKE '%' || $1 || '%')
-         AND ($2 = '' OR state = $2)
-         AND ($3::timestamptz IS NULL OR opened_at >= $3)
-         AND ($4::timestamptz IS NULL OR opened_at < $4)
-       ORDER BY opened_at DESC
+       FROM public.incidents i
+       WHERE ($1 = '' OR i.id::text ILIKE '%' || $1 || '%' OR i.type ILIKE '%' || $1 || '%'
+              OR i.severity ILIKE '%' || $1 || '%' OR COALESCE(i.error, '') ILIKE '%' || $1 || '%')
+         AND ($2 = '' OR i.state = $2)
+         AND ($3::timestamptz IS NULL OR i.opened_at >= $3)
+         AND ($4::timestamptz IS NULL OR i.opened_at < $4)
+       ORDER BY i.opened_at DESC
        LIMIT $5 OFFSET $6`,
       [search, state, options.from ?? null, options.to ?? null, options.limit, options.offset],
     );
     return {
       items: res.rows.map((r) => ({
-        id: String(r['id']), type: String(r['type']), severity: String(r['severity']), state: String(r['state']),
+        ...PgRepo.incidentFromRow(r),
         details: (r['details'] ?? {}) as Record<string, unknown>,
-        openedAt: new Date(r['opened_at'] as string).toISOString(),
-        closedAt: r['closed_at'] == null ? null : new Date(r['closed_at'] as string).toISOString(),
-        createdAt: new Date(r['created_at'] as string).toISOString(),
       })),
       total: res.rows[0]?.['total'] == null ? 0 : Number(res.rows[0]['total']),
       limit: options.limit, offset: options.offset,
     };
+  }
+
+  // ─── IMP-33 — incidents & récupération (doc 09 §41-46, §101, §117) ───
+
+  private static readonly INCIDENT_SELECT = `
+       SELECT i.id, i.type, i.severity, i.state, i.detection_key,
+              i.order_id, i.payment_id, i.ticket_id, i.connector_id,
+              i.error, i.recommended_action,
+              i.opened_at, i.acknowledged_at, i.acknowledged_by,
+              i.last_attempt_at, i.attempts, i.reopened_count,
+              i.closed_at, i.close_reason, i.last_retry_key, i.created_at,
+              i.details
+       FROM public.incidents i`;
+
+  private static incidentFromRow(r: Record<string, unknown>): AdminIncidentSummary {
+    return {
+      id: String(r['id']),
+      type: String(r['type']) as IncidentType,
+      severity: String(r['severity']) as IncidentSeverity,
+      state: String(r['state']) as IncidentState,
+      details: (r['details'] ?? {}) as Record<string, unknown>,
+      orderId: r['order_id'] == null ? null : String(r['order_id']),
+      paymentId: r['payment_id'] == null ? null : String(r['payment_id']),
+      ticketId: r['ticket_id'] == null ? null : String(r['ticket_id']),
+      connectorId: r['connector_id'] == null ? null : String(r['connector_id']),
+      error: r['error'] == null ? null : String(r['error']),
+      recommendedAction: r['recommended_action'] == null ? null : String(r['recommended_action']),
+      attempts: Number(r['attempts'] ?? 0),
+      lastAttemptAt: r['last_attempt_at'] == null ? null : new Date(String(r['last_attempt_at'])).toISOString(),
+      acknowledgedAt: r['acknowledged_at'] == null ? null : new Date(String(r['acknowledged_at'])).toISOString(),
+      openedAt: new Date(String(r['opened_at'])).toISOString(),
+      closedAt: r['closed_at'] == null ? null : new Date(String(r['closed_at'])).toISOString(),
+      createdAt: new Date(String(r['created_at'])).toISOString(),
+    };
+  }
+
+  /** IMP-33 — création idempotente : un même `detectionKey` ne crée qu'un incident. */
+  async createIncident(input: CreateIncidentInput): Promise<AdminIncidentSummary> {
+    const actor = input.actor ?? 'system';
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      let row: Record<string, unknown> | null = null;
+      let created = false;
+      if (input.detectionKey) {
+        const ins = await client.query(
+          `INSERT INTO public.incidents
+             (type, severity, state, detection_key, order_id, payment_id, ticket_id,
+              connector_id, error, recommended_action, details)
+           VALUES ($1, $2, 'OPEN', $3, $4, $5, $6, $7, $8, $9,
+                   jsonb_build_object('code', 'auto', 'source', 'detection'))
+           ON CONFLICT (detection_key) DO NOTHING
+           RETURNING *`,
+          [
+            input.type, input.severity, input.detectionKey,
+            input.orderId ?? null, input.paymentId ?? null, input.ticketId ?? null,
+            input.connectorId ?? null, input.error ?? null, input.recommendedAction ?? null,
+          ],
+        );
+        if (ins.rows.length > 0) {
+          row = ins.rows[0];
+          created = true;
+        } else {
+          // Détection déjà vue : on renvoie l'incident existant (aucun audit).
+          const ex = await client.query(
+            `${PgRepo.INCIDENT_SELECT} WHERE i.detection_key = $1 FOR UPDATE`,
+            [input.detectionKey],
+          );
+          row = ex.rows[0] ?? null;
+        }
+      } else {
+        const ins = await client.query(
+          `INSERT INTO public.incidents
+             (type, severity, state, order_id, payment_id, ticket_id,
+              connector_id, error, recommended_action, details)
+           VALUES ($1, $2, 'OPEN', $3, $4, $5, $6, $7, $8,
+                   jsonb_build_object('code', 'manual', 'source', 'admin'))
+           RETURNING *`,
+          [
+            input.type, input.severity,
+            input.orderId ?? null, input.paymentId ?? null, input.ticketId ?? null,
+            input.connectorId ?? null, input.error ?? null, input.recommendedAction ?? null,
+          ],
+        );
+        row = ins.rows[0] ?? null;
+        created = true;
+      }
+      if (!row) throw new Error('incident : creation impossible');
+      if (created) {
+        await this.logAuditOn(client, {
+          actor, action: 'incident_created', entity: 'incidents', entityId: String(row['id']),
+          after: { type: input.type, severity: input.severity, orderId: input.orderId ?? null },
+        });
+      }
+      await client.query('COMMIT');
+      return PgRepo.incidentFromRow(row);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** IMP-33 — fiche complète (doc 09 §44) + historique des transitions auditées. */
+  async getAdminIncident(id: string): Promise<AdminIncidentDetail | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      const res = await client.query(`${PgRepo.INCIDENT_SELECT} WHERE i.id = $1`, [id]);
+      const r = res.rows[0];
+      if (!r) {
+        await client.query('COMMIT');
+        return null;
+      }
+      let orderPhone: string | null = null;
+      let orderOfferId: string | null = null;
+      let orderState: string | null = null;
+      if (r['order_id'] != null) {
+        const o = await client.query(
+          `SELECT c.phone, p.offer_id, o.state
+           FROM public.orders o
+           JOIN public.customers c ON c.id = o.customer_id
+           JOIN public.plans p ON p.id = o.plan_id
+           WHERE o.id = $1`,
+          [r['order_id']],
+        );
+        if (o.rows[0]) {
+          orderPhone = String(o.rows[0]['phone']);
+          orderOfferId = String(o.rows[0]['offer_id']);
+          orderState = String(o.rows[0]['state']);
+        }
+      }
+      let paymentState: string | null = null;
+      if (r['payment_id'] != null) {
+        const p = await client.query(`SELECT state FROM public.payments WHERE id = $1`, [r['payment_id']]);
+        paymentState = p.rows[0] ? String(p.rows[0]['state']) : null;
+      }
+      let ticketState: string | null = null;
+      if (r['ticket_id'] != null) {
+        const t = await client.query(`SELECT db_state AS state FROM public.tickets WHERE id = $1`, [r['ticket_id']]);
+        ticketState = t.rows[0] ? String(t.rows[0]['state']) : null;
+      }
+      const hist = await client.query(
+        `SELECT id::text, action, actor, at, after
+         FROM public.audit_logs
+         WHERE entity = 'incidents' AND entity_id = $1
+         ORDER BY at ASC, id::text ASC
+         LIMIT 200`,
+        [id],
+      );
+      await client.query('COMMIT');
+      return {
+        ...PgRepo.incidentFromRow(r),
+        orderPhone, orderOfferId, orderState,
+        paymentState, ticketState,
+        acknowledgedBy: r['acknowledged_by'] == null ? null : String(r['acknowledged_by']),
+        closeReason: r['close_reason'] == null ? null : String(r['close_reason']),
+        reopenedCount: Number(r['reopened_count'] ?? 0),
+        history: hist.rows.map((h: Record<string, unknown>) => ({
+          id: String(h['id']),
+          action: String(h['action']),
+          actor: String(h['actor']),
+          at: new Date(String(h['at'])).toISOString(),
+          after: (h['after'] as Record<string, unknown> | null) ?? null,
+        })),
+      };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Audit inséré sur le client courant de la transaction. */
+  private async logAuditOn(
+    client: PoolClient,
+    entry: {
+      actor: string;
+      action: string;
+      entity: string;
+      entityId?: string | null;
+      after?: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO public.audit_logs (actor, action, entity, entity_id, after)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [entry.actor, entry.action, entry.entity, entry.entityId ?? null, entry.after ? JSON.stringify(entry.after) : null],
+    );
+  }
+
+  /**
+   * IMP-33 — transition de cycle de vie (garde 0016) : l'UPDATE est borné aux
+   * états sources légaux ; zéro ligne touchée = transition interdite.
+   */
+  private async transitionIncident(
+    client: PoolClient,
+    id: string,
+    actor: string,
+    reason: string,
+    toState: IncidentState,
+    fromStates: IncidentState[],
+    opts: { setAck?: boolean; setClose?: boolean; bumpReopen?: boolean } = {},
+  ): Promise<Record<string, unknown> | null> {
+    const now = new Date().toISOString();
+    const res = await client.query(
+      `UPDATE public.incidents
+         SET state = $1,
+             acknowledged_at = CASE WHEN $2 THEN COALESCE(acknowledged_at, $3) ELSE acknowledged_at END,
+             acknowledged_by = CASE WHEN $2 THEN $4 ELSE acknowledged_by END,
+             closed_at = CASE WHEN $5 THEN $3 ELSE closed_at END,
+             close_reason = CASE WHEN $5 THEN $6 ELSE close_reason END,
+             reopened_count = CASE WHEN $7 THEN reopened_count + 1 ELSE reopened_count END
+       WHERE id = $8 AND state = ANY($9::text[])
+       RETURNING *`,
+      [toState, opts.setAck ?? false, now, actor, opts.setClose ?? false, reason, opts.bumpReopen ?? false, id, fromStates],
+    );
+    if (res.rows.length === 0) return null;
+    await this.logAuditOn(client, {
+      actor, action: 'incident_transition', entity: 'incidents', entityId: id,
+      after: { to: toState, reason },
+    });
+    return res.rows[0];
+  }
+
+  /** Idempotence : état cible déjà atteint → fiche retournée sans effet ni audit. */
+  private async idempotentOrTransition(
+    client: PoolClient,
+    id: string,
+    actor: string,
+    reason: string,
+    toState: IncidentState,
+    fromStates: IncidentState[],
+    opts: { setAck?: boolean; setClose?: boolean; bumpReopen?: boolean } = {},
+  ): Promise<Record<string, unknown> | null> {
+    const cur = await client.query(`SELECT * FROM public.incidents WHERE id = $1`, [id]);
+    if (cur.rows.length === 0) return null;
+    if (String(cur.rows[0]['state']) === toState) return cur.rows[0];
+    return this.transitionIncident(client, id, actor, reason, toState, fromStates, opts);
+  }
+
+  /** Transition partagée : transaction BEGIN → transition → COMMIT. */
+  private async runIncidentTransition(
+    id: string,
+    actor: string,
+    reason: string,
+    toState: IncidentState,
+    fromStates: IncidentState[],
+    opts: { setAck?: boolean; setClose?: boolean; bumpReopen?: boolean } = {},
+  ): Promise<AdminIncidentSummary | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const row = await this.idempotentOrTransition(client, id, actor, reason, toState, fromStates, opts);
+      await client.query('COMMIT');
+      return row ? PgRepo.incidentFromRow(row) : null;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async acknowledgeIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runIncidentTransition(id, actor, reason, 'ACKNOWLEDGED', ['OPEN', 'REOPENED'], { setAck: true });
+  }
+
+  async investigateIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runIncidentTransition(id, actor, reason, 'INVESTIGATING', ['OPEN', 'ACKNOWLEDGED', 'REOPENED']);
+  }
+
+  async resolveIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runIncidentTransition(
+      id, actor, reason, 'RESOLVED',
+      ['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'REOPENED'],
+      { setClose: true },
+    );
+  }
+
+  async reopenIncident(id: string, actor: string, reason: string): Promise<AdminIncidentSummary | null> {
+    return this.runIncidentTransition(
+      id, actor, reason, 'REOPENED',
+      ['RESOLVED', 'CLOSED'],
+      { bumpReopen: true },
+    );
+  }
+
+  /**
+   * IMP-33 — récupération sous Idempotency-Key (doc 09 §45-46) :
+   *  - TICKET_ALLOCATION_ERROR : re-joue l'allocation (`allocateAndDeliver`) —
+   *    succès → RESOLVED ; no-stock → l'incident reste ouvert (doc 09 §46) ;
+   *    JAMAIS de nouveau paiement (invariant 6).
+   *  - MIKROTIK_SYNC_ERROR : resync = opérations FAILED/BLOCKED → PENDING.
+   *    DB uniquement — JAMAIS d'écriture routeur ici (le worker de sync traite ensuite).
+   *  - rejeu même clé : aucun effet (`replayed`).
+   */
+  async retryIncident(
+    id: string,
+    actor: string,
+    reason: string,
+    idempotencyKey: string,
+  ): Promise<{ summary: AdminIncidentSummary; retry: IncidentRetryOutcome }> {
+    // PHASE 1 — verrou + garde idempotence + tentative, dans UNE transaction.
+    // Le verrou est libéré (COMMIT) AVANT l'action : le rejeu d'allocation peut
+    // ré-appeler createIncident sur la même detection_key (ON CONFLICT attend
+    // précisément la ligne verrouillée — dead-lock sinon, vérifié en base).
+    const phase1 = await this.withTx(async (q) => {
+      const res = await q(`SELECT * FROM public.incidents WHERE id = $1 FOR UPDATE`, [id]);
+      const row = res.rows[0];
+      if (!row) throw new Error('incident introuvable pour retry');
+      const state = String(row['state']) as IncidentState;
+      const type = String(row['type']) as IncidentType;
+      if (row['last_retry_key'] != null && String(row['last_retry_key']) === idempotencyKey) {
+        return { kind: 'replayed' as const, state, row };
+      }
+      if (state === 'RESOLVED' || state === 'CLOSED') {
+        return { kind: 'not-retryable-state' as const, state, row };
+      }
+      if (type !== 'TICKET_ALLOCATION_ERROR' && type !== 'MIKROTIK_SYNC_ERROR') {
+        return { kind: 'not-applicable' as const, state, row };
+      }
+      // Enregistre la tentative AVANT l'action ; le rejeu ne ré-incrémente pas.
+      await q(
+        `UPDATE public.incidents SET last_retry_key = $1, last_attempt_at = $2, attempts = attempts + 1 WHERE id = $3`,
+        [idempotencyKey, new Date().toISOString(), id],
+      );
+      return {
+        kind: 'proceed' as const, state, type,
+        orderId: row['order_id'] == null ? null : String(row['order_id']), row,
+      };
+    });
+    if (phase1.kind !== 'proceed') {
+      const summary = PgRepo.incidentFromRow(phase1.row);
+      const retry: IncidentRetryOutcome = phase1.kind === 'replayed'
+        ? { outcome: 'replayed', state: phase1.state }
+        : phase1.kind === 'not-retryable-state'
+          ? { outcome: 'not-retryable-state' }
+          : { outcome: 'not-applicable' };
+      return { summary, retry };
+    }
+
+    // PHASE 2 — l'action, SANS verrou incident.
+    let result: string;
+    let ticketId: string | null = null;
+    let requeuedOps = 0;
+    let newState: IncidentState | null = null;
+    if (phase1.type === 'MIKROTIK_SYNC_ERROR') {
+      // Resync : requeue DB uniquement (aucune écriture routeur ici — invariant IMP-28).
+      const q = await this.pool.query(
+        `UPDATE public.mikrotik_sync
+            SET state = 'PENDING', attempts = 0, next_retry_at = NULL,
+                locked_by = NULL
+          WHERE state IN ('FAILED', 'BLOCKED')
+          RETURNING id`,
+      );
+      requeuedOps = q.rowCount ?? 0;
+      result = 'requeued';
+      newState = 'RESOLVED';
+    } else if (!phase1.orderId) {
+      result = 'illegal-order';
+    } else {
+      // L'allocation re-joue la machine d'états complète (idempotente, invariants 2/7).
+      const outcome = await allocateAndDeliver(this, phase1.orderId, {
+        warn: (obj, msg) => console.warn('[incident-retry]', msg, obj),
+      });
+      if (outcome.status === 'delivered' || outcome.status === 'already-delivered') {
+        result = 'delivered';
+        ticketId = outcome.ticketId;
+        newState = 'RESOLVED';
+      } else if (outcome.status === 'no-stock') {
+        result = 'still-no-stock';
+      } else {
+        result = 'illegal-order';
+      }
+    }
+
+    // PHASE 3 — application du résultat + audit, dans une 2e transaction.
+    await this.withTx(async (q) => {
+      if (newState === 'RESOLVED') {
+        await q(
+          `UPDATE public.incidents
+              SET state = 'RESOLVED', closed_at = $1, close_reason = $2,
+                  ticket_id = COALESCE(ticket_id, $3)
+            WHERE id = $4 AND state IN ('OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'REOPENED')`,
+          [new Date().toISOString(), reason, ticketId, id],
+        );
+      }
+      await q(
+        `INSERT INTO public.audit_logs (actor, action, entity, entity_id, after)
+         VALUES ($1, 'incident_retry', 'incidents', $2, $3::jsonb)`,
+        [actor, id, JSON.stringify({ result, reason, ticketId, requeuedOps, to: newState ?? phase1.state, idempotencyKey })],
+      );
+    });
+    const after = await this.pool.query(`SELECT * FROM public.incidents WHERE id = $1`, [id]);
+    const finalSummary = PgRepo.incidentFromRow(after.rows[0]);
+    const retry: IncidentRetryOutcome = newState === 'RESOLVED'
+      ? (result === 'requeued'
+        ? { outcome: 'requeued', state: finalSummary.state }
+        : { outcome: 'delivered', state: finalSummary.state })
+      : result === 'still-no-stock'
+        ? { outcome: 'still-no-stock', state: finalSummary.state }
+        : { outcome: 'illegal-order', state: finalSummary.state };
+    return { summary: finalSummary, retry };
+  }
+
+  /**
+   * IMP-33 — détection worker (doc 09 §117-D), idempotente :
+   *  - Connector OFFLINE (absence de heartbeat > 5 min) → incident CONNECTOR_OFFLINE ;
+   *  - Connector revenu (ONLINE/UNKNOWN) → résout les CONNECTOR_OFFLINE ouverts.
+   */
+  async runConnectorOfflineDetection(actor: string, now: Date): Promise<{ opened: number; resolved: number }> {
+    const heartbeat = await this.getConnectorHeartbeat();
+    const connectorState = computeConnectorState(heartbeat, now);
+    const client = await this.pool.connect();
+    try {
+      if (connectorState === 'OFFLINE') {
+        await client.query('BEGIN');
+        const connectorId = heartbeat?.connectorId ?? null;
+        const ins = await client.query(
+          `INSERT INTO public.incidents
+             (type, severity, state, detection_key, connector_id, error, recommended_action, details)
+           VALUES ('CONNECTOR_OFFLINE', 'MEDIUM', 'OPEN', 'connector-offline', $1,
+                   'Absence de heartbeat du Connector (seuil 5 min)',
+                   'Vérifier le routeur et le service Connector (heartbeat toutes les 30 s)',
+                   jsonb_build_object('code', 'auto', 'source', 'detection'))
+           ON CONFLICT (detection_key) DO NOTHING
+           RETURNING id`,
+          [connectorId],
+        );
+        let opened = 0;
+        if (ins.rows.length > 0) {
+          opened = 1;
+          await this.logAuditOn(client, {
+            actor, action: 'incident_created', entity: 'incidents', entityId: String(ins.rows[0]['id']),
+            after: { type: 'CONNECTOR_OFFLINE', severity: 'MEDIUM', connectorId },
+          });
+        }
+        await client.query('COMMIT');
+        return { opened, resolved: 0 };
+      }
+      // Connector revenu : résolution automatique (acteur system), uniquement si ouvert.
+      if (connectorState === 'ONLINE' || connectorState === 'UNKNOWN') {
+        await client.query('BEGIN');
+        const open = await client.query(
+          `SELECT id, state FROM public.incidents
+            WHERE type = 'CONNECTOR_OFFLINE' AND state IN ('OPEN', 'ACKNOWLEDGED', 'REOPENED') AND detection_key = 'connector-offline'`,
+        );
+        let resolved = 0;
+        for (const r of open.rows) {
+          const updated = await client.query(
+            `UPDATE public.incidents
+                SET state = 'RESOLVED', closed_at = $1, close_reason = 'Connector de nouveau en ligne (détection)'
+              WHERE id = $2 AND state IN ('OPEN', 'ACKNOWLEDGED', 'REOPENED')
+              RETURNING *`,
+            [new Date().toISOString(), r['id']],
+          );
+          if (updated.rows.length > 0) {
+            resolved += 1;
+            await this.logAuditOn(client, {
+              actor, action: 'incident_transition', entity: 'incidents', entityId: String(r['id']),
+              after: { to: 'RESOLVED', reason: 'Connector de nouveau en ligne (détection)' },
+            });
+          }
+        }
+        await client.query('COMMIT');
+        return { opened: 0, resolved };
+      }
+      return { opened: 0, resolved: 0 };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async getAdminDashboardStats(since: Date): Promise<AdminDashboardDbStats> {
@@ -2155,7 +2781,8 @@ export class PgRepo implements BackendRepo {
          GROUP BY p.offer_id`,
       ),
       this.pool.query(
-        `SELECT count(*)::int AS n FROM public.incidents WHERE state IN ('OPEN', 'INVESTIGATING')`,
+        `SELECT count(*)::int AS n FROM public.incidents
+          WHERE state IN ('OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'REOPENED')`,
       ),
       this.pool.query(
         `SELECT count(*) FILTER (WHERE state IN ('PENDING', 'PROCESSING', 'RETRY'))::int AS pending,

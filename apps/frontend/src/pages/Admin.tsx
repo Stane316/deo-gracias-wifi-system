@@ -5,6 +5,7 @@ import {
   storage,
   type AdminAuditSummary,
   type AdminBatchSummary,
+  type AdminIncidentDetail,
   type AdminIncidentSummary,
   type AdminOrderDetail,
   type AdminOrderSummary,
@@ -85,7 +86,7 @@ const ADMIN_FILTERS: Partial<Record<AdminTab, { label: string; values: string[] 
   payments: { label: 'État paiement', values: ['CREATED', 'INITIATED', 'PENDING', 'CONFIRMED', 'FAILED', 'CANCELLED', 'EXPIRED', 'REFUNDED'] },
   tickets: { label: 'État ticket', values: ['AVAILABLE', 'RESERVED', 'RELEASED', 'SOLD', 'USED', 'EXPIRED'] },
   batches: { label: 'Source', values: ['backend', 'mikmon-manual'] },
-  incidents: { label: 'État incident', values: ['OPEN', 'INVESTIGATING', 'RESOLVED'] },
+  incidents: { label: 'État incident', values: ['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'RESOLVED', 'REOPENED', 'CLOSED'] },
 };
 
 const supabaseConfig = browserSupabaseConfig();
@@ -163,6 +164,12 @@ export function Admin() {
   const [importResult, setImportResult] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importPending, setImportPending] = useState(false);
+  // IMP-33 — fiche incident + actions de récupération (doc 09 §44-46) :
+  // raison obligatoire, Idempotency-Key sur le retry, anti-double-clic.
+  const [selectedIncident, setSelectedIncident] = useState<AdminIncidentDetail | null>(null);
+  const [incidentReason, setIncidentReason] = useState('');
+  const [incidentPending, setIncidentPending] = useState(false);
+  const [incidentMessage, setIncidentMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const usesSupabase = supabaseAuth !== null;
   const token = usesSupabase ? (supabaseSession?.access_token ?? null) : storage.adminToken();
@@ -445,6 +452,52 @@ export function Admin() {
       else setRevealResult({ ok: false, message: problemDetail(res.body) ?? `Échec de la révélation (HTTP ${res.status}).` });
     } finally {
       setRevealPending(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // IMP-33 — incidents & récupération (doc 09 §43-46)
+  // ---------------------------------------------------------------------------
+  const openIncident = async (id: string) => {
+    setSelectedIncident(null);
+    setIncidentReason('');
+    setIncidentMessage(null);
+    const res = await api<AdminIncidentDetail>(`/admin/incidents/${id}`, { token });
+    if (res.ok && res.body) setSelectedIncident(res.body);
+    else setIncidentMessage({ ok: false, text: problemDetail(res.body) ?? `Incident introuvable (HTTP ${res.status}).` });
+  };
+
+  const closeIncidentDetail = () => {
+    setSelectedIncident(null);
+    setIncidentReason('');
+    setIncidentMessage(null);
+  };
+
+  const submitIncidentAction = async (action: 'acknowledge' | 'investigate' | 'retry' | 'resolve' | 'reopen') => {
+    if (!selectedIncident || incidentPending || incidentReason.trim().length < 20) return;
+    setIncidentPending(true);
+    setIncidentMessage(null);
+    try {
+      const headers: Record<string, string> = {};
+      if (action === 'retry') headers['Idempotency-Key'] = `incident-retry-${globalThis.crypto.randomUUID()}`;
+      const res = await api<Record<string, unknown>>(
+        `/admin/incidents/${selectedIncident.id}/${action}`,
+        { method: 'POST', token, headers, body: { reason: incidentReason.trim(), idempotency_key: headers['Idempotency-Key'] ?? '' } },
+      );
+      if (res.ok && res.body) {
+        const state = typeof res.body.state === 'string' ? res.body.state : selectedIncident.state;
+        const retry = res.body.retry as { outcome?: string } | undefined;
+        const retryText = retry?.outcome ? ` — récupération : ${retry.outcome}` : '';
+        setIncidentMessage({ ok: true, text: `Action « ${action} » appliquée. Nouvel état : ${state}.${retryText}` });
+        const refreshed = await api<AdminIncidentDetail>(`/admin/incidents/${selectedIncident.id}`, { token });
+        if (refreshed.ok && refreshed.body) setSelectedIncident(refreshed.body);
+        const listRes = await api<AdminPage<AdminIncidentSummary>>(listUrl('/admin/incidents'), { token });
+        if (listRes.ok && listRes.body) setIncidents(listRes.body);
+      } else {
+        setIncidentMessage({ ok: false, text: problemDetail(res.body) ?? `Échec de l'action (HTTP ${res.status}).` });
+      }
+    } finally {
+      setIncidentPending(false);
     }
   };
 
@@ -802,10 +855,70 @@ export function Admin() {
         {batchExport ? <section className="card"><h2>Export ponctuel du lot</h2><p className="hint">{batchExport.export_warning}</p><details open><summary>{batchExport.code_export.length} codes à archiver</summary><pre>{batchExport.code_export.map((line) => `${line.router_name}\t${line.code}\t${line.comment}`).join('\n')}</pre></details></section> : null}
       </div> : null}
 
-      {tab === 'incidents' ? <section className="card"><h2>Incidents ({incidents?.total ?? 0})</h2><AdminTable>
-        <thead><tr><th>Type</th><th>Sévérité</th><th>État</th><th>Détails sûrs</th><th>Ouvert le</th><th>Fermé le</th></tr></thead>
-        <tbody>{pageItems(incidents).map((i) => <tr key={i.id}><td>{i.type}</td><td>{stateBadge(i.severity)}</td><td>{stateBadge(i.state)}</td><td><code>{JSON.stringify(i.details)}</code></td><td>{formatDateTime(i.opened_at)}</td><td>{i.closed_at ? formatDateTime(i.closed_at) : '—'}</td></tr>)}</tbody>
-      </AdminTable>{incidents && incidents.items.length === 0 ? <p className="hint">Aucun incident trouvé.</p> : null}<AdminPager page={incidents} offset={pageOffset} onOffsetChange={setPageOffset} /></section> : null}
+      {tab === 'incidents' ? <div>
+        <section className="card"><h2>Incidents ({incidents?.total ?? 0})</h2><AdminTable>
+          <thead><tr><th>Type</th><th>Gravité</th><th>État</th><th>Commande</th><th>Erreur technique</th><th>Tentatives</th><th>Ouvert le</th><th>Fermé le</th><th>Fiche</th></tr></thead>
+          <tbody>{pageItems(incidents).map((i) => (
+            <tr key={i.id}>
+              <td><code>{i.type}</code></td>
+              <td>{stateBadge(i.severity)}</td>
+              <td>{stateBadge(i.state)}</td>
+              <td>{i.order_id ? <code>{i.order_id.slice(0, 8)}…</code> : '—'}</td>
+              <td>{i.error ? <span title={i.error}>{i.error.length > 60 ? `${i.error.slice(0, 60)}…` : i.error}</span> : '—'}</td>
+              <td>{i.attempts}</td>
+              <td>{formatDateTime(i.opened_at)}</td>
+              <td>{i.closed_at ? formatDateTime(i.closed_at) : '—'}</td>
+              <td><button className="btn small ghost" onClick={() => void openIncident(i.id)}>Ouvrir</button></td>
+            </tr>
+          ))}</tbody>
+        </AdminTable>{incidents && incidents.items.length === 0 ? <p className="hint">Aucun incident trouvé.</p> : null}<AdminPager page={incidents} offset={pageOffset} onOffsetChange={setPageOffset} /></section>
+
+        {selectedIncident ? (
+          <section className="card incident-detail">
+            <div className="incident-detail-head">
+              <h2>Incident <code>{selectedIncident.id.slice(0, 8)}…</code></h2>
+              <button className="btn small ghost" onClick={closeIncidentDetail}>Fermer</button>
+            </div>
+            <p className="incident-badges">{stateBadge(selectedIncident.severity)} {stateBadge(selectedIncident.state)} <code>{selectedIncident.type}</code></p>
+            <dl className="incident-fiche">
+              <div><dt>Commande</dt><dd>{selectedIncident.order ? <>{selectedIncident.order.phone} · {selectedIncident.order.offer_id} · {stateBadge(selectedIncident.order.state)}</> : '—'}</dd></div>
+              <div><dt>Paiement</dt><dd>{selectedIncident.payment ? <><code>{selectedIncident.payment.id.slice(0, 8)}…</code> · {stateBadge(selectedIncident.payment.state)}</> : '—'}</dd></div>
+              <div><dt>Ticket</dt><dd>{selectedIncident.ticket ? <><code>{selectedIncident.ticket.id.slice(0, 8)}…</code> · {stateBadge(selectedIncident.ticket.state)}</> : '—'}</dd></div>
+              <div><dt>Connector</dt><dd>{selectedIncident.connector_id ?? '—'}</dd></div>
+              <div><dt>Erreur technique</dt><dd><code>{selectedIncident.error ?? '—'}</code></dd></div>
+              <div><dt>Action recommandée</dt><dd>{selectedIncident.recommended_action ?? '—'}</dd></div>
+              <div><dt>Ouvert le</dt><dd>{formatDateTime(selectedIncident.opened_at)}</dd></div>
+              <div><dt>Reconnu le</dt><dd>{selectedIncident.acknowledged_at ? `${formatDateTime(selectedIncident.acknowledged_at)} (par ${selectedIncident.acknowledged_by ?? '—'})` : '—'}</dd></div>
+              <div><dt>Fermé le</dt><dd>{selectedIncident.closed_at ? `${formatDateTime(selectedIncident.closed_at)} — ${selectedIncident.close_reason ?? ''}` : '—'}</dd></div>
+              <div><dt>Tentatives</dt><dd>{selectedIncident.attempts}{selectedIncident.last_attempt_at ? ` (dernière le ${formatDateTime(selectedIncident.last_attempt_at)})` : ''}{selectedIncident.reopened_count > 0 ? ` · réouvert ${selectedIncident.reopened_count}×` : ''}</dd></div>
+            </dl>
+            <h3>Historique</h3>
+            <ol className="incident-history">
+              {selectedIncident.history.length === 0 ? <li className="hint">Aucune transition auditée.</li> : null}
+              {selectedIncident.history.map((h, index) => (
+                <li key={`${h.action}-${index}`}>
+                  <code>{h.action}</code> par {h.actor} — {formatDateTime(h.at)}
+                  {h.after && typeof h.after['to'] === 'string' ? <span> → {String(h.after['to'])}</span> : null}
+                </li>
+              ))}
+            </ol>
+            <h3>Actions</h3>
+            <p className="hint">Raison obligatoire (20 à 1000 caractères), auditée. Aucune action ne contourne les invariants : jamais de nouveau paiement, jamais d’écriture routeur directe (le resync est un requeue en base).</p>
+            <div className="incident-actions">
+              {selectedIncident.state === 'OPEN' || selectedIncident.state === 'REOPENED' ? <button className="btn small" disabled={incidentPending || incidentReason.trim().length < 20} onClick={() => void submitIncidentAction('acknowledge')}>Reconnaître</button> : null}
+              {(selectedIncident.state === 'OPEN' || selectedIncident.state === 'ACKNOWLEDGED' || selectedIncident.state === 'REOPENED') && (selectedIncident.type === 'TICKET_ALLOCATION_ERROR' || selectedIncident.type === 'MIKROTIK_SYNC_ERROR')
+                ? <button className="btn small" disabled={incidentPending || incidentReason.trim().length < 20} onClick={() => void submitIncidentAction('retry')} title={selectedIncident.type === 'MIKROTIK_SYNC_ERROR' ? 'Resync : les opérations échouées repassent en attente (base uniquement)' : 'Re-joue l’allocation du ticket de la commande'}>Retry {selectedIncident.type === 'MIKROTIK_SYNC_ERROR' ? 'resync' : 'allocation'}</button> : null}
+              {selectedIncident.state === 'OPEN' || selectedIncident.state === 'ACKNOWLEDGED' || selectedIncident.state === 'REOPENED' ? <button className="btn small" disabled={incidentPending || incidentReason.trim().length < 20} onClick={() => void submitIncidentAction('investigate')}>Investiguer</button> : null}
+              {selectedIncident.state !== 'RESOLVED' && selectedIncident.state !== 'CLOSED' ? <button className="btn small" disabled={incidentPending || incidentReason.trim().length < 20} onClick={() => void submitIncidentAction('resolve')}>Marquer résolu</button> : null}
+              {selectedIncident.state === 'RESOLVED' || selectedIncident.state === 'CLOSED' ? <button className="btn small" disabled={incidentPending || incidentReason.trim().length < 20} onClick={() => void submitIncidentAction('reopen')}>Rouvrir</button> : null}
+            </div>
+            <label className="admin-filter incident-reason"><span>Raison de l’action</span>
+              <textarea value={incidentReason} onChange={(e) => setIncidentReason(e.target.value)} rows={3} placeholder="Raison détaillée (20 caractères minimum) — sera auditée" aria-label="Raison de l’action incident" />
+            </label>
+            {incidentMessage ? <p className={incidentMessage.ok ? 'hint ok' : 'hint error'} role="status">{incidentMessage.text}</p> : null}
+          </section>
+        ) : null}
+      </div> : null}
 
       {tab === 'audit' ? <section className="card"><h2>Journal d’audit ({audits?.total ?? 0})</h2><AdminTable>
         <thead><tr><th>Date</th><th>Acteur</th><th>Action</th><th>Entité</th><th>Identifiant</th></tr></thead>
