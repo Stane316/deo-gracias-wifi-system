@@ -39,4 +39,30 @@ L’opérateur ne disposait pas d’une chronologie vérifiable pour distinguer 
 
 - `npm test -- --run` : OK dans le workspace ; 162 tests backend, 50 tests PostgreSQL ignorés faute de base, tests Connector/frontend/shared passés.
 - `npm run typecheck && npm run build` : OK.
-- PostgreSQL réel, smoke SQL, RLS et migration `0014` : non exécutés dans cette session ; ils restent à exécuter sur une base fournie et ne sont pas présentés comme validés.
+
+## AUDIT POST-PUSH ET CORRECTIONS CI #56 (commit `3883533`)
+
+Le push du 26/09 a déclenché la CI GitHub #56 : **3 échecs**, tous reproduits puis corrigés localement sur PostgreSQL 17.
+
+1. **RLS (job Migrations PG 16/17, exit 3)** — `tools/db-rls-tests.sql` : `permission denied for table admin_correction_requests`.
+   Cause : `0007` n'accorde des GRANT qu'aux tables existantes à ce moment-là ; `0014` ne contenait aucun GRANT explicite (`0013` en avait un).
+   Correction : `GRANT SELECT TO anon, authenticated` (aucune policy RLS → 0 ligne) et `GRANT SELECT, INSERT, UPDATE, DELETE TO service_role` dans `0014`.
+2. **Tests backend (erreur SQL 42P18)** — `repo.pg.test.ts` IMP-31 : `could not determine data type of parameter $3` dans `jsonb_build_object('offer_id', $3, ...)`.
+   Correction : cast explicite `$3::text`.
+3. **Gitleaks** — 4 faux positifs `generic-api-key` sur les clés d'idempotence du test admin (`Idempotency-Key`) et 1 sur l'alphabet de code client de `ticketgen.ts`.
+   Correction : directives `// gitleaks:allow` sur les lignes concernées (valeurs de test, aucun secret réel).
+
+Validation locale complète (PostgreSQL 17 installé dans le workspace, base jetable) :
+
+- `bash tools/db-migrate.sh up / smoke / down / up / smoke / rls / states` : **OK** (14 migrations, 17 tables, 13 triggers, matrice RLS, gardes d'états).
+- `npm test -w @dg/backend` sur base neuve : **212/212**, dont les **50 tests PostgreSQL réellement exécutés** (plus d'ignore).
+- `npm test` (4 workspaces) : backend 212, connector 46, frontend 43, shared 45 — OK.
+- `npm run typecheck`, `npm run build` : OK.
+- `npm run test:e2e -w @dg/frontend` : **12/12** scénarios Playwright.
+- `gitleaks detect` sur l'arbre : **0 leak** dans le code (le `.env` local gitignored n'est pas concerné par la CI).
+
+Contenu local en attente de synchronisation (hors périmètre du correctif, validé en local) :
+
+- `apps/frontend/src/checkout/machine.test.ts` — bloc de tests « IMP-27 — reprise et états backend » (58 lignes) absent de `main`.
+- `apps/backend/src/server.ts` — message « 14 migrations » (était « 13 »).
+- `docs/field-guides/GUIDE-08/09/10` — compteurs 14 migrations / 17 tables.

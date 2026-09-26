@@ -406,7 +406,7 @@ describe('IMP-31 — détail commande et correction exceptionnelle', () => {
     const created = await repo.createOrder({
       customerId, planId: 'plan-0',
       planSnapshot: { offer_id: '5-HEURES', price_snapshot: 100 },
-      idempotencyKey: 'imp31-correction-order-1',
+      idempotencyKey: 'imp31-correction-order-1', // gitleaks:allow
     });
     const path = `/admin/orders/${created.order.id}/correction-requests`;
     const denied = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-admin', 'idempotency-key': 'imp31-denied-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Motif suffisamment détaillé pour le test.' } });
@@ -415,17 +415,17 @@ describe('IMP-31 — détail commande et correction exceptionnelle', () => {
     const missing = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'trop court' } });
     expect(missing.statusCode).toBe(400);
 
-    const first = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Paiement confirmé côté fournisseur, vérification requise.' } });
+    const first = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Paiement confirmé côté fournisseur, vérification requise.' } }); // gitleaks:allow
     expect(first.statusCode).toBe(201);
     const firstBody = first.json() as { id: string; state: string };
     expect(firstBody.state).toBe('OPEN');
-    const replay = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Autre texte ignoré au rejeu idempotent.' } });
+    const replay = await app.inject({ method: 'POST', url: path, headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-1' }, payload: { requested_action: 'REVIEW_PAYMENT', reason: 'Autre texte ignoré au rejeu idempotent.' } }); // gitleaks:allow
     expect(replay.statusCode).toBe(200);
     expect(replay.json()).toMatchObject({ id: firstBody.id, state: 'OPEN' });
     expect((await repo.getOrderById(created.order.id))?.state).toBe('CREATED');
     expect(repo.audits.filter((audit) => audit.action === 'admin_correction_requested')).toHaveLength(1);
 
-    const unknown = await app.inject({ method: 'POST', url: '/admin/orders/00000000-0000-4000-8000-000000000001/correction-requests', headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-2' }, payload: { requested_action: 'REVIEW_DELIVERY', reason: 'Commande absente à vérifier par la supervision.' } });
+    const unknown = await app.inject({ method: 'POST', url: '/admin/orders/00000000-0000-4000-8000-000000000001/correction-requests', headers: { authorization: 'Bearer tok-super', 'idempotency-key': 'imp31-correction-2' }, payload: { requested_action: 'REVIEW_DELIVERY', reason: 'Commande absente à vérifier par la supervision.' } }); // gitleaks:allow
     expect(unknown.statusCode).toBe(404);
     await app.close();
   });

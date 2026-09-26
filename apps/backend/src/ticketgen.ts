@@ -25,7 +25,7 @@ export const ROUTER_NAME_RANDOM_LENGTH = 6;
  * Alphabet du code client : SANS caractères ambigus (0/o, 1/l/i) — affiché sur
  * voucher, recopié à la main sur un téléphone (contrat §3.4, format affiché IMP-19).
  */
-export const CLIENT_CODE_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+export const CLIENT_CODE_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // gitleaks:allow
 export const CLIENT_CODE_LENGTH = 8;
 
 /** Limite contrat §3.5 : ~200 créations/lot sans observation RAM (128 Mo). */

@@ -2044,7 +2044,7 @@ describeDb('IMP-31 — projections PostgreSQL du Dashboard Admin', () => {
     const offerId = String(plan.rows[0]?.['offer_id']);
     const order = await pool31.query(
       `INSERT INTO public.orders (customer_id, plan_id, plan_snapshot, idempotency_key)
-       VALUES ($1, $2, jsonb_build_object('offer_id', $3, 'price_snapshot', 100), $4) RETURNING id`,
+       VALUES ($1, $2, jsonb_build_object('offer_id', $3::text, 'price_snapshot', 100), $4) RETURNING id`,
       [customerId, planId, offerId, `itest-imp31-pg-${suffix}`],
     );
     const orderId = String(order.rows[0]?.['id']);

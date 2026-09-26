@@ -27,8 +27,13 @@ CREATE TRIGGER admin_correction_requests_updated_at
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 ALTER TABLE public.admin_correction_requests ENABLE ROW LEVEL SECURITY;
--- Les demandes sont lisibles et créées exclusivement par le backend service_role.
--- Aucune policy anon/authenticated n'est volontairement définie.
+-- Les demandes sont créées exclusivement par le backend (service_role).
+-- Aucune policy anon/authenticated n'est volontairement définie : le SELECT est
+-- accordé mais retourne 0 ligne (matrice RLS vérifiée par tools/db-rls-tests.sql).
+-- GRANT explicites : 0007 ne couvre que les tables existantes à ce moment-là
+-- (même pattern que 0013 pour connector_heartbeats).
+GRANT SELECT ON public.admin_correction_requests TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.admin_correction_requests TO service_role;
 
 COMMENT ON TABLE public.admin_correction_requests IS
   'IMP-31 : demande exceptionnelle, reason obligatoire, idempotente et auditée ; aucune mutation de paiement.';

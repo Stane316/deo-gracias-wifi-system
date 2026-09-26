@@ -15,25 +15,26 @@
 ```text
 COMPLETED:
 IMP-01, IMP-02, IMP-03, IMP-06 → IMP-12, IMP-16 → IMP-22, IMP-27
+IMP-29, IMP-30 — code-first sur GitHub (routes admin, filtres, overview, santé Connector)
 
 PREVIOUS:
 IMP-28 — FROZEN : code-first complet, dépendances externes différées, Walled Garden no-write
 
 CURRENT:
-IMP-30 — code-first : overview, activité récente, inventaire/alertes et santé Connector/synchronisation
-
-PREVIOUS:
-IMP-29 — code-first : routes admin canoniques, route guard, shell/sidebar, filtres serveur et E2E contrôlé
+IMP-31 — slice code poussée (commit 3883533) ; CI #56 rouge (GRANT RLS 0014, 42P18 PG test, gitleaks) ;
+corrections faites et validées localement sur PostgreSQL 17 (chaîne complète + 212/212 + e2e 12/12) ;
+en attente du push du correctif et de la CI GitHub verte
 
 NEXT:
-IMP-31 — uniquement après validation du commit IMP-30 et CI GitHub verte
+IMP-32 — tickets, lots et import — uniquement après CI GitHub verte du correctif IMP-31
 
 REMAINING:
-IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-29 → IMP-40
+IMP-04, IMP-05, IMP-13 → IMP-15, IMP-23 → IMP-24, validation externe IMP-28, IMP-32 → IMP-40
 ```
 
 # JOURNAL DE PILOTAGE — 25/09/2026
 
+- **IMP-31 (26/09) — slice poussée, CI #56 rouge, corrections prêtes** : commit GitHub `3883533` validé par audit direct (fichiers identiques au workspace, à l'exception de contenus locaux en attente). Trois échecs CI reproduits et corrigés localement sur PostgreSQL 17 : GRANT manquant dans `0014` (RLS exit 3), paramètre SQL non typé dans le test PG (`42P18`), 5 faux positifs gitleaks (`// gitleaks:allow`). Validation locale : chaîne `up/smoke/down/up/smoke/rls/states` OK, 212/212 backend dont 50 tests PostgreSQL exécutés, typecheck/build OK, e2e 12/12, gitleaks 0 leak. En attente : push du correctif par Stane puis CI verte pour ouvrir IMP-32.
 - **IMP-27 — DONE** : stabilisation code/tests confirmée ; commit GitHub `2b90f0e`, CI verte.
 - **IMP-28 — FROZEN / PARTIAL / CODE COMPLETE / EXTERNAL DEPENDENCIES DEFERRED** : tests offline, backend indisponible, `503`, inventaire des domaines et protocole no-write documentés ; commit GitHub `7d6bd0df05313f828bdc0b455a43e851c536a45b`, quatre checks CI verts.
 - **Décision d'intégration** : Walled Garden de production vide ; aucune commande MikroTik, aucun portail captif physique et aucun paiement FedaPay réel exécutés.
